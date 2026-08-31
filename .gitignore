@@ -1,0 +1,28 @@
+# local env & credentials
+.env
+*.pem
+*.key
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+uv.lock
+
+# agentcore local state (contains account-specific ARNs)
+.bedrock_agentcore.yaml
+.bedrock_agentcore/
+Dockerfile
+.dockerignore
+
+# cdk
+infra/cdk.out/
+infra/.venv/
+
+
+# os / editor
+.DS_Store
+nohup.out

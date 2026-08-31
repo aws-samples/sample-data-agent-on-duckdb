@@ -1,0 +1,8 @@
+{
+  "app": "python3 app.py",
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true
+  }
+}
