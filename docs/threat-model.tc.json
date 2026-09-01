@@ -1,0 +1,939 @@
+{
+  "schema": 1,
+  "applicationInfo": {
+    "name": "Threat Model Export",
+    "description": "Open-source sample (aws-samples, MIT-0) demonstrating a data-analyst agent with an in-process DuckDB engine on Amazon Bedrock AgentCore, including an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Authentication is delegated to the AgentCore managed inbound JWT authorizer (validates before agent code runs) or SigV4 IAM for calling applications - the sample implements no authentication itself."
+  },
+  "architecture": {
+    "description": ""
+  },
+  "dataflow": {
+    "description": ""
+  },
+  "assumptions": [],
+  "mitigations": [
+    {
+      "id": "M001",
+      "numericId": 1,
+      "status": "mitigationResolved",
+      "content": "Governance rewrite operates on the parsed AST, not string matching: every reference to a governed logical table - via raw view, s3t.*, glue.* or dl.* alias - is replaced by a guarded subquery (SELECT * EXCLUDE(denied) FROM ref WHERE row_filter); CTE/CTAS-local names are skipped; alias semantics preserved in joins. Raw table functions (read_parquet/read_csv/read_json) are rejected outright for restricted principals.",
+      "displayOrder": 1,
+      "metadata": []
+    },
+    {
+      "id": "M002",
+      "numericId": 2,
+      "status": "mitigationResolved",
+      "content": "Fail-closed on parse failure: SQL that sqlglot cannot parse is REJECTED for restricted principals (ValueError), never passed through. Unrestricted principals (allow_raw_paths + no governed tables) bypass rewrite by explicit policy only.",
+      "displayOrder": 2,
+      "metadata": []
+    },
+    {
+      "id": "M003",
+      "numericId": 3,
+      "status": "mitigationResolved",
+      "content": "Read-only statement gate ahead of governance: allowlist of read statements + CREATE [OR REPLACE] TEMP[ORARY] TABLE/VIEW on normalized SQL; rejects INSERT/UPDATE/DELETE/non-temp CREATE/ATTACH/COPY TO. DuckDB catalog legs attach READ_ONLY; engine is in-memory and dies with the session; execution role has no write permissions on data buckets - three independent layers against persistence/exfiltration.",
+      "displayOrder": 3,
+      "metadata": []
+    },
+    {
+      "id": "M004",
+      "numericId": 4,
+      "status": "mitigationResolved",
+      "content": "Schema-aware CLS fails closed: EXCLUDE lists are intersected with a DESCRIBE-probed schema per reference; if the probe FAILS the full denylist is kept (worst case the engine rejects the query). The probe cache is keyed by reference SQL and lives in one session = one principal = one microVM, so cross-principal poisoning is structurally impossible in the intended deployment.",
+      "displayOrder": 4,
+      "metadata": []
+    },
+    {
+      "id": "M005",
+      "numericId": 5,
+      "status": "mitigationResolved",
+      "content": "AuthN is delegated to the AgentCore managed inbound JWT authorizer: signature verification happens platform-side BEFORE agent code runs; the sample's jwt.decode(verify_signature=False) only extracts claims from an already-verified token. README/design doc state this and the identity trust order explicitly.",
+      "displayOrder": 5,
+      "metadata": []
+    },
+    {
+      "id": "M006",
+      "numericId": 6,
+      "status": "mitigationIdentified",
+      "content": "DOCUMENTATION GAP TO CLOSE: add an explicit deployment warning that (a) without the inbound JWT authorizer configured, JWT claims are NOT verified and the SigV4 identity-assertion paths trust the caller completely; (b) production deployments must treat calling-application identity assertion as a privileged operation (restrict runtime invoke permission to trusted infrastructure only); (c) the module-level active-role slot is valid ONLY under one-session-one-principal (AgentCore microVM) and must not be lifted into multi-principal services.",
+      "displayOrder": 6,
+      "metadata": []
+    },
+    {
+      "id": "M007",
+      "numericId": 7,
+      "status": "mitigationResolved",
+      "content": "Session blast-radius isolation: one session = one microVM = one DuckDB; a pathological query OOMs only its own session. Resource envelope (DUCKDB_MEMORY_LIMIT + spill directory) turns memory exhaustion into slower-not-dead. Bedrock/S3 cost exposure bounded by the customer's own account throttles.",
+      "displayOrder": 7,
+      "metadata": []
+    },
+    {
+      "id": "M008",
+      "numericId": 8,
+      "status": "mitigationResolved",
+      "content": "run_sql serialization under _conn_lock: execute+fetch pairs are atomic on the shared connection; the governance schema probe takes the same lock. Regression test covers parallel tool calls not stealing each other's results.",
+      "displayOrder": 8,
+      "metadata": []
+    },
+    {
+      "id": "M009",
+      "numericId": 9,
+      "status": "mitigationIdentified",
+      "content": "Policy-as-configuration with fail-safe default: GOVERNANCE_POLICIES is JSON env config; unknown principals resolve to the configured default role. RECOMMENDED HARDENING (documentation): ship the sample's default-role example as a restricted policy and advise operators to validate policy JSON at startup (reject unknown keys / empty-tables-with-allow_raw_paths combinations).",
+      "displayOrder": 9,
+      "metadata": []
+    },
+    {
+      "id": "M010",
+      "numericId": 10,
+      "status": "mitigationResolved",
+      "content": "Observability of governance decisions: every run_sql result carries a governed: true|false flag and engine metrics; runtime logs to CloudWatch. Gives operators an audit signal for whether the rewrite applied.",
+      "displayOrder": 10,
+      "metadata": []
+    },
+    {
+      "id": "M011",
+      "numericId": 11,
+      "status": "mitigationResolved",
+      "content": "Residual acceptance for inference/side channels: aggregate-inference and timing side channels against denied columns are NOT fully closed by any query-rewrite RLS/CLS implementation (industry-wide limitation, same class as BI-tool row-level security). Sample carries a not-for-production disclaimer; production guidance is physical separation (per-tenant tables/views) when denied data is high-sensitivity.",
+      "displayOrder": 11,
+      "metadata": []
+    }
+  ],
+  "assumptionLinks": [],
+  "mitigationLinks": [
+    {
+      "linkedId": "T001",
+      "mitigationId": "M001"
+    },
+    {
+      "linkedId": "T001",
+      "mitigationId": "M002"
+    },
+    {
+      "linkedId": "T001",
+      "mitigationId": "M003"
+    },
+    {
+      "linkedId": "T002",
+      "mitigationId": "M002"
+    },
+    {
+      "linkedId": "T003",
+      "mitigationId": "M005"
+    },
+    {
+      "linkedId": "T003",
+      "mitigationId": "M006"
+    },
+    {
+      "linkedId": "T004",
+      "mitigationId": "M005"
+    },
+    {
+      "linkedId": "T004",
+      "mitigationId": "M006"
+    },
+    {
+      "linkedId": "T005",
+      "mitigationId": "M011"
+    },
+    {
+      "linkedId": "T005",
+      "mitigationId": "M001"
+    },
+    {
+      "linkedId": "T006",
+      "mitigationId": "M007"
+    },
+    {
+      "linkedId": "T007",
+      "mitigationId": "M009"
+    },
+    {
+      "linkedId": "T007",
+      "mitigationId": "M006"
+    },
+    {
+      "linkedId": "T008",
+      "mitigationId": "M004"
+    },
+    {
+      "linkedId": "T009",
+      "mitigationId": "M003"
+    },
+    {
+      "linkedId": "T010",
+      "mitigationId": "M008"
+    },
+    {
+      "linkedId": "T011",
+      "mitigationId": "M006"
+    },
+    {
+      "linkedId": "T001",
+      "mitigationId": "M010"
+    },
+    {
+      "linkedId": "T007",
+      "mitigationId": "M010"
+    }
+  ],
+  "threats": [
+    {
+      "id": "T001",
+      "numericId": 1,
+      "threatSource": "Restricted end user (authenticated, low privilege)",
+      "prerequisites": "Valid JWT with restricted tenant:role claims; ability to ask arbitrary natural-language questions",
+      "threatAction": "Crafts questions that steer the LLM into SQL designed to bypass the RLS/CLS rewrite: raw table functions (read_parquet), catalog-qualified alternate paths (s3t/glue/dl) to the same table, CTE/alias",
+      "threatImpact": "Cross-tenant row visibility or denied-column disclosure - defeat of the authorization layer",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Analytical dataset on S3"
+      ],
+      "statement": "A Restricted end user (authenticated, low privilege) Valid JWT with restricted tenant:role claims; ability to ask arbitrary natural-language questions can Crafts questions that steer the LLM into SQL designed to bypass the RLS/CLS rewrite: raw table functions (read_parquet), catalog-qualified alternate paths (s3t/glue/dl) to the same table, CTE/alias, which leads to Cross-tenant row visibility or denied-column disclosure - defeat of the authorization layer",
+      "displayOrder": 1,
+      "status": "threatResolved",
+      "tags": [
+        "prompt-injection",
+        "authz-bypass",
+        "core-threat"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T002",
+      "numericId": 2,
+      "threatSource": "Restricted end user via LLM prompt injection",
+      "prerequisites": "Same as above; knowledge that an embedded engine executes generated SQL",
+      "threatAction": "Steers the LLM into SQL that is unparseable by sqlglot but valid DuckDB (dialect divergence), hoping the rewrite layer passes it through unmodified",
+      "threatImpact": "Ungoverned statement reaches the engine - RLS/CLS bypass",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Analytical dataset on S3"
+      ],
+      "statement": "A Restricted end user via LLM prompt injection Same as above; knowledge that an embedded engine executes generated SQL can Steers the LLM into SQL that is unparseable by sqlglot but valid DuckDB (dialect divergence), hoping the rewrite layer passes it through unmodified, which leads to Ungoverned statement reaches the engine - RLS/CLS bypass",
+      "displayOrder": 2,
+      "status": "threatResolved",
+      "tags": [
+        "parser-divergence",
+        "fail-closed"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T003",
+      "numericId": 3,
+      "threatSource": "Malicious or compromised calling application (SigV4 path)",
+      "prerequisites": "IAM permission to invoke the runtime; governance relies on caller-asserted identity when no JWT is present",
+      "threatAction": "Asserts an arbitrary tenant:role in the runtime user-id header or payload identity object (e.g. ops:admin) to obtain an unrestricted policy",
+      "threatImpact": "Full dataset visibility for any principal the caller invents - authorization is only as strong as the weakest accepted identity source",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Identity claims (tenant, role)"
+      ],
+      "statement": "A Malicious or compromised calling application (SigV4 path) IAM permission to invoke the runtime; governance relies on caller-asserted identity when no JWT is present can Asserts an arbitrary tenant:role in the runtime user-id header or payload identity object (e.g. ops:admin) to obtain an unrestricted policy, which leads to Full dataset visibility for any principal the caller invents - authorization is only as strong as the weakest accepted identity source",
+      "displayOrder": 3,
+      "status": "threatResolved",
+      "tags": [
+        "identity-assertion",
+        "trust-assumption"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T004",
+      "numericId": 4,
+      "threatSource": "End user with a forged or tampered JWT",
+      "prerequisites": "Runtime deployed WITHOUT the AgentCore inbound JWT authorizer configured (operator misconfiguration), so no platform-side signature verification occurs",
+      "threatAction": "Presents a self-signed JWT with arbitrary tenant/role claims; agent code decodes without verification (by design, assuming upstream validation)",
+      "threatImpact": "Arbitrary principal spoofing -> unrestricted policy",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Identity claims (tenant, role)"
+      ],
+      "statement": "A End user with a forged or tampered JWT Runtime deployed WITHOUT the AgentCore inbound JWT authorizer configured (operator misconfiguration), so no platform-side signature verification occurs can Presents a self-signed JWT with arbitrary tenant/role claims; agent code decodes without verification (by design, assuming upstream validation), which leads to Arbitrary principal spoofing -> unrestricted policy",
+      "displayOrder": 4,
+      "status": "threatResolved",
+      "tags": [
+        "deployment-misconfiguration",
+        "jwt"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T005",
+      "numericId": 5,
+      "threatSource": "Restricted end user",
+      "prerequisites": "Valid restricted session; CLS policy denies a column (e.g. fee)",
+      "threatAction": "Infers denied-column values via side channels the rewrite does not remove: error messages, aggregate predicates on permitted expressions, or timing",
+      "threatImpact": "Partial disclosure of denied-column information without direct selection",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Analytical dataset on S3"
+      ],
+      "statement": "A Restricted end user Valid restricted session; CLS policy denies a column (e.g. fee) can Infers denied-column values via side channels the rewrite does not remove: error messages, aggregate predicates on permitted expressions, or timing, which leads to Partial disclosure of denied-column information without direct selection",
+      "displayOrder": 5,
+      "status": "threatResolved",
+      "tags": [
+        "side-channel",
+        "inference"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T006",
+      "numericId": 6,
+      "threatSource": "Restricted end user",
+      "prerequisites": "Valid session; engine executes governed but expensive SQL",
+      "threatAction": "Asks questions that generate pathological SQL (full-history globs, huge sorts, cross joins) to exhaust the session's memory/CPU",
+      "threatImpact": "Own-session OOM/slowdown only - one session = one microVM; no shared-service blast radius. Repeated invocations still incur S3 request and Bedrock token costs",
+      "impactedGoal": [],
+      "impactedAssets": [],
+      "statement": "A Restricted end user Valid session; engine executes governed but expensive SQL can Asks questions that generate pathological SQL (full-history globs, huge sorts, cross joins) to exhaust the session's memory/CPU, which leads to Own-session OOM/slowdown only - one session = one microVM; no shared-service blast radius. Repeated invocations still incur S3 request and Bedrock token costs",
+      "displayOrder": 6,
+      "status": "threatResolved",
+      "tags": [
+        "resource-exhaustion",
+        "cost"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T007",
+      "numericId": 7,
+      "threatSource": "Operator error (customer deployer)",
+      "prerequisites": "Operator writes GOVERNANCE_POLICIES JSON by hand",
+      "threatAction": "Ships a malformed policy (typo in tenant:role key, empty tables map with allow_raw_paths true, wrong row_filter SQL) that silently grants broader visibility than intended",
+      "threatImpact": "Unintended data exposure to restricted principals; worst case default role is unrestricted",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Governance policy table"
+      ],
+      "statement": "A Operator error (customer deployer) Operator writes GOVERNANCE_POLICIES JSON by hand can Ships a malformed policy (typo in tenant:role key, empty tables map with allow_raw_paths true, wrong row_filter SQL) that silently grants broader visibility than intended, which leads to Unintended data exposure to restricted principals; worst case default role is unrestricted",
+      "displayOrder": 7,
+      "status": "threatResolved",
+      "tags": [
+        "misconfiguration",
+        "policy"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T008",
+      "numericId": 8,
+      "threatSource": "Restricted end user",
+      "prerequisites": "Valid restricted session; DESCRIBE-based schema probe active for CLS intersection",
+      "threatAction": "Exploits the schema-probe cache: if probe fails open or cache poisons across principals, EXCLUDE lists could shrink",
+      "threatImpact": "Denied columns leak through a stale or failed schema probe",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Analytical dataset on S3"
+      ],
+      "statement": "A Restricted end user Valid restricted session; DESCRIBE-based schema probe active for CLS intersection can Exploits the schema-probe cache: if probe fails open or cache poisons across principals, EXCLUDE lists could shrink, which leads to Denied columns leak through a stale or failed schema probe",
+      "displayOrder": 8,
+      "status": "threatResolved",
+      "tags": [
+        "schema-probe",
+        "cache"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T009",
+      "numericId": 9,
+      "threatSource": "Any principal via agent-generated SQL",
+      "prerequisites": "Gate must block writes for the model to hold",
+      "threatAction": "SQL attempts persistent writes (CREATE TABLE non-temp, INSERT, COPY TO s3://attacker-bucket), ATTACH of foreign databases, or extension installs at query time",
+      "threatImpact": "Data exfiltration to external targets or persistence beyond the session",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Analytical dataset on S3"
+      ],
+      "statement": "A Any principal via agent-generated SQL Gate must block writes for the model to hold can SQL attempts persistent writes (CREATE TABLE non-temp, INSERT, COPY TO s3://attacker-bucket), ATTACH of foreign databases, or extension installs at query time, which leads to Data exfiltration to external targets or persistence beyond the session",
+      "displayOrder": 9,
+      "status": "threatResolved",
+      "tags": [
+        "exfiltration",
+        "write-gate"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T010",
+      "numericId": 10,
+      "threatSource": "Concurrent tool calls within one session (Strands thread execution)",
+      "prerequisites": "LLM issues multiple run_sql calls in one message; shared DuckDB connection",
+      "threatAction": "Race between execute/fetch pairs or between governance schema probe and query execution corrupts result attribution",
+      "threatImpact": "Results attributed to the wrong query - integrity issue; in a multi-principal design (NOT this sample: one session = one principal) it would be cross-principal leakage",
+      "impactedGoal": [],
+      "impactedAssets": [],
+      "statement": "A Concurrent tool calls within one session (Strands thread execution) LLM issues multiple run_sql calls in one message; shared DuckDB connection can Race between execute/fetch pairs or between governance schema probe and query execution corrupts result attribution, which leads to Results attributed to the wrong query - integrity issue; in a multi-principal design (NOT this sample: one session = one principal) it would be cross-principal leakage",
+      "displayOrder": 10,
+      "status": "threatResolved",
+      "tags": [
+        "concurrency",
+        "race"
+      ],
+      "metadata": []
+    },
+    {
+      "id": "T011",
+      "numericId": 11,
+      "threatSource": "Sample consumer (customer engineer)",
+      "prerequisites": "Customer lifts governance.py into a production multi-principal service",
+      "threatAction": "Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model",
+      "threatImpact": "Cross-principal policy application: user A's query rewritten under user B's policy",
+      "impactedGoal": [],
+      "impactedAssets": [
+        "Analytical dataset on S3"
+      ],
+      "statement": "A Sample consumer (customer engineer) Customer lifts governance.py into a production multi-principal service can Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model, which leads to Cross-principal policy application: user A's query rewritten under user B's policy",
+      "displayOrder": 11,
+      "status": "threatIdentified",
+      "tags": [
+        "misuse-of-sample",
+        "documentation"
+      ],
+      "metadata": []
+    }
+  ],
+  "businessContext": {
+    "description": "Open-source sample (aws-samples, MIT-0) demonstrating a data-analyst agent with an in-process DuckDB engine on Amazon Bedrock AgentCore, including an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Authentication is delegated to the AgentCore managed inbound JWT authorizer (validates before agent code runs) or SigV4 IAM for calling applications - the sample implements no authentication itself.",
+    "features": {
+      "industry_sector": "Technology",
+      "sensitivity_tier": "Public",
+      "system_criticality": "Low",
+      "authentication_requirement": "Federated",
+      "deployment_model": "Serverless / FaaS"
+    }
+  },
+  "components": [
+    {
+      "id": "C001",
+      "name": "AgentCore Runtime (managed)",
+      "type": "Compute",
+      "service_provider": "AWS",
+      "specific_service": "Amazon Bedrock AgentCore Runtime",
+      "version": null,
+      "description": "One microVM per session; hosts the agent process. Managed inbound JWT authorizer validates tokens BEFORE agent code runs; header allowlist forwards Authorization. AWS-managed, out of sample scope.",
+      "configuration": null
+    },
+    {
+      "id": "C008",
+      "name": "Identity resolution (_resolve_claims)",
+      "type": "Security",
+      "service_provider": null,
+      "specific_service": null,
+      "version": null,
+      "description": "agent.py: extracts verified claims in trust order: JWT claims (already validated upstream; decode only) -> X-Amzn-Bedrock-AgentCore-Runtime-User-Id header (SigV4 caller asserts) -> payload identity object -> default role.",
+      "configuration": null
+    },
+    {
+      "id": "C009",
+      "name": "Strands Agent + Bedrock Claude",
+      "type": "Compute",
+      "service_provider": "AWS",
+      "specific_service": "Amazon Bedrock",
+      "version": null,
+      "description": "LLM writes SQL from natural-language questions; reads tool results. Its SQL output is untrusted input to the pipeline.",
+      "configuration": null
+    },
+    {
+      "id": "C010",
+      "name": "run_sql read-only gate (_gate)",
+      "type": "Security",
+      "service_provider": null,
+      "specific_service": null,
+      "version": null,
+      "description": "agent.py: statement allowlist - read statements + CREATE TEMP TABLE/VIEW only; rejects persistent writes, ATTACH, COPY TO. First control in the SQL pipeline.",
+      "configuration": null
+    },
+    {
+      "id": "C011",
+      "name": "Governance rewrite (governance.py)",
+      "type": "Security",
+      "service_provider": null,
+      "specific_service": null,
+      "version": null,
+      "description": "AuthZ layer: principal->role->policy mapping, then sqlglot AST rewrite - RLS predicates via guarded subqueries, CLS via schema-aware EXCLUDE, raw table functions rejected for restricted principals, fail-closed on parse failure. Runs after the gate, before the engine.",
+      "configuration": null
+    },
+    {
+      "id": "C012",
+      "name": "DuckDB engine (in-process)",
+      "type": "Analytics",
+      "service_provider": null,
+      "specific_service": null,
+      "version": null,
+      "description": "In-memory embedded OLAP engine; dies with the session; READ_ONLY catalog attaches; resource envelope via memory_limit + spill. Executes only gated+governed SQL.",
+      "configuration": null
+    },
+    {
+      "id": "C013",
+      "name": "CloudWatch Logs",
+      "type": "Other",
+      "service_provider": "AWS",
+      "specific_service": "Amazon CloudWatch Logs",
+      "version": null,
+      "description": "Runtime logs incl. per-query engine metrics and governed flag.",
+      "configuration": null
+    }
+  ],
+  "connections": [
+    {
+      "id": "CN001",
+      "source_id": "C001",
+      "destination_id": "C008",
+      "protocol": "HTTPS",
+      "port": null,
+      "encryption": true,
+      "description": "Runtime invokes agent entrypoint with allowlisted headers (Authorization JWT already validated by managed authorizer) + payload. Claims extraction happens in _resolve_claims."
+    },
+    {
+      "id": "CN002",
+      "source_id": "C008",
+      "destination_id": "C011",
+      "protocol": "Other",
+      "port": null,
+      "encryption": true,
+      "description": "Resolved principal (tenant:role) sets the active role for the session; governance resolves role -> policy."
+    },
+    {
+      "id": "CN003",
+      "source_id": "C009",
+      "destination_id": "C010",
+      "protocol": "Other",
+      "port": null,
+      "encryption": true,
+      "description": "LLM emits SQL via the run_sql tool call; enters the read-only statement gate. UNTRUSTED input crossing."
+    },
+    {
+      "id": "CN004",
+      "source_id": "C010",
+      "destination_id": "C011",
+      "protocol": "Other",
+      "port": null,
+      "encryption": true,
+      "description": "Gate-passed SQL enters the governance rewrite (RLS/CLS injection, raw-path rejection, fail-closed parse)."
+    },
+    {
+      "id": "CN005",
+      "source_id": "C011",
+      "destination_id": "C012",
+      "protocol": "Other",
+      "port": null,
+      "encryption": true,
+      "description": "Governed SQL executes on the in-process engine under _conn_lock serialization."
+    },
+    {
+      "id": "CN006",
+      "source_id": "C012",
+      "destination_id": "D003",
+      "protocol": "HTTPS",
+      "port": 443,
+      "encryption": true,
+      "description": "Engine reads S3/Iceberg/DuckLake data over httpfs with the execution role's scoped read-only credentials (SigV4, TLS)."
+    },
+    {
+      "id": "CN007",
+      "source_id": "C012",
+      "destination_id": "D004",
+      "protocol": "HTTPS",
+      "port": 443,
+      "encryption": true,
+      "description": "Optional: fetch DuckLake PostgreSQL catalog credentials from Secrets Manager at attach time."
+    },
+    {
+      "id": "CN008",
+      "source_id": "C008",
+      "destination_id": "C013",
+      "protocol": "HTTPS",
+      "port": 443,
+      "encryption": true,
+      "description": "Runtime/agent logs to CloudWatch incl. engine metrics and governed flag."
+    }
+  ],
+  "dataStores": [
+    {
+      "id": "D003",
+      "name": "S3 analytical data (4 access paths)",
+      "type": "Object Storage",
+      "classification": "Public",
+      "encryption_at_rest": true,
+      "backup_frequency": null,
+      "description": "Amazon S3 / S3 Tables / Glue Data Catalog / DuckLake: same logical tables reachable via raw Parquet glob, S3 Tables Iceberg REST, Glue federated Iceberg REST, and DuckLake catalog. All attached READ_ONLY. Buckets: SSE, BlockPublicAccess.BLOCK_ALL, enforce_ssl. Sample data is public; customer-substituted data may be confidential."
+    },
+    {
+      "id": "D004",
+      "name": "Secrets Manager (DuckLake PG credentials)",
+      "type": "Other",
+      "classification": "Restricted",
+      "encryption_at_rest": true,
+      "backup_frequency": null,
+      "description": "AWS Secrets Manager: optional PostgreSQL catalog credentials for the multi-writer DuckLake form; fetched at runtime by the execution role; never in env or code."
+    }
+  ],
+  "threatActors": [],
+  "trustZones": [
+    {
+      "id": "TZ001",
+      "name": "External (end user + LLM output)",
+      "trust_level": "Untrusted",
+      "contained_nodes": [
+        "C009"
+      ],
+      "description": "Natural-language questions from end users AND the SQL the LLM generates from them. Prompt injection makes LLM output attacker-influenced; both are untrusted."
+    },
+    {
+      "id": "TZ002",
+      "name": "AWS managed platform",
+      "trust_level": "High",
+      "contained_nodes": [
+        "C001",
+        "C013"
+      ],
+      "description": "AgentCore Runtime (microVM isolation, inbound JWT authorizer), Bedrock service, S3/Glue/Secrets Manager/CloudWatch. AWS-operated; trusted per the shared-responsibility model."
+    },
+    {
+      "id": "TZ003",
+      "name": "Agent process (sample code)",
+      "trust_level": "Medium",
+      "contained_nodes": [
+        "C008",
+        "C010",
+        "C011",
+        "C012"
+      ],
+      "description": "The session's microVM process: identity resolution, read-only gate, governance rewrite, in-process DuckDB. Executes untrusted SQL under two controls; one session = one principal = one engine."
+    },
+    {
+      "id": "TZ004",
+      "name": "Customer account data plane",
+      "trust_level": "High",
+      "contained_nodes": [
+        "D003",
+        "D004"
+      ],
+      "description": "S3 buckets, catalogs, Secrets Manager entries in the customer's own account, reached only via the scoped read-only execution role."
+    }
+  ],
+  "crossingPoints": [],
+  "trustBoundaries": [
+    {
+      "id": "TB001",
+      "name": "Untrusted SQL -> agent controls",
+      "type": "Process",
+      "crossing_points": [],
+      "controls": [
+        "read-only statement gate (allowlist: read + CREATE TEMP)",
+        "governance rewrite (RLS via guarded subqueries, schema-aware CLS EXCLUDE)",
+        "raw table-function rejection for restricted principals",
+        "fail-closed on unparseable SQL"
+      ],
+      "description": "LLM-generated SQL (attacker-influenceable via prompt injection) crosses into the agent process. THE central boundary of this model; crossing CN003 -> CN004 -> CN005."
+    },
+    {
+      "id": "TB002",
+      "name": "Platform -> agent (identity handoff)",
+      "type": "Virtual Machine",
+      "crossing_points": [],
+      "controls": [
+        "AgentCore managed inbound JWT authorizer (signature verification before agent code)",
+        "header allowlist",
+        "trust-ordered fallback chain with default-role floor"
+      ],
+      "description": "Verified identity crosses from the managed authorizer into agent code as claims. AuthN happens platform-side; the sample only consumes verified claims (JWT decode without re-verification is claims EXTRACTION, not authentication). Weaker fallback sources (user-id header / payload identity) are SigV4-caller-asserted - documented trust assumption. Crossing CN001 -> CN002."
+    },
+    {
+      "id": "TB003",
+      "name": "Agent -> customer data plane",
+      "type": "Account",
+      "crossing_points": [],
+      "controls": [
+        "scoped read-only IAM execution role",
+        "READ_ONLY catalog attaches",
+        "TLS in transit",
+        "SSE + BlockPublicAccess + enforce_ssl on buckets",
+        "Secrets Manager for PG credentials"
+      ],
+      "description": "Engine reads S3/catalog data with the scoped read-only execution role over TLS. Only governed SQL output flows back. Crossings CN006, CN007."
+    }
+  ],
+  "assets": [],
+  "flows": [],
+  "residualRiskAssessments": [
+    {
+      "threat_id": "T001",
+      "decision": "Mitigated",
+      "residual_severity": "Low",
+      "residual_likelihood": "Possible",
+      "rationale": "AST-level rewrite covers all four access paths and raw-function rejection; gate blocks writes. Residual: novel sqlglot-vs-DuckDB semantic divergence - bounded by fail-closed parsing and read-only worst case.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T002",
+      "decision": "Mitigated",
+      "residual_severity": "Low",
+      "residual_likelihood": "Unlikely",
+      "rationale": "Unparseable SQL is rejected for restricted principals (fail-closed). A statement would need to parse cleanly in sqlglot AND mean something different to DuckDB - possible but narrow; worst case still read-only within the session.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T003",
+      "decision": "Accepted",
+      "residual_severity": "Medium",
+      "residual_likelihood": "Possible",
+      "rationale": "Documented trust assumption: the SigV4 caller is IAM-authenticated infrastructure trusted to assert its users' identity (same model as any service-to-service identity propagation). Runtime invoke permission gates who can assert. Documentation hardening (M006) makes this explicit to deployers. For JWT-based deployments the assertion paths are unused.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T004",
+      "decision": "Accepted",
+      "residual_severity": "Medium",
+      "residual_likelihood": "Possible",
+      "rationale": "Requires operator misconfiguration (deploying without the authorizer while exposing the endpoint). Sample deploy path configures the authorizer; M006 documentation warning to be added before publication. Inherent to the delegated-AuthN design, which is the correct pattern vs re-implementing JWT verification in agent code.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T005",
+      "decision": "Accepted",
+      "residual_severity": "Low",
+      "residual_likelihood": "Possible",
+      "rationale": "Inference/side channels against RLS/CLS are an industry-wide limitation of query-rewrite governance (shared with BI-tool row-level security and warehouse RLS). Not-for-production disclaimer + guidance to use physical separation for high-sensitivity multi-tenant data. Sample dataset is public.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T006",
+      "decision": "Mitigated",
+      "residual_severity": "Low",
+      "residual_likelihood": "Likely",
+      "rationale": "Blast radius is structurally one microVM; envelope caps memory with spill. Cost exposure is the customer's own account and bounded by their throttles/budgets. Remaining: per-request cost, standard for any LLM app.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T007",
+      "decision": "Accepted",
+      "residual_severity": "Medium",
+      "residual_likelihood": "Possible",
+      "rationale": "Policy authoring is the operator's responsibility (configuration, same class as IAM policy authoring). Malformed JSON fail-stops today; semantic validation + authoring guidance (M009) planned before publication. governed flag (M010) gives an audit signal.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T008",
+      "decision": "Mitigated",
+      "residual_severity": "Low",
+      "residual_likelihood": "Unlikely",
+      "rationale": "Probe failure keeps the full denylist (fail-closed); cache is per-session/per-principal by construction. Residual only if the customer redeploys the module multi-principal - covered by T011/M006.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T009",
+      "decision": "Mitigated",
+      "residual_severity": "Low",
+      "residual_likelihood": "Unlikely",
+      "rationale": "Three independent layers: statement gate allowlist, READ_ONLY attaches, IAM role without write permissions. COPY TO and ATTACH are explicitly rejected; non-temp CREATE rejected with tests.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T010",
+      "decision": "Mitigated",
+      "residual_severity": "Low",
+      "residual_likelihood": "Unlikely",
+      "rationale": "_conn_lock serializes execute+fetch atomically incl. the schema probe; regression test exists. Single-principal-per-session makes the worst case an integrity glitch, not cross-principal leakage.",
+      "is_current": true
+    },
+    {
+      "threat_id": "T011",
+      "decision": "Open",
+      "residual_severity": "High",
+      "residual_likelihood": "Possible",
+      "rationale": "Misuse-of-sample risk: module-level active-role slot is only safe under one-session-one-principal. MUST be closed by M006 documentation (module docstring warning + README security considerations) before publication - tracked as the one pre-publication action item.",
+      "is_current": true
+    }
+  ],
+  "softwareProfile": {
+    "software_type": "AI / ML System",
+    "deployment_model": "Serverless / FaaS",
+    "architecture_style": null,
+    "platform_runtime": "Cloud runtime",
+    "user_domain": null,
+    "licensing_ownership": null,
+    "modern_paradigms": [],
+    "description": "Python 3.11-3.13 on Amazon Bedrock AgentCore Runtime (one microVM per session). Three modules: (1) agent.py - Strands Agent + Bedrock Claude with one gated run_sql tool over an in-memory DuckDB (httpfs/iceberg/ducklake extensions), read-only statement gate, resource envelope, identity resolution chain (JWT claims -> runtime user-id header -> payload identity -> default role); (2) governance.py - authorization layer mapping verified principal claims to a role policy, then rewriting every statement with sqlglot: RLS predicates ANDed in via guarded subqueries, denied columns EXCLUDEd (schema-aware via DESCRIBE probe), raw table functions rejected for restricted principals, fail-closed on unparseable SQL; (3) infra/ CDK - S3 buckets (SSE, BlockPublicAccess, enforce_ssl), least-privilege execution role, CloudWatch logs."
+  },
+  "dataAssetProfiles": [
+    {
+      "id": "DP001",
+      "name": "Analytical dataset on S3",
+      "asset_id": null,
+      "structural_category": "Structured Data",
+      "content_types": [],
+      "sensitivity_tier": "Public",
+      "compliance_regimes": [],
+      "data_states": [
+        "At rest",
+        "In transit"
+      ],
+      "volume_tier": null,
+      "lifecycle_state": null,
+      "business_domain": null,
+      "description": "Parquet/Iceberg tables on S3 (sample ships against the public aws-public-blockchain dataset; customer-substituted data may be confidential). Per-tenant visibility is enforced by the RLS/CLS rewrite - this is the asset the governance layer protects."
+    },
+    {
+      "id": "DP002",
+      "name": "Identity claims (tenant, role)",
+      "asset_id": null,
+      "structural_category": "API Data",
+      "content_types": [],
+      "sensitivity_tier": "Internal",
+      "compliance_regimes": [],
+      "data_states": [
+        "In transit",
+        "In use"
+      ],
+      "volume_tier": null,
+      "lifecycle_state": null,
+      "business_domain": null,
+      "description": "Verified JWT claims, or identity asserted by a SigV4-authenticated calling application (runtime user-id header / payload identity). Input to policy resolution; integrity of these claims is the security foundation of the authorization layer."
+    },
+    {
+      "id": "DP003",
+      "name": "Governance policy table",
+      "asset_id": null,
+      "structural_category": "Configuration Data",
+      "content_types": [],
+      "sensitivity_tier": "Internal",
+      "compliance_regimes": [],
+      "data_states": [
+        "At rest",
+        "In use"
+      ],
+      "volume_tier": null,
+      "lifecycle_state": null,
+      "business_domain": null,
+      "description": "GOVERNANCE_POLICIES JSON env configuration: per-table row_filter / deny_columns + allow_raw_paths switch, keyed by tenant:role. Defines who sees what; owned by the operator."
+    },
+    {
+      "id": "DP004",
+      "name": "DuckLake PostgreSQL credentials",
+      "asset_id": null,
+      "structural_category": "Secrets and Credentials",
+      "content_types": [],
+      "sensitivity_tier": "Restricted",
+      "compliance_regimes": [],
+      "data_states": [
+        "At rest",
+        "In use"
+      ],
+      "volume_tier": null,
+      "lifecycle_state": null,
+      "business_domain": null,
+      "description": "Optional multi-writer catalog credentials stored in AWS Secrets Manager, fetched at runtime by the execution role; never in env vars or code."
+    }
+  ],
+  "userPersonas": [
+    {
+      "id": "UP001",
+      "persona_type": "Authenticated Standard User",
+      "name": "End user (analyst)",
+      "privilege_level": "Low",
+      "organizational_affiliation": null,
+      "functional_roles": [],
+      "intent_behavior": "Legitimate",
+      "entity_type": null,
+      "authentication_method": "Token",
+      "threat_actor_overlay": [],
+      "description": "Asks natural-language questions; JWT validated by the AgentCore inbound authorizer, claims carry tenant/role; may be a restricted principal whose data visibility is limited by RLS/CLS policy. Primary adversary in this model: tries to observe other tenants' rows/columns through crafted questions.",
+      "is_relevant": true
+    },
+    {
+      "id": "UP002",
+      "persona_type": "Non-Human Identity / Service Account",
+      "name": "Calling application (SigV4)",
+      "privilege_level": "Elevated",
+      "organizational_affiliation": null,
+      "functional_roles": [],
+      "intent_behavior": "Legitimate",
+      "entity_type": null,
+      "authentication_method": "IAM Role",
+      "threat_actor_overlay": [],
+      "description": "IAM-authenticated infrastructure invoking the runtime; trusted to assert its end-users' identity via the runtime user-id header or payload identity object. Its compromise means arbitrary identity assertion - documented trust assumption.",
+      "is_relevant": true
+    },
+    {
+      "id": "UP003",
+      "persona_type": "Developer / DevOps User",
+      "name": "Operator (deployer)",
+      "privilege_level": "Administrative",
+      "organizational_affiliation": null,
+      "functional_roles": [],
+      "intent_behavior": "Legitimate",
+      "entity_type": null,
+      "authentication_method": "IAM Role",
+      "threat_actor_overlay": [],
+      "description": "Customer engineer deploying the sample; owns all env configuration including GOVERNANCE_POLICIES and catalog ARNs. Out of scope as an adversary (owns the account and the data).",
+      "is_relevant": true
+    },
+    {
+      "id": "UP004",
+      "persona_type": "Non-Human Identity / Service Account",
+      "name": "LLM (Bedrock Claude)",
+      "privilege_level": "Low",
+      "organizational_affiliation": null,
+      "functional_roles": [],
+      "intent_behavior": "Legitimate",
+      "entity_type": null,
+      "authentication_method": "None",
+      "threat_actor_overlay": [],
+      "description": "Generates SQL from natural language. Untrusted-input channel: its output executes against the engine after the read-only gate and governance rewrite. Subject to prompt injection via user questions; treated as an attacker-controlled SQL source in this model.",
+      "is_relevant": true
+    }
+  ],
+  "nonFunctionalRequirements": [
+    {
+      "quality_class": "Fail-Safe Behaviour",
+      "level": "Revert to safe state",
+      "rationale": "The governance layer must fail closed: a restricted principal must never observe rows or columns outside their policy via any of the four access paths; unparseable SQL, schema-probe failure, or unknown principal must result in rejection or the most restrictive policy - never fail-open."
+    },
+    {
+      "quality_class": "User Error Protection",
+      "level": "Strong",
+      "rationale": "Agent-generated SQL (which may be wrong or adversarial via prompt injection) must not be able to write persistently, exfiltrate to external targets (COPY TO), or attach foreign databases - enforced by the read-only statement gate ahead of governance."
+    }
+  ],
+  "phaseProgress": {
+    "current_phase": 1,
+    "current_phase_name": "Business Context Analysis",
+    "phase_completion": {
+      "1": 0.0,
+      "2": 1.0,
+      "3": 0.0,
+      "4": 0.0,
+      "5": 0.0,
+      "6": 1.0,
+      "7": 1.0,
+      "7.5": 0.0,
+      "8": 1.0,
+      "9": 1.0
+    },
+    "phases": {
+      "1": "Business Context Analysis",
+      "2": "Architecture Analysis",
+      "3": "Threat Actor Analysis",
+      "4": "Trust Boundary Analysis",
+      "5": "Asset Flow Analysis",
+      "6": "Threat Identification",
+      "7": "Mitigation Planning",
+      "7.5": "Code Validation Analysis",
+      "8": "Residual Risk Analysis",
+      "9": "Output Generation and Documentation"
+    },
+    "overall_completion": 0.5
+  },
+  "referenceCatalogue": {
+    "description": "Threat actors the server pre-loaded but that were never assessed for this system. These are NOT part of the threat model.",
+    "threatActors": []
+  }
+}

@@ -195,6 +195,21 @@ compute resources; idle cost is storage only. Estimate with the
 
 ## Security
 
+Security considerations for deploying or adapting this sample:
+
+- **Authentication is delegated, not implemented.** Deploy with the AgentCore
+  inbound JWT authorizer so token signatures are verified before agent code
+  runs. Without it, the SigV4 identity paths (runtime user-id header, payload
+  identity) trust the calling application completely — restrict runtime
+  invoke permission to trusted infrastructure only.
+- **One session = one principal.** The governance layer's active-role state
+  is per-process, valid under AgentCore's one-microVM-per-session model. Do
+  not lift `governance.py` into a service that handles multiple principals
+  in one process (see the module docstring).
+- **Query-rewrite RLS/CLS bounds direct access, not inference.** For
+  high-sensitivity multi-tenant data, prefer physical separation (per-tenant
+  tables/views) over rewrite-based filtering.
+
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for how to
 report security issues. Do not create public GitHub issues for security
 findings.

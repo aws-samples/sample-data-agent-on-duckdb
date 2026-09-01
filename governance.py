@@ -17,6 +17,22 @@ Fail-closed: for restricted principals, SQL that cannot be parsed is
 rejected, raw file access (read_parquet/read_csv/...) is rejected, and
 every reference to a governed logical table — through ANY catalog access
 method (raw view, s3t, glue, dl) — gets the policy applied.
+
+SECURITY — deployment constraints (do not lift this module out of context):
+1. One principal per process. The active-role slot is module-level state,
+   valid ONLY under AgentCore's one-session-one-microVM model. Reusing this
+   module in a process that serves multiple principals concurrently would
+   apply one user's policy to another user's query.
+2. Claims must be verified upstream. This layer consumes identity, it does
+   not authenticate it. Deploy with the AgentCore inbound JWT authorizer
+   (signature verification before agent code runs). Without it, the SigV4
+   fallback paths (runtime user-id header / payload identity) trust the
+   caller completely — restrict runtime invoke permission to trusted
+   infrastructure only.
+3. Query-rewrite RLS/CLS bounds direct access, not inference. Aggregate or
+   timing side channels against denied data are an industry-wide limitation
+   of this pattern; for high-sensitivity multi-tenant data prefer physical
+   separation (per-tenant tables or views).
 """
 
 import json
