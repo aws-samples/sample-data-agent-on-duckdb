@@ -258,9 +258,8 @@ def _resolve_claims(payload, context) -> dict | None:
 
             # Signature already verified by the AgentCore inbound JWT
             # authorizer before agent code runs; this only extracts claims.
-            return jwt.decode(  # nosemgrep: unverified-jwt-decode -- verified upstream
-                auth[7:], options={"verify_signature": False}
-            )
+            unverified = {"verify_signature": False}
+            return jwt.decode(auth[7:], options=unverified)  # nosemgrep: unverified-jwt-decode
         except Exception:  # noqa: BLE001 — fall through to weaker sources
             pass
     user_id = headers.get("X-Amzn-Bedrock-AgentCore-Runtime-User-Id")
