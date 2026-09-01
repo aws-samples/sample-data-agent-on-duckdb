@@ -46,27 +46,38 @@ TBLPROPERTIES (
 
 # (name, duckdb_sql, athena_sql) — dialects differ only in the percentile fn
 QUERIES = [
-    ("schema probe",
-     f"SELECT txid, fee, output_value FROM btc_transactions WHERE date='{DAY}' LIMIT 5",
-     f"SELECT txid, fee, output_value FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' LIMIT 5"),
-    ("WRONG COLUMN (agent mistake)",
-     f"SELECT sum(total_fee) FROM btc_transactions WHERE date='{DAY}'",
-     f"SELECT sum(total_fee) FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}'"),
-    ("corrected aggregate",
-     f"SELECT count(*) AS txs, round(sum(fee),2) AS fee_btc "
-     f"FROM btc_transactions WHERE date='{DAY}'",
-     f"SELECT count(*) AS txs, round(sum(fee),2) AS fee_btc "
-     f"FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}'"),
-    ("fee percentiles",
-     f"SELECT approx_quantile(fee,0.5) AS p50, approx_quantile(fee,0.99) AS p99 "
-     f"FROM btc_transactions WHERE date='{DAY}' AND NOT is_coinbase",
-     f"SELECT approx_percentile(fee,0.5) AS p50, approx_percentile(fee,0.99) AS p99 "
-     f"FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' AND NOT is_coinbase"),
-    ("top-10 by fee",
-     f"SELECT txid, fee FROM btc_transactions WHERE date='{DAY}' AND NOT is_coinbase "
-     f"ORDER BY fee DESC LIMIT 10",
-     f"SELECT txid, fee FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' AND NOT is_coinbase "
-     f"ORDER BY fee DESC LIMIT 10"),
+    (
+        "schema probe",
+        f"SELECT txid, fee, output_value FROM btc_transactions WHERE date='{DAY}' LIMIT 5",
+        f"SELECT txid, fee, output_value FROM {GLUE_DB}.btc_transactions "
+        f"WHERE date='{DAY}' LIMIT 5",
+    ),
+    (
+        "WRONG COLUMN (agent mistake)",
+        f"SELECT sum(total_fee) FROM btc_transactions WHERE date='{DAY}'",
+        f"SELECT sum(total_fee) FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}'",
+    ),
+    (
+        "corrected aggregate",
+        f"SELECT count(*) AS txs, round(sum(fee),2) AS fee_btc "
+        f"FROM btc_transactions WHERE date='{DAY}'",
+        f"SELECT count(*) AS txs, round(sum(fee),2) AS fee_btc "
+        f"FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}'",
+    ),
+    (
+        "fee percentiles",
+        f"SELECT approx_quantile(fee,0.5) AS p50, approx_quantile(fee,0.99) AS p99 "
+        f"FROM btc_transactions WHERE date='{DAY}' AND NOT is_coinbase",
+        f"SELECT approx_percentile(fee,0.5) AS p50, approx_percentile(fee,0.99) AS p99 "
+        f"FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' AND NOT is_coinbase",
+    ),
+    (
+        "top-10 by fee",
+        f"SELECT txid, fee FROM btc_transactions WHERE date='{DAY}' AND NOT is_coinbase "
+        f"ORDER BY fee DESC LIMIT 10",
+        f"SELECT txid, fee FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' AND NOT is_coinbase "
+        f"ORDER BY fee DESC LIMIT 10",
+    ),
 ]
 
 
@@ -108,7 +119,8 @@ def athena_leg():
             state = st["Status"]["State"]
             if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
                 break
-            time.sleep(0.4)
+            # Intentional Athena poll interval; loop exits on terminal state.
+            time.sleep(0.4)  # nosemgrep: arbitrary-sleep -- poll backoff
         stats = st.get("Statistics", {})
         return {
             "s": time.perf_counter() - t0,

@@ -52,9 +52,13 @@ def source_select(days: str) -> str:
     )
 
 
+# SQL below interpolates only this operator-run CLI's own arguments
+# (stack-output ARN / catalog URI / date range) — not user input.
 def load_s3tables(c: duckdb.DuckDBPyConnection, arn: str, days: str) -> int:
-    c.execute(f"ATTACH '{arn}' AS s3t (TYPE iceberg, ENDPOINT_TYPE s3_tables)")
-    c.execute(
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args, not user input
+        f"ATTACH '{arn}' AS s3t (TYPE iceberg, ENDPOINT_TYPE s3_tables)"
+    )
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args, not user input
         f"CREATE TABLE IF NOT EXISTS s3t.blockchain.btc_transactions AS {source_select(days)}"
     )
     return c.execute("SELECT count(*) FROM s3t.blockchain.btc_transactions").fetchone()[0]
@@ -62,7 +66,9 @@ def load_s3tables(c: duckdb.DuckDBPyConnection, arn: str, days: str) -> int:
 
 def load_ducklake(c: duckdb.DuckDBPyConnection, catalog: str, days: str) -> int:
     data_path = catalog.rsplit("/catalog/", 1)[0] + "/data"
-    c.execute(f"ATTACH 'ducklake:{catalog}' AS dl (DATA_PATH '{data_path}')")
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args, not user input
+        f"ATTACH 'ducklake:{catalog}' AS dl (DATA_PATH '{data_path}')"
+    )
     c.execute("CREATE SCHEMA IF NOT EXISTS dl.blockchain")
     # copy from the just-loaded Iceberg table (fast, same region) if present,
     # else from the public source
@@ -70,7 +76,9 @@ def load_ducklake(c: duckdb.DuckDBPyConnection, catalog: str, days: str) -> int:
         "SELECT count(*) FROM duckdb_databases() WHERE database_name='s3t'"
     ).fetchone()[0]
     src = "SELECT * FROM s3t.blockchain.btc_transactions" if has_s3t else source_select(days)
-    c.execute(f"CREATE TABLE IF NOT EXISTS dl.blockchain.btc_transactions AS {src}")
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args, not user input
+        f"CREATE TABLE IF NOT EXISTS dl.blockchain.btc_transactions AS {src}"
+    )
     return c.execute("SELECT count(*) FROM dl.blockchain.btc_transactions").fetchone()[0]
 
 

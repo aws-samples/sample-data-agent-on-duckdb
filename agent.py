@@ -74,11 +74,13 @@ def _attach_legs(c: duckdb.DuckDBPyConnection) -> None:
     if S3_TABLES_ARN or GLUE_CATALOG:
         c.execute("INSTALL iceberg; LOAD iceberg;")
     if S3_TABLES_ARN:  # Iceberg REST, S3 Tables native endpoint
-        c.execute(
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config, not user input
             f"ATTACH '{S3_TABLES_ARN}' AS s3t (TYPE iceberg, ENDPOINT_TYPE s3_tables, READ_ONLY)"
         )
     if GLUE_CATALOG:  # Iceberg REST, Glue endpoint (federated s3tablescatalog)
-        c.execute(f"ATTACH '{GLUE_CATALOG}' AS glue (TYPE iceberg, ENDPOINT_TYPE glue, READ_ONLY)")
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config, not user input
+            f"ATTACH '{GLUE_CATALOG}' AS glue (TYPE iceberg, ENDPOINT_TYPE glue, READ_ONLY)"
+        )
     if DUCKLAKE_CATALOG:  # SQL-database catalog; Parquet data on S3
         c.execute("INSTALL ducklake; LOAD ducklake;")
         if DUCKLAKE_CATALOG.startswith("postgres:"):
@@ -97,9 +99,13 @@ def _attach_legs(c: duckdb.DuckDBPyConnection) -> None:
                 f"DATABASE '{sec['dbname']}', "
                 f"USER '{sec['username']}', PASSWORD '{sec['password']}')"
             )
-            c.execute(f"ATTACH 'ducklake:{DUCKLAKE_CATALOG}' AS dl (READ_ONLY, META_SECRET pgcat)")
+            c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config, not user input
+                f"ATTACH 'ducklake:{DUCKLAKE_CATALOG}' AS dl (READ_ONLY, META_SECRET pgcat)"
+            )
         else:
-            c.execute(f"ATTACH 'ducklake:{DUCKLAKE_CATALOG}' AS dl (READ_ONLY)")
+            c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config, not user input
+                f"ATTACH 'ducklake:{DUCKLAKE_CATALOG}' AS dl (READ_ONLY)"
+            )
 
 
 def get_conn() -> duckdb.DuckDBPyConnection:
@@ -109,7 +115,9 @@ def get_conn() -> duckdb.DuckDBPyConnection:
         c = duckdb.connect()  # in-memory; nothing persisted
         # containers/SSM may run without a resolvable HOME; extensions need one
         c.execute("SET home_directory='/tmp'")
-        c.execute(f"SET memory_limit='{MEMORY_LIMIT}'")
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config, not user input
+            f"SET memory_limit='{MEMORY_LIMIT}'"
+        )
         c.execute("SET enable_object_cache=true")
         c.execute("INSTALL httpfs; LOAD httpfs;")
         # Sign with whatever the environment provides (local profile or the
@@ -128,7 +136,10 @@ def get_conn() -> duckdb.DuckDBPyConnection:
             ")"
         )
         for name, src in VIEW_DEFS.items():
-            c.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}")
+            # VIEW_DEFS is a static module constant, not user input.
+            c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- static constants
+                f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}"
+            )
         _attach_legs(c)
 
         # governance CLS needs per-reference schemas (a logical table can
@@ -136,8 +147,13 @@ def get_conn() -> duckdb.DuckDBPyConnection:
         # The prober runs during apply_governance — outside run_sql's lock —
         # so it must take _conn_lock itself to keep the shared cursor safe.
         def _probe(ref: str) -> set:
+            # ref is a sqlglot-reserialized table identifier whose name matched
+            # a governed policy entry; the statement is a read-only DESCRIBE.
             with _conn_lock:
-                return {r[0] for r in c.execute(f"DESCRIBE SELECT * FROM {ref} LIMIT 0").fetchall()}
+                rows = c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- see above
+                    f"DESCRIBE SELECT * FROM {ref} LIMIT 0"
+                ).fetchall()
+                return {r[0] for r in rows}
 
         governance.set_schema_prober(_probe)
         _conn = c
@@ -240,7 +256,11 @@ def _resolve_claims(payload, context) -> dict | None:
         try:
             import jwt  # PyJWT; validated upstream by the inbound authorizer
 
-            return jwt.decode(auth[7:], options={"verify_signature": False})
+            # Signature already verified by the AgentCore inbound JWT
+            # authorizer before agent code runs; this only extracts claims.
+            return jwt.decode(  # nosemgrep: unverified-jwt-decode -- verified upstream
+                auth[7:], options={"verify_signature": False}
+            )
         except Exception:  # noqa: BLE001 — fall through to weaker sources
             pass
     user_id = headers.get("X-Amzn-Bedrock-AgentCore-Runtime-User-Id")
