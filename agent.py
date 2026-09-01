@@ -258,7 +258,7 @@ def _resolve_claims(payload, context) -> dict | None:
 
             # Signature already verified by the AgentCore inbound JWT
             # authorizer before agent code runs; this only extracts claims.
-            unverified = {"verify_signature": False}
+            unverified = {"verify_signature": False}  # nosemgrep: unverified-jwt-decode
             return jwt.decode(auth[7:], options=unverified)  # nosemgrep: unverified-jwt-decode
         except Exception:  # noqa: BLE001 — fall through to weaker sources
             pass
