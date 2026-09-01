@@ -177,7 +177,7 @@ def main():
         "Percentile fn differs by dialect (approx_quantile vs approx_percentile).",
     ]
     out_path = os.path.join(os.path.dirname(__file__), "..", "docs", "ab-results.md")
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))
 
