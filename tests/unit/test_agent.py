@@ -10,17 +10,8 @@ import duckdb
 import pytest
 
 import agent as agent_mod
-import governance
 from agent import run_sql
 from data_catalog import CATALOG_DOC, S3_BASE, VIEW_DEFS, build_catalog_doc
-
-
-@pytest.fixture(autouse=True)
-def _reset_governance():
-    """Every test starts from the unrestricted default role."""
-    governance.set_active_role(governance.DEFAULT_ROLE)
-    yield
-    governance.set_active_role(governance.DEFAULT_ROLE)
 
 
 @pytest.fixture()
@@ -212,99 +203,3 @@ def test_attach_legs_mounts_ducklake_readonly(monkeypatch, tmp_path):
     with pytest.raises(duckdb.Error):  # READ_ONLY mount rejects writes
         conn.execute("INSERT INTO dl.main.t VALUES (1)")
     conn.close()
-
-
-# --------------------------------------------------------------- governance
-ANALYST = "cex-a:analyst"
-
-
-def test_resolve_role_two_stage_mapping():
-    assert governance.resolve_role({"tenant": "cex-a", "role": "analyst"}) == ANALYST
-    assert governance.resolve_role({"tenant": "ops", "role": "admin"}) == "ops:admin"
-    # unknown role within known tenant → that tenant's policy, not admin
-    assert governance.resolve_role({"tenant": "cex-a", "role": "intern"}) == ANALYST
-    # unknown tenant / missing claims → default role
-    assert governance.resolve_role({"tenant": "nobody", "role": "x"}) == governance.DEFAULT_ROLE
-    assert governance.resolve_role(None) == governance.DEFAULT_ROLE
-
-
-def test_unrestricted_role_passes_sql_through():
-    sql = "SELECT count(*) FROM btc_transactions WHERE date='2026-08-25'"
-    assert governance.apply_governance(sql) == sql
-
-
-def test_rls_predicate_injected_for_restricted_role():
-    governance.set_active_role(ANALYST)
-    out = governance.apply_governance("SELECT count(*) FROM btc_transactions")
-    assert "date >= '2026-08-24'" in out
-    assert "EXCLUDE (fee)" in out
-
-
-def test_rls_applies_to_every_catalog_access_method():
-    governance.set_active_role(ANALYST)
-    for ref in (
-        "btc_transactions",
-        "s3t.blockchain.btc_transactions",
-        "glue.blockchain.btc_transactions",
-        "dl.blockchain.btc_transactions",
-    ):
-        out = governance.apply_governance(f"SELECT count(*) FROM {ref}")
-        assert "date >= '2026-08-24'" in out, ref
-        assert ref in out, "original catalog-qualified reference must survive"
-
-
-def test_rls_preserves_alias_in_joins():
-    governance.set_active_role(ANALYST)
-    out = governance.apply_governance(
-        "SELECT t.txid FROM s3t.blockchain.btc_transactions t "
-        "JOIN eth_blocks b ON t.block_number = b.number"
-    )
-    assert "AS t" in out and "date >= '2026-08-24'" in out
-    assert "eth_blocks" in out  # ungoverned table untouched
-
-
-def test_rls_applies_inside_cte_and_ctas_but_not_to_local_names():
-    governance.set_active_role(ANALYST)
-    out = governance.apply_governance(
-        "WITH w AS (SELECT * FROM btc_transactions) SELECT count(*) FROM w"
-    )
-    assert out.count("date >= '2026-08-24'") == 1  # base table guarded, CTE name not
-    out2 = governance.apply_governance(
-        "CREATE TEMP TABLE ws AS SELECT * FROM btc_transactions WHERE date='2026-08-25'"
-    )
-    assert "date >= '2026-08-24'" in out2 and out2.lower().startswith("create")
-
-
-def test_raw_path_access_rejected_for_restricted_role():
-    governance.set_active_role(ANALYST)
-    with pytest.raises(ValueError, match="raw file access"):
-        governance.apply_governance(
-            "SELECT count(*) FROM read_parquet('s3://aws-public-blockchain/x/*.parquet')"
-        )
-
-
-def test_governance_fails_closed_on_unparseable_sql():
-    governance.set_active_role(ANALYST)
-    with pytest.raises(ValueError, match="could not be parsed"):
-        governance.apply_governance("SELECT ??? FROM !!!")
-
-
-def test_denied_column_unreachable_through_rewrite(local_conn):
-    """End-to-end through run_sql: restricted principal cannot read the
-    denied column even by explicit projection — engine errors on the
-    rewritten statement instead of leaking data."""
-    local_conn.execute(
-        "CREATE TABLE btc_transactions AS "
-        "SELECT '2026-08-25' AS date, 1.5 AS fee, 'tx1' AS txid"
-    )
-    governance.set_active_role(ANALYST)
-    out = run_sql("SELECT fee FROM btc_transactions")
-    assert out.startswith("ERROR:")  # column excluded by the guard subquery
-    ok = run_sql("SELECT txid FROM btc_transactions")
-    assert '"txid": "tx1"' in ok
-    assert '"governed": true' in ok
-
-
-def test_governed_flag_false_for_unrestricted(local_conn):
-    out = run_sql("SELECT count(*) AS n FROM t")
-    assert '"governed": false' in out

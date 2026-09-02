@@ -8,8 +8,6 @@ dependencies = [
     "strands-agents",
     "bedrock-agentcore",
     "boto3",
-    "sqlglot",
-    "PyJWT",
 ]
 
 [dependency-groups]

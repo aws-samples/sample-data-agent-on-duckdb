@@ -7,10 +7,8 @@ does and how to run it; this document covers why it is built this way.
 
 ```
 User ──▶ AgentCore Runtime (1 session = 1 microVM = 1 DuckDB)
-          ├─ AuthN: inbound JWT authorizer → claims {tenant, role}
-          ├─ AuthZ: governance.py — principal→role→policy,
-          │         sqlglot RLS/CLS rewrite BEFORE the engine
           ├─ Strands Agent + Bedrock Claude (writes SQL, reads results)
+          ├─ run_sql gate: read-only statement allowlist
           └─ DuckDB in-process (httpfs/iceberg/ducklake extensions)
                ├─ Path A: raw Parquet   — S3 path glob (public dataset)
                ├─ Path B: S3 Tables     — native Iceberg REST catalog
@@ -20,9 +18,8 @@ Aux: IAM execution role (least privilege) · CloudWatch Logs
 ```
 
 The layering follows one principle: **externalize everything except compute**.
-State lives on S3, governance in a SQL-rewrite layer in front of the engine,
-scheduling in the agent platform (one session = one microVM), and the
-analytics engine itself runs in-process with the agent.
+State lives on S3, scheduling in the agent platform (one session = one
+microVM), and the analytics engine itself runs in-process with the agent.
 
 ## Design invariants (do not regress)
 
@@ -36,34 +33,9 @@ analytics engine itself runs in-process with the agent.
    prefer explicit single-day paths over globs.
 5. Errors are returned verbatim to the model — self-repair is a feature, not a
    bug path.
-6. **Governance before the engine**: every statement passes the
-   identity-aware rewrite (RLS/CLS injection, raw-path rejection) after the
-   read-only gate and before execution; restricted principals fail closed on
-   unparseable SQL. The engine never sees ungoverned SQL for a restricted
-   principal.
-
-## Why the governance layer is a SQL rewrite
-
-Lake Formation row/column data filters are enforced *inside* LF-integrated
-engines (Athena, Redshift, EMR). For a third-party in-process engine, LF
-grants stop at table level — so fine-grained governance for an embedded
-engine must happen before the SQL reaches it. `governance.py` implements
-that as an engine-neutral sqlglot rewrite: every reference to a governed
-logical table (via any of the four access paths) is replaced by
-`(SELECT * EXCLUDE(denied) FROM ref WHERE row_filter) AS alias`.
-
-Two details worth knowing:
-
-- **Schema-aware CLS**: the same logical table can expose different columns
-  per access method (a full-history raw glob binds the oldest file's schema,
-  which may lack newer columns), so EXCLUDE lists are intersected with a
-  DESCRIBE-probed, cached schema per reference; probe failure keeps the full
-  denylist (fail closed).
-- **Concurrency**: agent frameworks may execute same-message tool calls on
-  threads. Unsynchronized `execute`+`fetch` pairs on one shared DuckDB
-  connection steal each other's result sets, so `run_sql` is serialized with
-  a lock. A per-thread cursor was rejected because temp tables must stay
-  session-visible across calls.
+6. **Access control is IAM**: the engine reads with the execution role's
+   scoped read-only permissions; all runtime callers see the same data.
+   Different audiences need separate runtimes or per-tenant tables/roles.
 
 ## Measured behavior (reproducible with the included scripts)
 
@@ -96,6 +68,5 @@ many short-lived microVM connections). Both forms are implemented.
 |---|---|
 | Data in a governed warehouse, few heavy queries | Warehouse MCP direct, skip DuckDB |
 | Data on S3, agent iterates heavily, unpredictable concurrency | This pattern |
-| Row/column-level access control per tenant | This pattern — built-in rewrite layer (LF data filters only work inside trusted engines) |
 | Both (most real estates) | Hybrid: DuckDB fast path + warehouse MCP fallback |
 | Working set approaches single-node memory | Split the query or move up the spectrum (Athena/Redshift) |

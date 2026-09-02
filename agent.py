@@ -2,9 +2,9 @@
 
 The analytics engine lives INSIDE the agent process. No cluster, no
 warehouse, no ETL — the agent starts, attaches DuckDB (an embedded OLAP
-engine), and queries data directly on S3. Governance is identity-aware:
-every statement is rewritten under the caller's row/column policy before
-the engine sees it (see governance.py).
+engine), and queries data directly on S3. Access control is the platform's:
+a scoped read-only IAM execution role bounds what the engine can read, and
+a statement gate keeps agent-generated SQL read-only.
 
 Runs in two modes:
   - AgentCore Runtime entrypoint (default): `app.run()` serves /invocations
@@ -22,7 +22,6 @@ import duckdb
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands import Agent, tool
 
-import governance
 from data_catalog import VIEW_DEFS, build_catalog_doc
 
 MODEL_ID = os.environ.get("MODEL_ID", "global.anthropic.claude-sonnet-4-6")
@@ -141,21 +140,6 @@ def get_conn() -> duckdb.DuckDBPyConnection:
                 f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}"
             )
         _attach_legs(c)
-
-        # governance CLS needs per-reference schemas (a logical table can
-        # expose different columns per access method); probe via DESCRIBE.
-        # The prober runs during apply_governance — outside run_sql's lock —
-        # so it must take _conn_lock itself to keep the shared cursor safe.
-        def _probe(ref: str) -> set:
-            # ref is a sqlglot-reserialized table identifier whose name matched
-            # a governed policy entry; the statement is a read-only DESCRIBE.
-            with _conn_lock:
-                rows = c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- see above
-                    f"DESCRIBE SELECT * FROM {ref} LIMIT 0"
-                ).fetchall()
-                return {r[0] for r in rows}
-
-        governance.set_schema_prober(_probe)
         _conn = c
     return _conn
 
@@ -186,17 +170,10 @@ def run_sql(sql: str) -> str:
     err = _gate(sql)
     if err:
         return err
-    try:
-        # authorization: rewrite under the caller's policy BEFORE the engine
-        # sees the statement (RLS predicate + column exclusion; raw-path and
-        # unparseable SQL rejected for restricted principals — fail closed)
-        governed_sql = governance.apply_governance(sql)
-    except ValueError as e:
-        return f"ERROR: {e}"
     t0 = time.perf_counter()
     try:
         with _conn_lock:  # serialize parallel tool calls; see _conn_lock note
-            cur = get_conn().execute(governed_sql)
+            cur = get_conn().execute(sql)
             cols = [d[0] for d in cur.description] if cur.description else []
             rows = cur.fetchmany(QUERY_TIMEOUT_ROWS + 1) if cols else []
     except Exception as e:  # surface engine errors verbatim so the model can fix the SQL
@@ -206,10 +183,7 @@ def run_sql(sql: str) -> str:
     rows = rows[:QUERY_TIMEOUT_ROWS]
     out = [dict(zip(cols, (str(v) for v in r), strict=False)) for r in rows]
     payload = json.dumps(out, ensure_ascii=False, default=str)
-    governed = governed_sql != sql
-    payload += (
-        f'\n{{"engine_ms": {engine_ms}, "rows": {len(rows)}, "governed": {str(governed).lower()}}}'
-    )
+    payload += f'\n{{"engine_ms": {engine_ms}, "rows": {len(rows)}}}'
     if truncated:
         payload += f"\n[TRUNCATED at {QUERY_TIMEOUT_ROWS} rows — add aggregation or LIMIT]"
     return payload
@@ -238,48 +212,12 @@ agent = Agent(model=MODEL_ID, tools=[run_sql], system_prompt=SYSTEM_PROMPT)
 app = BedrockAgentCoreApp()
 
 
-def _resolve_claims(payload, context) -> dict | None:
-    """Extract identity claims for governance, most-trusted source first.
-
-    1. JWT claims — production path: the inbound JWT authorizer has already
-       validated the token before this code runs; with the Authorization
-       header allowlisted, decode it here (signature re-check unnecessary).
-    2. X-Amzn-Bedrock-AgentCore-Runtime-User-Id header — SigV4 path, set by
-       the calling application after ITS OWN authentication of the end user.
-    3. payload "identity" object — for callers that pass tenant/role inline
-       (the SigV4 caller is IAM-authenticated infrastructure; it is trusted
-       to assert its users' identity, same trust model as the header).
-    """
-    headers = getattr(context, "request_headers", None) or {}
-    auth = headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        try:
-            import jwt  # PyJWT; validated upstream by the inbound authorizer
-
-            # Signature already verified by the AgentCore inbound JWT
-            # authorizer before agent code runs; this only extracts claims.
-            unverified = {"verify_signature": False}  # nosemgrep: unverified-jwt-decode
-            return jwt.decode(auth[7:], options=unverified)  # nosemgrep: unverified-jwt-decode
-        except Exception:  # noqa: BLE001 — fall through to weaker sources
-            pass
-    user_id = headers.get("X-Amzn-Bedrock-AgentCore-Runtime-User-Id")
-    if user_id and ":" in user_id:  # convention: "<tenant>:<role>"
-        tenant, role = user_id.split(":", 1)
-        return {"tenant": tenant, "role": role}
-    identity = payload.get("identity")
-    if isinstance(identity, dict):
-        return identity
-    return None
-
-
 @app.entrypoint
 def invoke(payload, context=None):
     """AgentCore Runtime entrypoint: {"prompt": "..."} -> {"result": "..."}"""
-    claims = _resolve_claims(payload, context)
-    governance.set_active_role(governance.resolve_role(claims))
     user_msg = payload.get("prompt", "Summarize yesterday's Bitcoin activity.")
     result = agent(user_msg)
-    return {"result": result.message, "principal": governance.active_role()}
+    return {"result": result.message}
 
 
 if __name__ == "__main__":

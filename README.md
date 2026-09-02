@@ -1,9 +1,9 @@
 # Data Agent on DuckDB
 
 A Bedrock (Claude) agent with an **in-process DuckDB** engine that queries
-data directly on Amazon S3 — no cluster, no warehouse, no ETL. The solution
-implements four S3 table-access methods behind one engine and an
-identity-aware row/column-level governance layer in front of it.
+data directly on Amazon S3 — no cluster, no warehouse, no ETL. The sample
+implements four S3 table-access methods behind one engine, with a
+read-only SQL gate in front of it.
 
 > [!WARNING]
 > This is a reference implementation, provided as is. Before production use,
@@ -17,10 +17,8 @@ identity-aware row/column-level governance layer in front of it.
 
 ```
 User ──▶ AgentCore Runtime (1 session = 1 microVM = 1 DuckDB)
-          ├─ AuthN: inbound JWT authorizer → claims {tenant, role}
-          ├─ AuthZ: governance.py — principal→role→policy,
-          │         sqlglot RLS/CLS rewrite BEFORE the engine
           ├─ Strands Agent + Bedrock Claude (writes SQL, reads results)
+          ├─ run_sql gate: read-only statement allowlist
           └─ DuckDB in-process (httpfs/iceberg/ducklake extensions)
                ├─ Path A: raw Parquet   — S3 path glob (public dataset)
                ├─ Path B: S3 Tables     — native Iceberg REST catalog
@@ -39,8 +37,7 @@ ends up being naturally optimized for AI agents to use"*; the same post
 reports 2.5B+ queries processed by the Amazon Quick engine with its DuckDB
 integrations. This sample is a deployable
 implementation of the same architectural idea — externalize state to S3,
-governance to a SQL-rewrite layer, scheduling to the agent platform, and keep
-compute in-process:
+scheduling to the agent platform, and keep compute in-process:
 
 | Mechanism | Why a remote query service can't give you this |
 |---|---|
@@ -71,33 +68,6 @@ Paths B and C resolve the *same physical Iceberg table* through two different
 endpoints (engine-direct IAM vs organization-wide catalog). Path D defaults
 to a single-file catalog on S3; a PostgreSQL catalog form is supported for
 multi-writer estates (see `docs/design.md`).
-
-## Identity-aware governance (row/column-level)
-
-An **engine-neutral SQL rewrite layer** in front of DuckDB — the same
-query-rewrite pattern BI platforms use to enforce row-level security ahead
-of an embedded engine. Authentication and authorization are two layers with
-one narrow contract (verified claims):
-
-- **AuthN** — AgentCore's inbound JWT authorizer validates tokens before
-  agent code runs; claims carry `tenant`/`role`. SigV4 fallback paths accept
-  the runtime user-id header or a payload identity asserted by the calling
-  application.
-- **AuthZ** — `governance.py` maps principal → role → policy, then rewrites
-  every statement with sqlglot: RLS predicates ANDed in, denied columns
-  `EXCLUDE`d, raw-path access rejected. Fail-closed on unparseable input.
-- **Policies are configuration** (`GOVERNANCE_POLICIES` env, JSON): per-table
-  `row_filter` / `deny_columns` + an `allow_raw_paths` switch, keyed by
-  `tenant:role`.
-- Applies identically across all four access methods (policy matches the
-  logical table name), and every `run_sql` result reports `"governed":
-  true|false`.
-
-Why a rewrite layer instead of Lake Formation data filters: LF row/column
-filters are enforced *inside* LF-integrated engines (Athena, Redshift, EMR).
-For a third-party in-process engine, LF grants stop at table level — so
-fine-grained governance for an embedded engine must happen before the SQL
-reaches it, which is exactly this layer.
 
 ## Prerequisites
 
@@ -149,18 +119,7 @@ cleanup; here the temp table dies with the session.
 
 **Access-path comparison** — the same aggregation through paths A–D returns
 identical results with per-path `engine_ms`; the engine never changes while
-the catalog strategy evolves with governance needs.
-
-**Governance** — run the same question as two principals:
-
-```bash
-agentcore invoke '{"prompt": "...", "identity": {"tenant": "ops",   "role": "admin"}}'
-agentcore invoke '{"prompt": "...", "identity": {"tenant": "cex-a", "role": "analyst"}}'
-```
-
-The restricted tenant sees an RLS-filtered window, denied columns do not
-exist for the engine (the model truthfully reports that), and raw-path
-access is rejected with an error the model can explain.
+the catalog strategy evolves with your estate.
 
 **Self-repair** — a wrong column name comes back as an engine error in
 milliseconds; the model reads it, DESCRIBEs, and fixes its own SQL.
@@ -170,14 +129,13 @@ milliseconds; the model reads it, DESCRIBEs, and fixes its own SQL.
 | Path | What |
 |---|---|
 | `agent.py` | Strands agent + gated `run_sql` DuckDB tool; AgentCore entrypoint and local CLI |
-| `governance.py` | Identity-aware authorization: principal→role→policy + sqlglot RLS/CLS rewrite |
 | `data_catalog.py` | Dataset catalog + query-cost discipline injected into the system prompt |
 | `infra/` | CDK app: S3 Tables bucket, DuckLake bucket, least-privilege execution role |
 | `scripts/load_s3tables.py` | One-command data load — DuckDB writes Iceberg via S3 Tables REST |
 | `scripts/ab_compare.py` | Reproduce the in-process vs. query-service comparison table |
 | `scripts/cleanup.sh` | Tear everything down (runtime + stack + data) |
-| `tests/unit/` | Unit tests (SQL gate, governance rewrite, truncation, path toggles, concurrency) — no network needed |
-| `docs/design.md` | Design notes: invariants, governance rationale, decision table |
+| `tests/unit/` | Unit tests (SQL gate, truncation, path toggles, concurrency) — no network needed |
+| `docs/design.md` | Design notes: invariants, decision table |
 
 ## Cost
 
@@ -197,18 +155,17 @@ compute resources; idle cost is storage only. Estimate with the
 
 Security considerations for deploying or adapting this sample:
 
-- **Authentication is delegated, not implemented.** Deploy with the AgentCore
-  inbound JWT authorizer so token signatures are verified before agent code
-  runs. Without it, the SigV4 identity paths (runtime user-id header, payload
-  identity) trust the calling application completely — restrict runtime
-  invoke permission to trusted infrastructure only.
-- **One session = one principal.** The governance layer's active-role state
-  is per-process, valid under AgentCore's one-microVM-per-session model. Do
-  not lift `governance.py` into a service that handles multiple principals
-  in one process (see the module docstring).
-- **Query-rewrite RLS/CLS bounds direct access, not inference.** For
-  high-sensitivity multi-tenant data, prefer physical separation (per-tenant
-  tables/views) over rewrite-based filtering.
+- **Access control is IAM.** The engine reads S3 with the execution role's
+  scoped read-only permissions; there is no application-level access control
+  in this sample. All principals invoking the runtime see the same data —
+  deploy per-audience runtimes (or per-tenant tables and roles) if different
+  users must see different data.
+- **The SQL gate bounds writes, not reads.** Agent-generated SQL is limited
+  to read statements and session-local temp tables; catalog mounts are
+  READ_ONLY and the IAM role carries no write permissions on data buckets.
+- **Authentication is the platform's job.** Protect the runtime endpoint with
+  the AgentCore inbound JWT authorizer or restrict SigV4 invoke permission to
+  trusted callers.
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for how to
 report security issues. Do not create public GitHub issues for security
