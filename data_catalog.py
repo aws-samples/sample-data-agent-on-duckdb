@@ -21,6 +21,8 @@ They are exposed as views over Parquet on the solution's own bucket, gated by
 the LABELS_PREFIX env var (empty = off, so raw-only runs still work).
 """
 
+import re
+
 S3_BASE = "s3://aws-public-blockchain/v1.0"
 
 
@@ -43,12 +45,54 @@ VIEW_DEFS = {
 # no hive layout, no partitioning). Built only when LABELS_PREFIX is set.
 LABEL_TABLES = ("ofac_addresses", "cex_deposit_labels")
 
+# LABELS_PREFIX is interpolated into read_parquet('<prefix>/<table>.parquet'),
+# and the tables it points at decide the OUTCOME of a screening (a swapped
+# ofac_addresses is a forged sanctions list). So the value is not trusted as
+# given: strict s3:// syntax only (no quotes, spaces, parentheses or other
+# schemes — nothing that could leave the literal), and the bucket must be one
+# the operator owns. With no explicit allowlist that means the bucket the CDK
+# stack provisions (duckdb-agent-ducklake-<account-id>).
+_S3_PREFIX_RE = re.compile(
+    r"^s3://(?P<bucket>[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?)(?P<key>(?:/[A-Za-z0-9._-]+)*)/?$"
+)
+SOLUTION_BUCKET_RE = re.compile(r"^duckdb-agent-ducklake-\d{12}$")
 
-def build_label_views(prefix: str) -> dict[str, str]:
-    """View defs for the label tables under an s3:// prefix (or local dir)."""
+
+def validate_labels_prefix(prefix: str, allowed_buckets: frozenset[str] | None = None) -> str:
+    """Return the normalized `s3://bucket/key` prefix or raise ValueError.
+
+    `allowed_buckets` is the operator's explicit allowlist (LABELS_ALLOWED_BUCKETS);
+    when None, only the solution-owned bucket name pattern qualifies. Called at
+    agent import so a bad value fails the process instead of serving queries.
+    """
+    m = _S3_PREFIX_RE.match(prefix.strip())
+    if not m:
+        raise ValueError(
+            "LABELS_PREFIX must be an s3://<bucket>/<key> prefix using only "
+            "[A-Za-z0-9._-] path characters"
+        )
+    bucket = m.group("bucket")
+    if any(seg in (".", "..") for seg in m.group("key").split("/")):
+        raise ValueError("LABELS_PREFIX must not contain '.' or '..' path segments")
+    if allowed_buckets is not None:
+        if bucket not in allowed_buckets:
+            raise ValueError(
+                f"LABELS_PREFIX bucket {bucket!r} is not in LABELS_ALLOWED_BUCKETS "
+                f"{sorted(allowed_buckets)}"
+            )
+    elif not SOLUTION_BUCKET_RE.match(bucket):
+        raise ValueError(
+            f"LABELS_PREFIX bucket {bucket!r} is not the solution-owned bucket "
+            "(duckdb-agent-ducklake-<account-id>); set LABELS_ALLOWED_BUCKETS to allow it"
+        )
+    return f"s3://{bucket}{m.group('key')}"
+
+
+def build_label_views(prefix: str, allowed_buckets: frozenset[str] | None = None) -> dict[str, str]:
+    """View defs for the label tables under a validated s3:// prefix."""
     if not prefix:
         return {}
-    base = prefix.rstrip("/")
+    base = validate_labels_prefix(prefix, allowed_buckets)
     return {name: f"read_parquet('{base}/{name}.parquet')" for name in LABEL_TABLES}
 
 

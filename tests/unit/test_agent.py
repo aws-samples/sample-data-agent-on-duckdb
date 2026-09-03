@@ -12,15 +12,26 @@ import pytest
 import agent as agent_mod
 import governance
 from agent import _run_sql_core as run_sql
-from data_catalog import CATALOG_DOC, S3_BASE, VIEW_DEFS, build_catalog_doc
+from data_catalog import (
+    CATALOG_DOC,
+    S3_BASE,
+    VIEW_DEFS,
+    build_catalog_doc,
+    build_label_views,
+    validate_labels_prefix,
+)
+
+UNRESTRICTED = "ops:admin"
 
 
 @pytest.fixture(autouse=True)
 def _reset_governance():
-    """Every test starts from the unrestricted default role."""
-    governance.set_active_role(governance.DEFAULT_ROLE)
+    """Every test starts from the unrestricted admin role — set EXPLICITLY. The
+    module default is the deny-all floor (see docs/design.md), so relying on
+    DEFAULT_ROLE here would make every plain SQL test fail closed."""
+    governance.set_active_role(UNRESTRICTED)
     yield
-    governance.set_active_role(governance.DEFAULT_ROLE)
+    governance.set_active_role(UNRESTRICTED)
 
 
 @pytest.fixture()
@@ -207,10 +218,8 @@ def test_catalog_doc_label_section_gated_by_flag():
 
 
 def test_build_label_views_off_when_prefix_empty():
-    from data_catalog import build_label_views
-
     assert build_label_views("") == {}
-    views = build_label_views("s3://bucket/labels")
+    views = build_label_views("s3://bucket/labels", frozenset({"bucket"}))
     assert set(views) == {"ofac_addresses", "cex_deposit_labels"}
     assert views["ofac_addresses"] == "read_parquet('s3://bucket/labels/ofac_addresses.parquet')"
 
@@ -265,9 +274,10 @@ def test_resolve_role_two_stage_mapping():
     assert governance.resolve_role({"tenant": "exchange-a", "role": "nobody"}).startswith(
         "exchange-a:"
     )
-    # unknown tenant / missing claims → default role
+    # unknown tenant / missing claims → default role, which is the deny-all floor
     assert governance.resolve_role({"tenant": "nobody", "role": "x"}) == governance.DEFAULT_ROLE
     assert governance.resolve_role(None) == governance.DEFAULT_ROLE
+    assert governance.DEFAULT_ROLE == governance.DENY_ALL_ROLE
 
 
 def test_unrestricted_role_passes_sql_through():
@@ -379,7 +389,7 @@ def test_governed_flag_false_for_unrestricted(local_conn):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Phase 7.5 code validation: three fail-open defects in the authorization path
+# Code validation, round 1: three fail-open defects in the authorization path
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -722,3 +732,281 @@ def test_map_event_does_not_confuse_tool_stream_data_with_text():
     ev = {"tool_stream_event": {"tool_use": {}, "data": {"phase": "gate", "allowed": True}}}
     out = agent_mod._map_event(ev, trace)
     assert out["kind"] == "trace"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Code validation, round 2 — the authorization audit (see docs/design.md):
+# local-name shadowing, opaque-statement fail-open, deny-all default,
+# policy-table validation, LABELS_PREFIX validation
+# ═══════════════════════════════════════════════════════════════════════════
+THREE_TENANT_LABELS = (
+    "CREATE TABLE cex_deposit_labels AS SELECT * FROM (VALUES "
+    "('0xa1', 'exchange-a', 'hot', 'cust-A1', 'high'), "
+    "('0xb1', 'exchange-b', 'hot', 'cust-B1', 'low'), "
+    "('0xc1', 'exchange-c', 'hot', 'cust-C1', 'mid')) "
+    "t(address, exchange, label, subject_identity, risk_tier)"
+)
+FOREIGN_PII = ("cust-B1", "cust-C1")
+
+
+@pytest.fixture()
+def labels_conn(local_conn):
+    """Three tenants' deposit labels — the shape the live bypass leaked."""
+    local_conn.execute(THREE_TENANT_LABELS)
+    return local_conn
+
+
+# ---------------- 1. a local name may not shadow a governed table ------------
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # the audit's reproduction: a CTE named like the governed table made BOTH
+        # references "local" — inner base-table ref unguarded, CLS check skipped
+        "WITH cex_deposit_labels AS (SELECT * FROM cex_deposit_labels) "
+        "SELECT subject_identity FROM cex_deposit_labels",
+        # identifiers are case-insensitive
+        "WITH CEX_DEPOSIT_LABELS AS (SELECT * FROM cex_deposit_labels) "
+        "SELECT * FROM cex_deposit_labels",
+        # materialised into a temp table for later plain reads
+        "CREATE TEMP TABLE stolen AS WITH cex_deposit_labels AS "
+        "(SELECT * FROM cex_deposit_labels) SELECT * FROM cex_deposit_labels",
+        # CTAS target named like the governed table exempted the right-hand source
+        "CREATE TEMP TABLE cex_deposit_labels AS SELECT * FROM cex_deposit_labels",
+        "CREATE TEMP VIEW cex_deposit_labels AS SELECT * FROM cex_deposit_labels",
+        # nested scope and recursive-CTE variants
+        "SELECT * FROM (WITH cex_deposit_labels AS (SELECT * FROM cex_deposit_labels) "
+        "SELECT * FROM cex_deposit_labels) x",
+        "WITH RECURSIVE cex_deposit_labels AS (SELECT * FROM cex_deposit_labels WHERE 1 = 0 "
+        "UNION ALL SELECT * FROM cex_deposit_labels) SELECT * FROM cex_deposit_labels",
+        # derived-table and table aliases
+        "SELECT * FROM (SELECT 1) AS cex_deposit_labels",
+        "SELECT * FROM eth_traces AS cex_deposit_labels",
+    ],
+)
+def test_local_name_shadowing_a_governed_table_is_rejected(sql):
+    governance.set_active_role(JUNIOR)
+    with pytest.raises(ValueError, match="shadow governed table"):
+        governance.apply_governance(sql)
+
+
+def test_cte_shadow_never_reaches_the_engine_end_to_end(labels_conn):
+    """The audit's live bypass replayed offline: before the fix this returned every
+    tenant's subject_identity to the junior principal (3 rows of KYC PII)."""
+    governance.set_active_role(JUNIOR)
+    out = run_sql(
+        "WITH cex_deposit_labels AS (SELECT * FROM cex_deposit_labels) "
+        "SELECT subject_identity FROM cex_deposit_labels"
+    )
+    assert out.startswith("ERROR: governance:")
+    for pii in ("cust-A1", *FOREIGN_PII):
+        assert pii not in out
+    # ...and the temp-table variant leaves nothing behind to read later
+    assert run_sql(
+        "CREATE TEMP TABLE stolen AS WITH cex_deposit_labels AS "
+        "(SELECT * FROM cex_deposit_labels) SELECT * FROM cex_deposit_labels"
+    ).startswith("ERROR: governance:")
+    assert "stolen" in run_sql("SELECT * FROM stolen")  # engine: no such table
+
+
+def test_temp_table_materialisation_carries_only_governed_rows(labels_conn):
+    """A legitimately named working set built from a governed table holds ONLY
+    the principal's rows and columns, so later ungoverned reads of the temp
+    table cannot widen access."""
+    governance.set_active_role(JUNIOR)
+    created = run_sql("CREATE TEMP TABLE ws AS SELECT * FROM cex_deposit_labels")
+    assert not created.startswith("ERROR"), created
+    rows = json.loads(run_sql("SELECT * FROM ws").split("\n")[0])
+    assert [r["exchange"] for r in rows] == ["exchange-a"]
+    assert "subject_identity" not in rows[0]
+
+
+def test_legitimate_cte_over_a_governed_table_is_still_governed(labels_conn):
+    governance.set_active_role(JUNIOR)
+    sql = "WITH w AS (SELECT * FROM cex_deposit_labels) SELECT * FROM w"
+    governed = governance.apply_governance(sql)
+    assert governed.count("exchange = 'exchange-a'") == 1
+    assert "EXCLUDE (subject_identity)" in governed
+    rows = json.loads(run_sql(sql).split("\n")[0])
+    assert len(rows) == 1 and "subject_identity" not in rows[0]
+
+
+def test_self_alias_of_a_governed_table_is_not_a_shadow():
+    governance.set_active_role(JUNIOR)
+    out = governance.apply_governance(
+        "SELECT address FROM cex_deposit_labels AS cex_deposit_labels"
+    )
+    assert "exchange = 'exchange-a'" in out
+
+
+# ---------------- 2. statement shapes the rewrite cannot see through --------
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "EXPLAIN SELECT subject_identity FROM cex_deposit_labels",
+        "EXPLAIN ANALYZE SELECT count(*) FROM cex_deposit_labels",
+        "SHOW cex_deposit_labels",  # sqlglot: opaque Command, no table nodes
+    ],
+)
+def test_opaque_statements_are_rejected_for_restricted_principals(sql):
+    """sqlglot parses EXPLAIN into an opaque Command with NO exp.Table nodes, so
+    the rewrite loop found nothing to guard and passed the statement through;
+    EXPLAIN ANALYZE then executed the ungoverned query and reported real
+    cardinalities of denied rows in the plan."""
+    governance.set_active_role(JUNIOR)
+    with pytest.raises(ValueError, match="cannot be governed"):
+        governance.apply_governance(sql)
+
+
+def test_explain_analyze_does_not_execute_for_restricted_principal(labels_conn):
+    governance.set_active_role(JUNIOR)
+    out = run_sql("EXPLAIN ANALYZE SELECT count(*) FROM cex_deposit_labels")
+    assert out.startswith("ERROR: governance:")
+    assert "Query Profiling" not in out and "analyzed_plan" not in out
+
+
+def test_explain_still_available_to_the_unrestricted_role():
+    sql = "EXPLAIN SELECT 1"
+    assert governance.apply_governance(sql) == sql
+
+
+def test_describe_and_summarize_of_a_governed_table_are_governed(labels_conn):
+    """DESCRIBE <table> / SUMMARIZE <table> take a relation, so the guard is
+    emitted as `DESCRIBE SELECT * FROM (guard)` — valid DuckDB, denied column
+    absent. (Before: an invalid `DESCRIBE (...) AS x` — closed by accident.)"""
+    governance.set_active_role(JUNIOR)
+    for stmt in ("DESCRIBE cex_deposit_labels", "SUMMARIZE cex_deposit_labels"):
+        out = run_sql(stmt)
+        assert not out.startswith("ERROR"), out
+        assert "subject_identity" not in out
+        assert '"governed": true' in out
+
+
+def test_pivot_operates_on_governed_rows_not_the_reverse(labels_conn):
+    """The PIVOT modifier is moved off the table node onto the guard, so the
+    policy applies to the base relation first and the pivot sees only
+    permitted rows."""
+    governance.set_active_role(JUNIOR)
+    sql = "SELECT * FROM cex_deposit_labels PIVOT (count(*) FOR label IN ('hot'))"
+    governed = governance.apply_governance(sql)
+    assert governed.index("exchange = 'exchange-a'") < governed.index("PIVOT")
+    rows = json.loads(run_sql(sql).split("\n")[0])
+    assert len(rows) == 1 and rows[0]["exchange"] == "exchange-a"
+
+
+# ---------------- 3. missing identity must land on the deny-all floor -------
+def test_default_role_is_deny_all():
+    assert governance.DEFAULT_ROLE == governance.DENY_ALL_ROLE
+    assert governance.POLICIES[governance.DENY_ALL_ROLE]["deny_all"] is True
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        None,
+        {},
+        {"tenant": "", "role": ""},
+        {"tenant": "nobody", "role": "admin"},
+        {"role": "admin"},
+    ],
+)
+def test_unusable_claims_resolve_to_deny_all(claims):
+    """Blank or unknown-tenant claims used to resolve to ops:admin."""
+    assert governance.resolve_role(claims) == governance.DENY_ALL_ROLE
+
+
+def test_deny_all_rejects_every_statement_before_parsing(local_conn):
+    governance.set_active_role(governance.DENY_ALL_ROLE)
+    assert governance.is_denied_all()
+    for sql in ("SELECT 1", "SELECT * FROM t", "DESCRIBE t", "SELECT ??? FROM !!!"):
+        with pytest.raises(ValueError, match="access denied"):
+            governance.apply_governance(sql)
+    assert run_sql("SELECT 1").startswith("ERROR: governance:")
+
+
+def test_unknown_role_key_falls_to_deny_all_not_admin():
+    governance.set_active_role("no-such:role")
+    assert governance.active_role() == governance.DENY_ALL_ROLE
+
+
+def test_deny_all_outranks_every_other_policy_in_restrictiveness(monkeypatch):
+    monkeypatch.setattr(
+        governance,
+        "POLICIES",
+        {
+            "t:none": {"allow_raw_paths": False, "deny_all": True, "tables": {}},
+            "t:analyst": {"allow_raw_paths": False, "tables": {"a": {"row_filter": "x = 1"}}},
+            governance.DENY_ALL_ROLE: {"allow_raw_paths": False, "deny_all": True, "tables": {}},
+        },
+    )
+    assert governance.resolve_role({"tenant": "t", "role": "zzz"}) == "t:none"
+
+
+def test_entrypoint_short_circuits_deny_all_without_running_the_agent(monkeypatch):
+    """No identity → one clear refusal envelope; the model is never invoked."""
+    called = []
+    monkeypatch.setattr(agent_mod.agent, "stream_async", lambda *_a, **_k: called.append(1))
+    events = _drain(agent_mod.invoke({"prompt": "hi"}, context=None))
+    assert not called
+    assert [e["kind"] for e in events] == ["start", "text", "result"]
+    assert events[0]["principal"] == governance.DENY_ALL_ROLE
+    assert "Access denied" in events[1]["text"]
+    assert events[-1]["denied"] is True
+
+
+# ---------------- 4. the policy table is validated at load (T011 / M013) ----
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"ops-admin": {"allow_raw_paths": True, "tables": {}}},  # not <tenant>:<role>
+        # raw paths bypass table rules — the combination promises what it can't keep
+        {"t:r": {"allow_raw_paths": True, "tables": {"a": {"row_filter": "x = 1"}}}},
+        {"t:r": {"tables": {"a": {"row_filter": "x = 1; DROP TABLE a"}}}},  # 2 statements
+        {"t:r": {"tables": {"a": {"row_filter": "x = 1) OR (1 = 1"}}}},  # unbalanced
+        {"t:r": {"tables": {"a": {"deny_columns": ["c) FROM t --"]}}}},  # not an identifier
+        {"t:r": {"tables": {"a b": {}}}},  # table name not an identifier
+        {"t:r": {"tables": {"a": {"rowfilter": "x = 1"}}}},  # typo'd rule key
+        {"t:r": {"allow_raw_paths": "yes", "tables": {}}},  # flag not boolean
+        {"t:r": {"tables": {}, "extra": 1}},  # unknown policy key
+        # the floor itself cannot be redefined as something permissive
+        {"t:r": {"tables": {}}, "deny-all": {"allow_raw_paths": True, "tables": {}}},
+    ],
+)
+def test_malformed_policy_tables_are_rejected_at_load(bad):
+    bad.setdefault(governance.DENY_ALL_ROLE, {"deny_all": True, "tables": {}})
+    with pytest.raises(ValueError, match="governance:"):
+        governance._validate_policies(bad)
+
+
+def test_shipped_policy_table_validates_and_contains_the_floor():
+    governance._validate_policies(governance.POLICIES)
+    assert governance.DENY_ALL_ROLE in governance.POLICIES
+
+
+# ---------------- 5. LABELS_PREFIX is validated, never interpolated blindly --
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "s3://attacker-bucket/labels",  # not the solution bucket, no allowlist
+        # the string is interpolated into read_parquet('<prefix>/...'): closing
+        # quote + UNION must be impossible
+        "s3://duckdb-agent-ducklake-123456789012/l') UNION ALL SELECT * FROM read_parquet('s3://x/y",
+        "s3://Duckdb-Agent-Ducklake-123456789012/labels",  # uppercase bucket
+        "gs://duckdb-agent-ducklake-123456789012/labels",  # other scheme
+        "/tmp/labels",  # local path
+        "s3://duckdb-agent-ducklake-123456789012/la bels",  # whitespace
+        "s3://duckdb-agent-ducklake-123456789012/../other",
+    ],
+)
+def test_label_prefix_outside_the_allowlist_or_malformed_is_rejected(prefix):
+    with pytest.raises(ValueError, match="LABELS_PREFIX"):
+        validate_labels_prefix(prefix)
+
+
+def test_label_prefix_accepts_solution_bucket_and_explicit_allowlist():
+    ok = validate_labels_prefix("s3://duckdb-agent-ducklake-123456789012/labels/")
+    assert ok == "s3://duckdb-agent-ducklake-123456789012/labels"
+    assert (
+        validate_labels_prefix("s3://my-labels/v2", frozenset({"my-labels"})) == "s3://my-labels/v2"
+    )
+    with pytest.raises(ValueError, match="LABELS_ALLOWED_BUCKETS"):
+        validate_labels_prefix("s3://other/v2", frozenset({"my-labels"}))

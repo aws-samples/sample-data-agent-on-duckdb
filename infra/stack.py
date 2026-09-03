@@ -154,11 +154,27 @@ class DataAgentStack(Stack):
             password_policy=cognito.PasswordPolicy(min_length=8),
             removal_policy=RemovalPolicy.DESTROY,
         )
+        # Attribute permissions decide WHO can set the governance claims. CDK's
+        # default app client may read AND write every attribute, custom ones
+        # included — so an authenticated junior could call UpdateUserAttributes
+        # on their own account, set custom:role=admin, sign in again and become
+        # ops:admin. The ID token must still CARRY
+        # tenant/role (read), but role assignment is an operator action
+        # (AdminUpdateUserAttributes), never self-service: custom:* is absent
+        # from the write set.
+        readable = (
+            cognito.ClientAttributes()
+            .with_standard_attributes(email=True, email_verified=True, preferred_username=True)
+            .with_custom_attributes("tenant", "role")
+        )
+        writable = cognito.ClientAttributes().with_standard_attributes(email=True)
         user_pool_client = user_pool.add_client(
             "UiClient",
             user_pool_client_name="duckdb-agent-ui",
             generate_secret=True,
             auth_flows=cognito.AuthFlow(user_password=True, admin_user_password=True),
+            read_attributes=readable,
+            write_attributes=writable,
         )
 
         # --- Outputs consumed by agentcore configure / env -----------------

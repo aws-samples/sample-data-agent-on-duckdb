@@ -44,10 +44,13 @@ DEMO_PERSONAS = {
 
 # ONE shared investigation script for every persona, so you can log in as each
 # and run the identical questions to see where the governance policy changes
-# the result. Q4 is the permission litmus test: it explicitly asks for the
-# subject_identity (customer PII) column — ops:admin and investigator get it,
+# the result. Q4 is the permission litmus test: it asks for the subject_identity
+# (customer PII) column as an analyst would — ops:admin and investigator get it,
 # junior is cleanly denied that column (CLS), while all three still see only
 # their own tenant's label rows (RLS). Q5 probes the raw-path boundary.
+# Phrase these as a working analyst would, with no hint that a boundary is being
+# probed: telling the model to "say so if a column is unavailable" coaches the
+# very behaviour the test is meant to observe, and no real user asks that way.
 EXAMPLE_QUESTIONS = [
     "The exploiter address is 0x47666fab8bd0ac7003bce3f5c3585383f09486e2. Using "
     "s3t.blockchain.eth_traces, find the single largest inbound internal call to it "
@@ -56,9 +59,8 @@ EXAMPLE_QUESTIONS = [
     "many distinct recipients and the equal-amount fan-out pattern.",
     "Join the recipients against cex_deposit_labels — did any funds reach a known "
     "exchange deposit address (cash-out)?",
-    "⚖️ Permission test — for every cex_deposit_labels row you can see, list the "
-    "address, exchange, risk_tier AND the subject_identity (the customer behind each "
-    "deposit address). If any column or row is not available to you, say so explicitly.",
+    "For every cex_deposit_labels row you can see, list the address, exchange, "
+    "risk_tier AND the subject_identity (the customer behind each deposit address)",
     "⚖️ Permission test — run a direct read_parquet() over the raw eth/traces S3 path "
     "for 2025-02-21 and count the rows.",
 ]
@@ -155,7 +157,18 @@ def render_stream(id_token: str, prompt: str, session_id: str) -> dict:
                 )
                 sql_slot = st.empty()
                 phase_slot = st.empty()
-        seg = {"type": "tool", "sql": "", "phases": [], "_sql": sql_slot, "_phase": phase_slot}
+                # filled only when governance rewrote the statement, so the
+                # reader can compare what the model wrote with what ran
+                governed_slot = st.empty()
+        seg = {
+            "type": "tool",
+            "sql": "",
+            "phases": [],
+            "governed_sql": "",
+            "_sql": sql_slot,
+            "_phase": phase_slot,
+            "_governed": governed_slot,
+        }
         segments.append(seg)
         return seg
 
@@ -185,6 +198,9 @@ def render_stream(id_token: str, prompt: str, session_id: str) -> dict:
             if cur_tool is not None:
                 cur_tool["phases"].append(_phase_line(env))
                 cur_tool["_phase"].markdown("\n\n".join(cur_tool["phases"]))
+                if env.get("phase") == "rewrite" and env.get("rewritten_sql"):
+                    cur_tool["governed_sql"] = env["rewritten_sql"]
+                    _render_governed_sql(cur_tool["_governed"], env["rewritten_sql"])
             final_trace.append(env)
         elif kind == "result":
             final_trace = env.get("trace", final_trace)
@@ -210,6 +226,8 @@ def replay_transcript(segments: list[dict]) -> None:
                     st.code(seg["sql"], language="sql")
                 if seg.get("phases"):
                     st.markdown("\n\n".join(seg["phases"]))
+                if seg.get("governed_sql"):
+                    _render_governed_sql(st, seg["governed_sql"])
 
 
 def _pretty_sql(raw: str) -> str:
@@ -219,6 +237,24 @@ def _pretty_sql(raw: str) -> str:
         return obj.get("sql", raw) if isinstance(obj, dict) else raw
     except (json.JSONDecodeError, TypeError):
         return raw or "…"
+
+
+def _render_governed_sql(slot, sql: str) -> None:
+    """Show the statement the ENGINE ran, next to the one the model wrote.
+
+    The code block in the card is the model's SQL (the `tool_start` input); the
+    engine only ever receives the rewritten statement. Without this block the
+    two are indistinguishable in the UI, and a reader has no way to see WHERE
+    the RLS predicate landed — a governed run looks identical to an ungoverned
+    one apart from a summary line. The rewrite puts the policy INSIDE a guard
+    subquery around the table reference rather than appending to the user's
+    WHERE, which is exactly the part worth showing.
+    """
+    with slot.container():
+        with st.expander("🛡️ governed SQL — what the engine actually executed"):
+            st.code(sql, language="sql", wrap_lines=True)
+            if len(sql) >= 600:  # the entrypoint truncates rewritten_sql at 600
+                st.caption("Truncated at 600 characters by the runtime trace.")
 
 
 def _phase_line(env: dict) -> str:
@@ -309,7 +345,7 @@ def main() -> None:
             st.subheader("Investigation script")
             st.caption(
                 "Same questions for every persona — run them as investigator, then "
-                "log out and re-run as junior to see the ⚖️ permission tests diverge."
+                "log out and re-run as junior to see questions 4 and 5 diverge."
             )
             for i, q in enumerate(EXAMPLE_QUESTIONS, 1):
                 if st.button(f"{i}. {q}", use_container_width=True, key=f"ex{i}"):

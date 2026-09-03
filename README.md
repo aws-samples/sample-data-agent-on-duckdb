@@ -116,9 +116,20 @@ contract (verified claims):
   every other file-reading table function) is rejected via an AST-shape
   allowlist. Fail-closed on unparseable input; an unknown role falls back to
   its tenant's *most restricted* policy.
+- **The rewrite is total, by construction.** Coverage gaps are how query-rewrite
+  governance actually fails, so three rules keep the guarantee whole: a
+  statement shape the parser cannot model (`EXPLAIN`, opaque commands) is
+  rejected rather than passed through; a CTE, temp table or alias may not
+  shadow a governed table's name, so a governed name always resolves to the
+  governed table; and a principal whose claims match no policy gets the
+  built-in `deny-all` floor, never a permissive default. Each rule closes a
+  bypass that was proven executable against this code — the reasoning is in
+  [docs/design.md](docs/design.md).
 - **Policies are configuration** (`GOVERNANCE_POLICIES` env, JSON): per-table
   `row_filter` / `deny_columns` + an `allow_raw_paths` switch, keyed by
-  `tenant:role`.
+  `tenant:role`. Validated at startup (key shape, bare identifiers, the
+  `row_filter` must parse as one predicate), so a typo fails the process
+  instead of quietly widening access.
 - Applies identically across all four access methods (policy matches the
   logical table name), and the streaming trace labels every decision — which
   row filter, which hidden column, or the rejection.
@@ -160,9 +171,21 @@ cd ui && pip install -r requirements.txt
 COGNITO_CLIENT_SECRET=<secret> AGENT_REGION=<your-region> streamlit run app.py
 ```
 
-Local one-shot mode (no runtime deployment): `./.venv/bin/python agent.py "your question"`
-resolves identity from a payload `identity` object; the deployed runtime uses the
-Cognito JWT. Copy `.env.example` to set the optional path/label toggles.
+Local one-shot mode (no runtime deployment) needs an explicit principal, because
+the default role is deny-all and a missing identity must never mean full access:
+
+```bash
+./.venv/bin/python agent.py --as ops:admin "your question"
+./.venv/bin/python agent.py --as exchange-a:junior "your question"   # governed
+```
+
+The deployed runtime takes identity from the Cognito JWT instead. Copy
+`.env.example` to set the optional path/label toggles.
+
+> The Cognito app client is created with `custom:tenant` / `custom:role` as
+> **read-only** attributes. Role assignment is an operator action
+> (`AdminUpdateUserAttributes`); if the client could write them, any signed-in
+> user could set `custom:role=admin` and re-authenticate into full access.
 
 > On `allowedAudience` vs `allowedClients`: Cognito puts custom attributes
 > (`custom:tenant` / `custom:role`) in the **ID token**, whose `aud` claim is

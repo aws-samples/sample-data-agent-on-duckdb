@@ -24,7 +24,7 @@ from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands import Agent, tool
 
 import governance
-from data_catalog import VIEW_DEFS, build_catalog_doc, build_label_views
+from data_catalog import VIEW_DEFS, build_catalog_doc, build_label_views, validate_labels_prefix
 
 MODEL_ID = os.environ.get("MODEL_ID", "global.anthropic.claude-sonnet-4-6")
 QUERY_TIMEOUT_ROWS = 200  # hard cap on rows returned to the model
@@ -36,6 +36,19 @@ GLUE_CATALOG = os.environ.get("GLUE_CATALOG", "")  # glue: '<acct>:s3tablescatal
 # Attribution label tables (ofac_addresses + cex_deposit_labels) under this
 # s3:// prefix; empty = off (raw ledger only, no entity attribution).
 LABELS_PREFIX = os.environ.get("LABELS_PREFIX", "")
+# The prefix is interpolated into read_parquet() and decides what the sanctions
+# screen compares against, so it is validated at import (strict s3:// syntax +
+# bucket allowlist) and a bad value stops the process instead of serving
+# queries over attacker-chosen files. Default allowlist = the CDK-provisioned
+# solution bucket; LABELS_ALLOWED_BUCKETS (comma-separated) overrides it.
+LABELS_ALLOWED_BUCKETS = (
+    frozenset(
+        b.strip() for b in os.environ.get("LABELS_ALLOWED_BUCKETS", "").split(",") if b.strip()
+    )
+    or None
+)
+if LABELS_PREFIX:
+    validate_labels_prefix(LABELS_PREFIX, LABELS_ALLOWED_BUCKETS)  # fail-stop on misconfiguration
 # dl: DuckLake catalog. Two forms:
 #   's3://.../catalog.ducklake'        — DuckDB-file catalog (single-writer)
 #   'postgres:dbname=...'              — RDS PostgreSQL catalog (multi-client);
@@ -141,7 +154,7 @@ def get_conn() -> duckdb.DuckDBPyConnection:
         )
         for name, src in VIEW_DEFS.items():
             c.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}")  # nosec B608 - name/src are VIEW_DEFS literals in data_catalog.py, not input  # nosemgrep: sqlalchemy-execute-raw-query -- static VIEW_DEFS literals
-        for name, src in build_label_views(LABELS_PREFIX).items():
+        for name, src in build_label_views(LABELS_PREFIX, LABELS_ALLOWED_BUCKETS).items():
             c.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}")  # nosec B608 - name is a LABEL_TABLES literal, src derived from operator env  # nosemgrep: sqlalchemy-execute-raw-query -- label views from operator env
         _attach_legs(c)
 
@@ -473,6 +486,20 @@ async def invoke(payload, context=None):
     """
     claims = _resolve_claims(payload, context)
     governance.set_active_role(governance.resolve_role(claims))
+    if governance.is_denied_all():
+        # No usable identity → the deny-all floor. Refuse before the model runs:
+        # run_sql would reject every statement anyway (defence in depth), but
+        # spending Bedrock tokens to discover that is pointless, and the caller
+        # deserves one clear answer. Previously this case became ops:admin.
+        role = governance.active_role()
+        yield _envelope("start", principal=role)
+        yield _envelope(
+            "text",
+            text="Access denied: no governance policy is assigned to this identity. "
+            "Sign in with an account that carries tenant/role claims.",
+        )
+        yield _envelope("result", principal=role, trace=[], denied=True)
+        return
     user_msg = payload.get(
         "prompt", "Trace the flow of funds for the incident under investigation."
     )
@@ -488,8 +515,39 @@ async def invoke(payload, context=None):
     yield _envelope("result", principal=governance.active_role(), trace=trace)
 
 
+def _cli_role(argv: list[str]) -> tuple[str, list[str]]:
+    """Pull `--as <tenant>:<role>` out of the local CLI args.
+
+    Local runs have no IdP, so the principal must be stated explicitly: the
+    default role is the deny-all floor and would reject every query (that is
+    the point — a missing identity is never the admin identity). AGENT_ROLE
+    works too, for shells that would rather export it.
+    """
+    args = list(argv)
+    role = os.environ.get("AGENT_ROLE", "")
+    if "--as" in args:
+        i = args.index("--as")
+        if i + 1 >= len(args):
+            sys.exit('usage: agent.py --as <tenant>:<role> "question"')
+        role = args[i + 1]
+        del args[i : i + 2]
+    if not role:
+        sys.exit(
+            "no identity: pass --as <tenant>:<role> (or set AGENT_ROLE). Known roles: "
+            + ", ".join(sorted(k for k in governance.POLICIES if k != governance.DENY_ALL_ROLE))
+        )
+    if role not in governance.POLICIES:
+        sys.exit(f"unknown role {role!r}; known roles: {sorted(governance.POLICIES)}")
+    return role, args
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1:  # local one-shot: python agent.py "question"
-        print(agent(" ".join(sys.argv[1:])))
+    if len(sys.argv) > 1:  # local one-shot: agent.py --as ops:admin "question"
+        cli_role, rest = _cli_role(sys.argv[1:])
+        governance.set_active_role(cli_role)
+        if not rest:
+            sys.exit('usage: agent.py --as <tenant>:<role> "question"')
+        print(f"[principal: {governance.active_role()}]")
+        print(agent(" ".join(rest)))
     else:
         app.run()

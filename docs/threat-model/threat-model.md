@@ -2,6 +2,8 @@
 
 **Generated**: 2026-09-02 22:31:13
 **Current Phase**: 9 - Output Generation and Documentation
+
+**Code validation re-run**: 2026-09-03 (round 2 - see "Code Validation Round 2" below; two authorization bypasses and one identity-source escalation were found in code that this model had marked resolved)
 **Overall Completion**: 100.0%
 
 ## Table of Contents
@@ -24,8 +26,8 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 
 ### Key Statistics
 
-- **Total Threats**: 16
-- **Total Mitigations**: 16
+- **Total Threats**: 18
+- **Total Mitigations**: 22
 - **Total Assumptions**: 5
 - **System Components**: 9
 - **Assets**: 5
@@ -88,7 +90,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 
 ### Non-Functional Requirements
 
-- **Fail-Safe Behaviour**: Revert to safe state — The governance layer must fail closed: a restricted principal must never observe rows or columns outside their policy via any of the four access paths. Unparseable SQL, schema-probe failure, unknown principal (falls to the tenant's MOST restricted policy or the default role), and explicit denied-column selection must result in rejection or the most restrictive policy - never fail-open. Verified by mutation testing (Phase 7.5 fixes).
+- **Fail-Safe Behaviour**: Revert to safe state — The governance layer must fail closed: a restricted principal must never observe rows or columns outside their policy via any of the four access paths. Unparseable SQL, schema-probe failure, unknown principal (falls to the tenant's MOST restricted policy or the default role), and explicit denied-column selection must result in rejection or the most restrictive policy - never fail-open. Verified by mutation testing (code-validation fixes). Re-validated 2026-09-03 (round 2): completeness is part of the requirement - unmodellable statement shapes are rejected, local names may not shadow governed tables, and a principal with no policy gets the deny-all floor rather than an unrestricted default.
 - **User Error Protection**: Strong — Agent-generated SQL (which may be wrong or adversarial via prompt injection) must not write persistently, exfiltrate to external targets (COPY TO), attach foreign databases, smuggle a second statement behind a read (single-statement rule enforced with the engine's own parser), or reach raw file-reading table functions as a restricted principal (AST-shape allowlist, not a name denylist).
 
 ## System Architecture
@@ -329,7 +331,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 
 - **Type**: Process
 - **Controls**: single-statement rule via duckdb.extract_statements (engine's own parser), leading-comment stripping before keyword classification, read-only statement allowlist (read + CREATE TEMP), governance rewrite: RLS guarded subqueries, schema-aware CLS EXCLUDE, explicit denied-column selection rejected with a legible policy error, raw table functions: AST-shape ALLOWLIST (Identifier sources only; pure generators excepted), fail-closed on unparseable SQL
-- **Description**: LLM-generated SQL (attacker-influenceable via prompt injection) crosses into the agent process. THE central boundary of this model. All controls mutation-tested (Phase 7.5).
+- **Description**: LLM-generated SQL (attacker-influenceable via prompt injection) crosses into the agent process. THE central boundary of this model. All controls mutation-tested (code validation).
 
 #### Agent -> customer data plane
 
@@ -378,8 +380,8 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Tags**: prompt-injection, authz-bypass, core-threat
 - **Residual Risk Decision**: Mitigated
 - **Residual Severity**: Low
-- **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: AST-level rewrite covers all four access paths; denied-column selection is a clean pre-engine rejection; cloud-verified per-persona. Residual: novel sqlglot-vs-DuckDB semantic divergence - bounded by fail-closed parsing and a read-only worst case.
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: AST-level rewrite covers all four access paths; the completeness rules close the two bypasses found on 2026-09-03 - local names may not shadow a governed table (M018) and unmodellable statement shapes are rejected (M017) - so a governed name always denotes the governed table and no statement reaches the engine unrewritten. 49 adversarial regressions (nine shadowing shapes incl. recursive CTE, CTAS target and alias forms) plus per-persona cloud verification on runtime v15. Residual: novel sqlglot-vs-DuckDB semantic divergence, bounded by fail-closed parsing and a read-only worst case.
 - **Assessment State**: Current
 
 #### T2: Restricted end user via LLM prompt injection
@@ -394,7 +396,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Residual Risk Decision**: Mitigated
 - **Residual Severity**: Low
 - **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Unparseable SQL is rejected for restricted principals (fail-closed). A statement would need to parse cleanly in sqlglot AND mean something different to DuckDB - possible but narrow; worst case still read-only within the session.
+- **Residual Risk Rationale**: Unparseable SQL is rejected for restricted principals, and SQL that parses only as an opaque Command is now rejected too (M017) - previously the fail-closed claim covered parse FAILURE but not parse DEGRADATION, which was the live bypass. A statement would need to parse cleanly into a governable root in sqlglot AND mean something different to DuckDB; worst case is still read-only within the session.
 - **Assessment State**: Current
 
 #### T3: Restricted end user via LLM prompt injection
@@ -484,7 +486,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Residual Risk Decision**: Accepted
 - **Residual Severity**: Medium
 - **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Bearer-token theft is inherent to token auth; lifetime bounds exposure. Demo credentials are documented as rotate-before-exposing (operator responsibility). Analyst-host security is out of scope for a sample. Production guidance: short token TTLs, MFA on the pool, restrict the app client.
+- **Residual Risk Rationale**: Bearer-token theft is inherent to token auth; lifetime bounds exposure. The app client can no longer write custom:tenant/custom:role, so a stolen session cannot be escalated beyond the victim's own role (M020, T018). Demo credentials remain rotate-before-exposing (operator responsibility) and MFA is deliberately OFF for demo convenience - production guidance: short token TTLs, MFA on the pool, restricted app client. Analyst-host security is out of scope for a sample.
 - **Assessment State**: Current
 
 #### T9: Restricted end user
@@ -499,7 +501,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Residual Risk Decision**: Accepted
 - **Residual Severity**: Low
 - **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Inference/side channels against RLS/CLS are an industry-wide limitation of query-rewrite governance (shared with BI-tool row-level security and warehouse RLS). Not-for-production disclaimer + guidance to use physical separation for high-sensitivity multi-tenant data. Sample dataset is public/synthetic.
+- **Residual Risk Rationale**: Inference/side channels against RLS/CLS are an industry-wide limitation of query-rewrite governance (shared with BI-tool row-level security and warehouse RLS). One CONCRETE oracle in this class - EXPLAIN ANALYZE reporting true cardinalities of denied rows - was a real defect, not an accepted residual, and is closed by M017. What remains accepted is aggregate-inference and timing, with guidance to use physical separation for high-sensitivity multi-tenant data. Sample dataset is public/synthetic.
 - **Assessment State**: Current
 
 #### T10: Restricted end user
@@ -526,9 +528,9 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Impacted Assets**: A004
 - **Tags**: misconfiguration, policy
 - **Residual Risk Decision**: Accepted
-- **Residual Severity**: Medium
+- **Residual Severity**: Low
 - **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Policy authoring is the operator's responsibility (same class as IAM policy authoring). Malformed JSON fail-stops; unknown principals fail closed. Semantic policy lint remains a recommended future hardening (M013 in progress); the governed trace (M011) gives an audit signal.
+- **Residual Risk Rationale**: Policy authoring remains the operator's responsibility, but the two fail-open defaults are gone: the default role is the deny-all floor rather than ops:admin (M019), and the policy table is validated at load - key shape, known fields, bare identifiers, one-predicate row_filter, no allow_raw_paths-with-governed-tables (M021). LABELS_PREFIX, which decides what a sanctions screen compares against, is validated and bucket-restricted (M022). Residual: a semantically wrong but well-formed policy (e.g. an over-broad row_filter) still governs as written; the governed trace (M011) gives the audit signal.
 - **Assessment State**: Current
 
 #### T12: Restricted end user
@@ -605,13 +607,43 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Residual Risk Rationale**: Deliberate transparency tradeoff: the trace shows the principal only their OWN policy application - the same information the clean rejection message conveys - never another tenant's policy or data. Deployments preferring opacity have a single filter point (_map_event). Demo legibility is the sample's purpose.
 - **Assessment State**: Current
 
+#### T17: Restricted end user via LLM prompt injection
+
+**Statement**: A Restricted end user via LLM prompt injection Valid restricted session; the governance rewrite is driven by a sqlglot parse and the read-only gate accepts EXPLAIN as a read keyword can Submits a statement shape sqlglot cannot model (EXPLAIN, EXPLAIN ANALYZE, SHOW <table>), which parses to an opaque Command node carrying no table references, so the rewrite loop finds nothing to guard and returns the statement untouched, which leads to Ungoverned execution of the inner query: EXPLAIN ANALYZE really runs it and reports true cardinalities of policy-denied rows in the query plan - a side-channel oracle over denied data, and a passthrough for any shape that returns rows
+
+- **Prerequisites**: Valid restricted session; the governance rewrite is driven by a sqlglot parse and the read-only gate accepts EXPLAIN as a read keyword
+- **Action**: Submits a statement shape sqlglot cannot model (EXPLAIN, EXPLAIN ANALYZE, SHOW <table>), which parses to an opaque Command node carrying no table references, so the rewrite loop finds nothing to guard and returns the statement untouched
+- **Impact**: Ungoverned execution of the inner query: EXPLAIN ANALYZE really runs it and reports true cardinalities of policy-denied rows in the query plan - a side-channel oracle over denied data, and a passthrough for any shape that returns rows
+- **Impacted Assets**: A001
+- **Tags**: authz-bypass, parser-coverage, fail-open, phase-7.5-round-2
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: Statement-shape allowlist on the parsed root (M017) rejects opaque shapes for restricted principals; regression tests cover EXPLAIN, EXPLAIN ANALYZE and SHOW <table>, and cloud acceptance confirms no plan is emitted. Residual: a NEW syntax that sqlglot models as a governable root but DuckDB interprets differently - bounded by the read-only gate and the same fail-closed parse as T002.
+- **Assessment State**: Current
+
+#### T18: Restricted end user (authenticated, low privilege) at the identity source
+
+**Statement**: A Restricted end user (authenticated, low privilege) at the identity source Valid Cognito login; the app client carries no explicit attribute permissions, so it may write every attribute including custom ones; the agent's authorization is entirely claim-driven can Calls UpdateUserAttributes with their own access token to set custom:role=admin (and custom:tenant=ops), then re-authenticates to obtain an ID token carrying the escalated claims, which leads to Total privilege escalation: the authorization layer honours the rewritten claims, so a junior analyst becomes the unrestricted ops:admin principal - every row, every column, raw path access, across all four access methods
+
+- **Prerequisites**: Valid Cognito login; the app client carries no explicit attribute permissions, so it may write every attribute including custom ones; the agent's authorization is entirely claim-driven
+- **Action**: Calls UpdateUserAttributes with their own access token to set custom:role=admin (and custom:tenant=ops), then re-authenticates to obtain an ID token carrying the escalated claims
+- **Impact**: Total privilege escalation: the authorization layer honours the rewritten claims, so a junior analyst becomes the unrestricted ops:admin principal - every row, every column, raw path access, across all four access methods
+- **Impacted Assets**: A001, A002, A003
+- **Tags**: privilege-escalation, identity-source, cognito, phase-7.5-round-2
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: App client attribute permissions make custom:tenant/custom:role read-only (M020); verified live against the deployed pool - UpdateUserAttributes returns NotAuthorizedException and claims are unchanged after re-login. Residual: an operator with Cognito admin rights can still misassign roles (same class as IAM role assignment, A007), and MFA is deliberately OFF in this demo, so a stolen password is a stolen identity (T008).
+- **Assessment State**: Current
+
 ## Mitigations
 
 ### Resolved Mitigations
 
-#### M1: Governance rewrite operates on the parsed AST, not string matching: every reference to a governed logical table - via raw view, s3t.*, glue.* or dl.* alias - is replaced by a guarded subquery (RLS predicate + schema-aware CLS EXCLUDE); CTE/CTAS-local names skipped; alias semantics preserved in joins. Explicit selection of a denied column is rejected pre-engine with a legible policy error naming the column and role (never an opaque binder error).
+#### M1: Governance rewrite operates on the parsed AST, not string matching: every reference to a governed logical table - via raw view, s3t.*, glue.* or dl.* alias - is replaced by a guarded subquery (RLS predicate + schema-aware CLS EXCLUDE); alias semantics preserved in joins. Local names may NOT shadow a governed table (M018) - the earlier 'skip CTE/CTAS-local names' exemption was itself the bypass - so every table node carrying a governed name is guarded. Governable statement shapes are allowlisted (M017). Explicit selection of a denied column is rejected pre-engine with a legible policy error naming the column and role (never an opaque binder error).
 
-**Addresses Threats**: T1, T2, T9
+**Addresses Threats**: T1, T2, T9, T17
 
 #### M2: Fail-closed on parse failure: SQL that sqlglot cannot parse is REJECTED for restricted principals (ValueError), never passed through. Unrestricted principals (allow_raw_paths + no governed tables) bypass rewrite by explicit policy only.
 
@@ -665,9 +697,31 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 
 **Addresses Threats**: T8
 
-### In Progress Mitigations
+#### M17: Statement shapes are an ALLOWLIST on the parsed root (Select, SetOperation, Subquery, Create, Describe, Summarize, Show). sqlglot renders anything it cannot model - EXPLAIN, EXPLAIN ANALYZE, SHOW <table>, future syntax - as an opaque Command node with NO table references, which the rewrite loop silently passed through; EXPLAIN ANALYZE then executed the ungoverned inner query and reported denied-row cardinalities in the plan. Everything outside the allowlist is now rejected for restricted principals. DESCRIBE/SUMMARIZE of a governed table emit the guard as DESCRIBE SELECT * FROM (guard); a PIVOT modifier is moved onto the guard so it aggregates governed rows.
 
-#### M13: Policy-as-configuration with fail-safe default: GOVERNANCE_POLICIES is JSON env config; unknown principals resolve to the tenant's most restricted policy or the configured default role. RECOMMENDED HARDENING (documentation): ship the default-role example as a restricted policy and validate policy JSON at startup (reject unknown keys / empty-tables-with-allow_raw_paths combinations).
+**Addresses Threats**: T1, T2, T9, T17
+
+#### M18: Local names may not shadow governed tables: a CTE, CTAS/temp table, temp view, derived-table alias or table alias that reuses a governed table's name is REJECTED, replacing the previous 'skip table nodes bearing a local name' exemption which unguarded the real base table (RLS and CLS both bypassed, cross-tenant PII proven readable). Refusing the collision - rather than scoping the exemption across recursive CTEs, nested scopes and DuckDB's temp-schema search order - makes the invariant total: with no collision possible, a governed name always denotes the governed table and every reference is guarded.
+
+**Addresses Threats**: T1
+
+#### M19: Deny-all floor as the default role: the built-in 'deny-all' policy is always present in the policy table, is the default when GOVERNANCE_DEFAULT_ROLE is unset, and is where blank / missing / unknown-tenant claims resolve. It rejects every statement before parsing, and the AgentCore entrypoint refuses the invocation up front (one 'access denied' envelope, model never invoked, no Bedrock spend). Local CLI runs must name the principal explicitly (--as <tenant>:<role>), so 'no identity' can never mean 'the admin identity'.
+
+**Addresses Threats**: T11, T5
+
+#### M20: Identity source cannot self-assign governance claims: the Cognito app client declares explicit attribute permissions with custom:tenant / custom:role in READ attributes only (the ID token must still carry them) and never in WRITE attributes, so UpdateUserAttributes with a user's own token is refused (NotAuthorizedException). Role assignment is an operator action via AdminUpdateUserAttributes. Enforced in infra/stack.py via ClientAttributes and applied to the deployed client. MFA on the pool is deliberately left OFF for demo convenience - production guidance keeps it (T008).
+
+**Addresses Threats**: T8, T18
+
+#### M21: Policy JSON validated at load (supersedes M013's 'recommended hardening'): keys must be <tenant>:<role>, fields must be known, table and denied-column names must be bare identifiers, each row_filter must parse as exactly ONE WHERE predicate, allow_raw_paths may not be combined with governed tables (a raw path read bypasses table rules), and the deny-all floor cannot be redefined as permissive. Malformed configuration fail-stops at import instead of silently governing nothing.
+
+**Addresses Threats**: T11
+
+#### M22: LABELS_PREFIX validated before it reaches SQL: strict s3://<bucket>/<key> syntax over [A-Za-z0-9._-] only (no quotes, whitespace, parentheses or other schemes - nothing that can leave the read_parquet literal), no '.'/'..' segments, and the bucket must be the solution-owned bucket or one named in LABELS_ALLOWED_BUCKETS. Since these tables decide the OUTCOME of a sanctions screen, a bad value fail-stops the process rather than screening against attacker-chosen data.
+
+**Addresses Threats**: T11
+
+#### M13: Policy-as-configuration with a fail-safe default: GOVERNANCE_POLICIES is JSON env config and the default is the built-in deny-all floor, not an unrestricted role (see M019). Startup validation of the policy table is IMPLEMENTED, not merely recommended - see M021. Unknown roles inside a known tenant still resolve to that tenant's most restricted policy (M006), with deny_all ranking above every other policy in the restrictiveness ordering.
 
 **Addresses Threats**: T5, T11
 
@@ -713,6 +767,35 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 
 - **Impact**: T007's caller-asserted identity is unreachable on the deployed path (the authorizer rejects unauthenticated requests before agent code); it remains a documented trust assumption for local use.
 - **Rationale**: The shipped .bedrock_agentcore.yaml carries the customJWTAuthorizer; no-token/forged-token rejection verified live 2026-09-02.
+
+## Code Validation Round 2 (2026-09-03) - evidence-based re-validation
+
+The first code-validation pass fixed three fail-opens in controls that existed. This
+round asked a different question - is the control COMPLETE? - by reading the
+merged code, inspecting the deployed AWS resources, and running executable
+proofs. Three findings were in code this model had already marked resolved:
+
+| Finding | Model said | Code did | Now |
+|---|---|---|---|
+| Local name shadowing a governed table (T1's own "CTE/alias tricks") | M1: "CTE/CTAS-local names skipped" - stated as a feature | Skipping unguarded the REAL base table: a junior read all three exchanges' subject_identity; the temp-table form persisted the stolen rows in-session | M018 refuses the collision; nine adversarial regressions |
+| Opaque statement shapes (new T17) | No threat covered it | sqlglot parsed EXPLAIN into a Command with no table nodes, so the rewrite passed it through; EXPLAIN ANALYZE executed ungoverned and leaked denied-row cardinality | M017 allowlists the parsed root |
+| Default role (T11) | "unknown principals fail closed" | GOVERNANCE_DEFAULT_ROLE defaulted to ops:admin, so blank/unknown claims became the unrestricted principal | M019 deny-all floor + pre-model refusal |
+| Self-service claim rewrite (new T18) | T8 accepted "restrict the app client" as production guidance | The DEPLOYED client had no attribute permissions: UpdateUserAttributes(custom:role=admin) succeeded and the next ID token carried ops:admin | M020 claims read-only on the client |
+| Policy / label-prefix validation (T11) | M013 "in progress", documentation only | No validation code; LABELS_PREFIX went unchecked into read_parquet() | M021 + M022, both fail-stop at import |
+
+**Method note.** Every finding here was reproduced end to end before being
+accepted, and every fix re-verified the same way: 145 offline regressions (49 of them new and
+adversarial) plus cloud acceptance on runtime v15 through the real Cognito JWT
+path - per-persona results unchanged, both proof-of-concept queries rejected
+pre-engine, unknown-tenant claims answered with principal=deny-all and no
+model invocation. Design rationale: docs/design.md.
+
+**Lesson for this model.** Two of the three missed defects were places where a
+mitigation's TEXT described the intent and the code implemented something
+narrower; the third was a default value no threat statement mentioned. Both
+patterns are invisible to a design-level review, which is what code
+validation exists to catch - so mitigation text is now written against the code path, and
+completeness rules are recorded as invariants (docs/design.md, design invariants).
 
 ## Phase Progress
 

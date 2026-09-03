@@ -52,6 +52,11 @@ itself runs in-process with the agent.
    allowlisting) after the read-only gate and before execution; restricted
    principals fail closed on unparseable SQL. The engine never sees
    ungoverned SQL for a restricted principal.
+7. **Governance is total, not just correct.** A statement shape the parser
+   cannot model is rejected, a local name may not shadow a governed table,
+   and a principal with no matching policy gets the built-in `deny-all`
+   floor. Each rule closes a bypass that was executable against an earlier
+   version of this code (see the coverage rules below).
 
 ## Authentication (real, not asserted)
 
@@ -77,6 +82,15 @@ Implementation notes that save the next person a day:
 - The SigV4 fallback identity paths (runtime user-id header, payload
   identity) remain for local/CLI use; they trust the IAM-authenticated
   caller to assert its user's identity — a documented trust assumption.
+  Local one-shot runs must therefore name a principal (`--as tenant:role`);
+  a missing identity means deny-all, never full access.
+- **The identity source must not be self-service.** The governance claims
+  ride on Cognito custom attributes, and a CDK app client with default
+  attribute permissions lets any signed-in user call
+  `UpdateUserAttributes` on themselves — set `custom:role=admin`, sign in
+  again, become an unrestricted principal. The stack therefore creates the
+  client with `custom:tenant` / `custom:role` **readable but not writable**;
+  role assignment is an operator action (`AdminUpdateUserAttributes`).
 
 ## Why the governance layer is a SQL rewrite
 
@@ -109,6 +123,44 @@ Details that matter for correctness (each is regression-tested):
   threads. `run_sql` is serialized with a lock (temp tables must stay
   session-visible, so per-thread cursors were rejected); the governance
   schema probe takes the same lock.
+
+**Coverage rules.** Query-rewrite governance fails through gaps in what it
+rewrites, not through wrong rewrites, so the rewrite is kept *total* by
+construction. Each rule below closes a bypass that was proven executable
+against an earlier version of this code, and each has adversarial
+regression tests — the shadow shapes and the opaque statement forms are the
+regression surface for any new governed table.
+
+- **Statement roots are an allowlist** (`SELECT`, set operations,
+  subqueries, `CREATE TEMP`, `DESCRIBE`, `SUMMARIZE`, `SHOW`). sqlglot
+  renders anything it cannot model (`EXPLAIN`, `EXPLAIN ANALYZE`, `SHOW
+  <table>`) as an opaque command with no table nodes, so a rewrite loop
+  finds nothing to guard and passes it through — and `EXPLAIN ANALYZE`
+  really executes the inner query, reporting denied-row cardinalities in
+  the plan. A denylist's failure mode here is silent; the allowlist's is a
+  visible rejection. `DESCRIBE`/`SUMMARIZE` of a governed table emit the
+  guard as a subselect, and a `PIVOT` modifier moves onto the guard so it
+  aggregates governed rows.
+- **No local name may shadow a governed table.** A CTE, temp table/view,
+  derived-table alias or table alias that reuses a governed table's name is
+  refused. The alternative — exempting "local" names from the rewrite —
+  let `WITH t AS (SELECT * FROM t) SELECT denied_col FROM t` unguard the
+  real base table for both RLS and CLS. Scoping that exemption correctly
+  across recursive CTEs, nested scopes and the engine's temp-schema search
+  order is fragile; refusing the collision makes the invariant total, and
+  analysts lose nothing (a working set is named `ws`, not after its source).
+- **`deny-all` is the floor.** A principal whose claims match no policy gets
+  the built-in deny-all policy and the entrypoint refuses before the model
+  is invoked. Pointing the default at a permissive role turns "no
+  identity" into "full access".
+- **Configuration is validated at load.** `GOVERNANCE_POLICIES` keys must be
+  `tenant:role`, tables and columns bare identifiers, each `row_filter`
+  must parse as one predicate, and `allow_raw_paths` cannot be combined
+  with governed tables — a typo fails the process rather than quietly
+  widening access. `LABELS_PREFIX` is validated the same way and
+  restricted to the solution-owned bucket unless `LABELS_ALLOWED_BUCKETS`
+  says otherwise, because it decides what the sanctions screen compares
+  against.
 
 ## Streaming trace (why the UI can show the engine live)
 

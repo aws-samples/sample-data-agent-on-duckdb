@@ -163,8 +163,9 @@
 <circle cx="753" cy="958" r="13" fill="#232F3E"/><text x="753" y="962" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">4</text>
 <text x="776" y="956" font-size="12.5" font-weight="700" fill="#16202E">Governed execution (AuthZ)</text>
 <text x="776" y="973" font-size="11" fill="#5A6B7B">run_sql rewrites the statement under the role policy — RLS</text>
-<text x="776" y="988" font-size="11" fill="#5A6B7B">predicate, column exclusion, raw-path denial — then</text>
-<text x="776" y="1003" font-size="11" fill="#5A6B7B">in-process DuckDB executes</text>
+<text x="776" y="988" font-size="11" fill="#5A6B7B">predicate, column exclusion, raw-path denial, no name may</text>
+<text x="776" y="1003" font-size="11" fill="#5A6B7B">shadow a governed table, no policy means deny — then</text>
+<text x="776" y="1018" font-size="11" fill="#5A6B7B">in-process DuckDB executes</text>
 <circle cx="753" cy="1040" r="13" fill="#232F3E"/><text x="753" y="1044" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">5</text>
 <text x="776" y="1038" font-size="12.5" font-weight="700" fill="#16202E">Four equal access paths, data stays on S3</text>
 <text x="776" y="1055" font-size="11" fill="#5A6B7B">A raw path glob · B S3 Tables Iceberg REST · C Glue Iceberg</text>
