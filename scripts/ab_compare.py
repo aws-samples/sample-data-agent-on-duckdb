@@ -108,7 +108,8 @@ def athena_leg():
             state = st["Status"]["State"]
             if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
                 break
-            time.sleep(0.4)
+            # Intentional Athena poll interval; loop exits on terminal state.
+            time.sleep(0.4)  # nosemgrep: arbitrary-sleep -- poll backoff
         stats = st.get("Statistics", {})
         return {
             "s": time.perf_counter() - t0,

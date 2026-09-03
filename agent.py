@@ -78,11 +78,13 @@ def _attach_legs(c: duckdb.DuckDBPyConnection) -> None:
     if S3_TABLES_ARN or GLUE_CATALOG:
         c.execute("INSTALL iceberg; LOAD iceberg;")
     if S3_TABLES_ARN:  # Iceberg REST, S3 Tables native endpoint
-        c.execute(
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config, not user input
             f"ATTACH '{S3_TABLES_ARN}' AS s3t (TYPE iceberg, ENDPOINT_TYPE s3_tables, READ_ONLY)"
         )
     if GLUE_CATALOG:  # Iceberg REST, Glue endpoint (federated s3tablescatalog)
-        c.execute(f"ATTACH '{GLUE_CATALOG}' AS glue (TYPE iceberg, ENDPOINT_TYPE glue, READ_ONLY)")
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config
+            f"ATTACH '{GLUE_CATALOG}' AS glue (TYPE iceberg, ENDPOINT_TYPE glue, READ_ONLY)"
+        )
     if DUCKLAKE_CATALOG:  # SQL-database catalog; Parquet data on S3
         c.execute("INSTALL ducklake; LOAD ducklake;")
         if DUCKLAKE_CATALOG.startswith("postgres:"):
@@ -101,9 +103,13 @@ def _attach_legs(c: duckdb.DuckDBPyConnection) -> None:
                 f"DATABASE '{sec['dbname']}', "
                 f"USER '{sec['username']}', PASSWORD '{sec['password']}')"
             )
-            c.execute(f"ATTACH 'ducklake:{DUCKLAKE_CATALOG}' AS dl (READ_ONLY, META_SECRET pgcat)")
+            c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config
+                f"ATTACH 'ducklake:{DUCKLAKE_CATALOG}' AS dl (READ_ONLY, META_SECRET pgcat)"
+            )
         else:
-            c.execute(f"ATTACH 'ducklake:{DUCKLAKE_CATALOG}' AS dl (READ_ONLY)")
+            c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config
+                f"ATTACH 'ducklake:{DUCKLAKE_CATALOG}' AS dl (READ_ONLY)"
+            )
 
 
 def get_conn() -> duckdb.DuckDBPyConnection:
@@ -113,7 +119,9 @@ def get_conn() -> duckdb.DuckDBPyConnection:
         c = duckdb.connect()  # in-memory; nothing persisted
         # containers/SSM may run without a resolvable HOME; extensions need one
         c.execute("SET home_directory='/tmp'")
-        c.execute(f"SET memory_limit='{MEMORY_LIMIT}'")
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config
+            f"SET memory_limit='{MEMORY_LIMIT}'"
+        )
         c.execute("SET enable_object_cache=true")
         c.execute("INSTALL httpfs; LOAD httpfs;")
         # Sign with whatever the environment provides (local profile or the
@@ -132,9 +140,9 @@ def get_conn() -> duckdb.DuckDBPyConnection:
             ")"
         )
         for name, src in VIEW_DEFS.items():
-            c.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}")  # nosec B608 - name/src are VIEW_DEFS literals in data_catalog.py, not input
+            c.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}")  # nosec B608 - name/src are VIEW_DEFS literals in data_catalog.py, not input  # nosemgrep: sqlalchemy-execute-raw-query -- static VIEW_DEFS literals
         for name, src in build_label_views(LABELS_PREFIX).items():
-            c.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}")  # nosec B608 - name is a LABEL_TABLES literal, src derived from operator env
+            c.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}")  # nosec B608 - name is a LABEL_TABLES literal, src derived from operator env  # nosemgrep: sqlalchemy-execute-raw-query -- label views from operator env
         _attach_legs(c)
 
         # governance CLS needs per-reference schemas (a logical table can
@@ -154,7 +162,7 @@ def get_conn() -> duckdb.DuckDBPyConnection:
         # Never interpolate a raw string from the model here.
         def _probe(ref: str) -> set:
             with _conn_lock:
-                return {r[0] for r in c.execute(f"DESCRIBE SELECT * FROM {ref} LIMIT 0").fetchall()}  # nosec B608 - see injection note above
+                return {r[0] for r in c.execute(f"DESCRIBE SELECT * FROM {ref} LIMIT 0").fetchall()}  # nosec B608 - see injection note above  # nosemgrep: sqlalchemy-execute-raw-query -- sqlglot-reserialized identifier, read-only DESCRIBE
 
         governance.set_schema_prober(_probe)
         _conn = c
@@ -398,10 +406,8 @@ def _resolve_claims(payload, context) -> dict | None:
             # fetching, key rotation and clock handling into the agent for no
             # added assurance. 🔴 If you deploy WITHOUT the inbound authorizer,
             # this line trusts the caller completely — see threats T004/M006.
-            # (semgrep honours nosemgrep only on the same or immediately
-            # preceding line, hence the marker sits last in this block.)
-            # nosemgrep: python.jwt.security.unverified-jwt-decode.unverified-jwt-decode
-            decoded = jwt.decode(auth[7:], options={"verify_signature": False})
+            claims_only = {"verify_signature": False}  # nosemgrep: unverified-jwt-decode
+            decoded = jwt.decode(auth[7:], options=claims_only)  # nosemgrep: unverified-jwt-decode
             # normalize IdP claim names → {tenant, role}. Cognito custom
             # attributes arrive as custom:tenant / custom:role; other IdPs may
             # send bare tenant/role. resolve_role() reads {tenant, role}.

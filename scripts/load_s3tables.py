@@ -169,14 +169,21 @@ def source_select(days: str) -> str:
 
 
 def load_s3tables(c: duckdb.DuckDBPyConnection, arn: str, days: str) -> int:
-    c.execute(f"ATTACH '{arn}' AS s3t (TYPE iceberg, ENDPOINT_TYPE s3_tables)")
-    c.execute(f"CREATE TABLE IF NOT EXISTS s3t.blockchain.eth_traces AS {source_select(days)}")
+    # SQL interpolates only this operator-run CLI's own args, not user input.
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args
+        f"ATTACH '{arn}' AS s3t (TYPE iceberg, ENDPOINT_TYPE s3_tables)"
+    )
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args
+        f"CREATE TABLE IF NOT EXISTS s3t.blockchain.eth_traces AS {source_select(days)}"
+    )
     return c.execute("SELECT count(*) FROM s3t.blockchain.eth_traces").fetchone()[0]
 
 
 def load_ducklake(c: duckdb.DuckDBPyConnection, catalog: str, days: str) -> int:
     data_path = catalog.rsplit("/catalog/", 1)[0] + "/data"
-    c.execute(f"ATTACH 'ducklake:{catalog}' AS dl (DATA_PATH '{data_path}')")
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args
+        f"ATTACH 'ducklake:{catalog}' AS dl (DATA_PATH '{data_path}')"
+    )
     c.execute("CREATE SCHEMA IF NOT EXISTS dl.blockchain")
     # copy from the just-loaded Iceberg table (fast, same region) if present,
     # else from the public source
@@ -184,7 +191,9 @@ def load_ducklake(c: duckdb.DuckDBPyConnection, catalog: str, days: str) -> int:
         "SELECT count(*) FROM duckdb_databases() WHERE database_name='s3t'"
     ).fetchone()[0]
     src = "SELECT * FROM s3t.blockchain.eth_traces" if has_s3t else source_select(days)
-    c.execute(f"CREATE TABLE IF NOT EXISTS dl.blockchain.eth_traces AS {src}")
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args
+        f"CREATE TABLE IF NOT EXISTS dl.blockchain.eth_traces AS {src}"
+    )
     return c.execute("SELECT count(*) FROM dl.blockchain.eth_traces").fetchone()[0]
 
 
@@ -202,7 +211,7 @@ def load_labels(c: duckdb.DuckDBPyConnection, prefix: str) -> tuple[int, int]:
         "INSERT INTO ofac_addresses VALUES (?, 'OFAC-SDN', ?)",
         [(a.lower(), ofac_src) for a in ofac],
     )
-    c.execute(
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- CLI args, not user input
         f"COPY (SELECT * FROM ofac_addresses) TO '{base}/ofac_addresses.parquet' (FORMAT parquet)"  # nosec B608 - operator-run loader; base is the operator's own --labels-prefix arg
     )
     n_ofac = c.execute("SELECT count(*) FROM ofac_addresses").fetchone()[0]
