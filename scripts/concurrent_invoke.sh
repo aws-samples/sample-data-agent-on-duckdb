@@ -13,7 +13,7 @@ QUESTIONS=(
 )
 echo "launching $N concurrent sessions..."
 pids=()
-for i in $(seq 0 $((N - 1))); do
+for ((i = 0; i < N; i++)); do
   q="${QUESTIONS[$((i % ${#QUESTIONS[@]}))]}"
   (
     t0=$(date +%s.%N)
