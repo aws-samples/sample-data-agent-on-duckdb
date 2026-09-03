@@ -5,15 +5,15 @@
 set -euo pipefail
 N="${1:-3}"
 QUESTIONS=(
-  "How many BTC transactions on 2026-08-25?"
-  "Total BTC fees on 2026-08-24?"
-  "Average BTC transaction size in bytes on 2026-08-23?"
-  "How many coinbase transactions on 2026-08-22?"
-  "Largest transaction by output_value on 2026-08-21?"
+  "How many internal calls are in eth_traces on 2025-02-21?"
+  "Total ETH moved in internal calls on 2025-02-22?"
+  "How many distinct to_address values in eth_traces on 2025-02-23?"
+  "Largest single internal call by value on 2025-02-21?"
+  "How many failed internal calls (status=0) on 2025-02-22?"
 )
 echo "launching $N concurrent sessions..."
 pids=()
-for ((i = 0; i < N; i++)); do
+for i in $(seq 0 $((N - 1))); do
   q="${QUESTIONS[$((i % ${#QUESTIONS[@]}))]}"
   (
     t0=$(date +%s.%N)

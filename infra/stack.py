@@ -1,6 +1,7 @@
 """The one stack behind the data agent — see app.py for scope rationale."""
 
 from aws_cdk import CfnOutput, RemovalPolicy, Stack
+from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
@@ -108,8 +109,13 @@ class DataAgentStack(Stack):
         exec_role.add_to_policy(
             iam.PolicyStatement(
                 sid="GlueFederatedRead",
-                actions=["glue:GetCatalog", "glue:GetDatabase", "glue:GetDatabases",
-                         "glue:GetTable", "glue:GetTables"],
+                actions=[
+                    "glue:GetCatalog",
+                    "glue:GetDatabase",
+                    "glue:GetDatabases",
+                    "glue:GetTable",
+                    "glue:GetTables",
+                ],
                 resources=[
                     f"arn:aws:glue:{self.region}:{self.account}:catalog",
                     f"arn:aws:glue:{self.region}:{self.account}:catalog/s3tablescatalog",
@@ -131,14 +137,73 @@ class DataAgentStack(Stack):
         # Logs
         log_group.grant_write(exec_role)
 
+        # --- AuthN: Cognito user pool for the inbound JWT authorizer --------
+        # The runtime is configured with a customJWTAuthorizer whose
+        # allowedAudience is this app client id; the pool issues ID tokens
+        # carrying custom:tenant / custom:role, which the agent maps to a
+        # governance policy. Two custom attributes model the tenant:role key.
+        user_pool = cognito.UserPool(
+            self,
+            "AnalystPool",
+            user_pool_name="duckdb-agent-analysts",
+            self_sign_up_enabled=False,  # operators provision analyst accounts
+            custom_attributes={
+                "tenant": cognito.StringAttribute(mutable=True),
+                "role": cognito.StringAttribute(mutable=True),
+            },
+            password_policy=cognito.PasswordPolicy(min_length=8),
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        user_pool_client = user_pool.add_client(
+            "UiClient",
+            user_pool_client_name="duckdb-agent-ui",
+            generate_secret=True,
+            auth_flows=cognito.AuthFlow(user_password=True, admin_user_password=True),
+        )
+
         # --- Outputs consumed by agentcore configure / env -----------------
-        CfnOutput(self, "TableBucketArn", value=table_bucket.attr_table_bucket_arn,
-                  description="S3_TABLES_ARN env value (Path B)")
-        CfnOutput(self, "GlueCatalogId",
-                  value=f"{self.account}:s3tablescatalog/{TABLE_BUCKET_NAME}",
-                  description="GLUE_CATALOG env value (Path C)")
-        CfnOutput(self, "DuckLakeCatalog",
-                  value=f"s3://{ducklake_bucket.bucket_name}/catalog/blockchain.ducklake",
-                  description="DUCKLAKE_CATALOG env value (Path D)")
-        CfnOutput(self, "ExecutionRoleArn", value=exec_role.role_arn,
-                  description="Pass to: agentcore configure --execution-role")
+        CfnOutput(
+            self,
+            "TableBucketArn",
+            value=table_bucket.attr_table_bucket_arn,
+            description="S3_TABLES_ARN env value (Path B)",
+        )
+        CfnOutput(
+            self,
+            "GlueCatalogId",
+            value=f"{self.account}:s3tablescatalog/{TABLE_BUCKET_NAME}",
+            description="GLUE_CATALOG env value (Path C)",
+        )
+        CfnOutput(
+            self,
+            "DuckLakeCatalog",
+            value=f"s3://{ducklake_bucket.bucket_name}/catalog/blockchain.ducklake",
+            description="DUCKLAKE_CATALOG env value (Path D)",
+        )
+        CfnOutput(
+            self,
+            "LabelsPrefix",
+            value=f"s3://{ducklake_bucket.bucket_name}/labels",
+            description="LABELS_PREFIX env value (attribution tables)",
+        )
+        CfnOutput(
+            self,
+            "ExecutionRoleArn",
+            value=exec_role.role_arn,
+            description="Pass to: agentcore configure --execution-role",
+        )
+        CfnOutput(
+            self,
+            "CognitoDiscoveryUrl",
+            value=(
+                f"https://cognito-idp.{self.region}.amazonaws.com/"
+                f"{user_pool.user_pool_id}/.well-known/openid-configuration"
+            ),
+            description="customJWTAuthorizer discoveryUrl (for agentcore authorizer config)",
+        )
+        CfnOutput(
+            self,
+            "CognitoAudience",
+            value=user_pool_client.user_pool_client_id,
+            description="customJWTAuthorizer allowedAudience (app client id)",
+        )

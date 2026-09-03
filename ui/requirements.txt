@@ -1,0 +1,6 @@
+# Chat UI dependencies — separate from the agent runtime's requirements.txt.
+# The UI is a thin client: it authenticates to Amazon Cognito, invokes the
+# AgentCore Runtime over HTTPS, and renders the streamed SSE envelopes.
+streamlit>=1.40
+boto3>=1.35
+requests>=2.32

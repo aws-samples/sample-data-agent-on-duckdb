@@ -46,38 +46,27 @@ TBLPROPERTIES (
 
 # (name, duckdb_sql, athena_sql) — dialects differ only in the percentile fn
 QUERIES = [
-    (
-        "schema probe",
-        f"SELECT txid, fee, output_value FROM btc_transactions WHERE date='{DAY}' LIMIT 5",
-        f"SELECT txid, fee, output_value FROM {GLUE_DB}.btc_transactions "
-        f"WHERE date='{DAY}' LIMIT 5",
-    ),
-    (
-        "WRONG COLUMN (agent mistake)",
-        f"SELECT sum(total_fee) FROM btc_transactions WHERE date='{DAY}'",
-        f"SELECT sum(total_fee) FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}'",
-    ),
-    (
-        "corrected aggregate",
-        f"SELECT count(*) AS txs, round(sum(fee),2) AS fee_btc "
-        f"FROM btc_transactions WHERE date='{DAY}'",
-        f"SELECT count(*) AS txs, round(sum(fee),2) AS fee_btc "
-        f"FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}'",
-    ),
-    (
-        "fee percentiles",
-        f"SELECT approx_quantile(fee,0.5) AS p50, approx_quantile(fee,0.99) AS p99 "
-        f"FROM btc_transactions WHERE date='{DAY}' AND NOT is_coinbase",
-        f"SELECT approx_percentile(fee,0.5) AS p50, approx_percentile(fee,0.99) AS p99 "
-        f"FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' AND NOT is_coinbase",
-    ),
-    (
-        "top-10 by fee",
-        f"SELECT txid, fee FROM btc_transactions WHERE date='{DAY}' AND NOT is_coinbase "
-        f"ORDER BY fee DESC LIMIT 10",
-        f"SELECT txid, fee FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' AND NOT is_coinbase "
-        f"ORDER BY fee DESC LIMIT 10",
-    ),
+    ("schema probe",
+     f"SELECT txid, fee, output_value FROM btc_transactions WHERE date='{DAY}' LIMIT 5",  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+     f"SELECT txid, fee, output_value FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' LIMIT 5"),  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+    ("WRONG COLUMN (agent mistake)",
+     f"SELECT sum(total_fee) FROM btc_transactions WHERE date='{DAY}'",  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+     f"SELECT sum(total_fee) FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}'"),  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+    ("corrected aggregate",
+     f"SELECT count(*) AS txs, round(sum(fee),2) AS fee_btc "  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+     f"FROM btc_transactions WHERE date='{DAY}'",
+     f"SELECT count(*) AS txs, round(sum(fee),2) AS fee_btc "  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+     f"FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}'"),
+    ("fee percentiles",
+     f"SELECT approx_quantile(fee,0.5) AS p50, approx_quantile(fee,0.99) AS p99 "  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+     f"FROM btc_transactions WHERE date='{DAY}' AND NOT is_coinbase",
+     f"SELECT approx_percentile(fee,0.5) AS p50, approx_percentile(fee,0.99) AS p99 "  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+     f"FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' AND NOT is_coinbase"),
+    ("top-10 by fee",
+     f"SELECT txid, fee FROM btc_transactions WHERE date='{DAY}' AND NOT is_coinbase "  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+     f"ORDER BY fee DESC LIMIT 10",
+     f"SELECT txid, fee FROM {GLUE_DB}.btc_transactions WHERE date='{DAY}' AND NOT is_coinbase "  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
+     f"ORDER BY fee DESC LIMIT 10"),
 ]
 
 
@@ -91,7 +80,7 @@ def duckdb_leg():
     # globs take the FIRST file's schema which lacks `fee`), and mirrors what
     # Athena's partition projection reads for the same predicate.
     c.execute(
-        f"CREATE VIEW btc_transactions AS SELECT *, '{DAY}' AS date "
+        f"CREATE VIEW btc_transactions AS SELECT *, '{DAY}' AS date "  # nosec B608 - DAY/GLUE_DB/S3_LOC are module constants
         f"FROM read_parquet('{S3_LOC}date={DAY}/*.parquet')"
     )
     results = []
@@ -119,8 +108,7 @@ def athena_leg():
             state = st["Status"]["State"]
             if state in ("SUCCEEDED", "FAILED", "CANCELLED"):
                 break
-            # Intentional Athena poll interval; loop exits on terminal state.
-            time.sleep(0.4)  # nosemgrep: arbitrary-sleep -- poll backoff
+            time.sleep(0.4)
         stats = st.get("Statistics", {})
         return {
             "s": time.perf_counter() - t0,
@@ -177,7 +165,7 @@ def main():
         "Percentile fn differs by dialect (approx_quantile vs approx_percentile).",
     ]
     out_path = os.path.join(os.path.dirname(__file__), "..", "docs", "ab-results.md")
-    with open(out_path, "w", encoding="utf-8") as f:
+    with open(out_path, "w") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))
 
