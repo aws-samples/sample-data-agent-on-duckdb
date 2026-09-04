@@ -106,7 +106,7 @@ CLOUDTRAIL_SELECT = """
 
 def connect(default_region: str, extra_scopes: list[tuple[str, str]]) -> duckdb.DuckDBPyConnection:
     c = duckdb.connect()
-    c.execute(f"SET home_directory='{os.environ['HOME']}'")
+    c.execute(f"SET home_directory='{os.environ['HOME']}'")  # noqa: E501  # nosemgrep: sqlalchemy-execute-raw-query -- process env, not user input
     c.execute("INSTALL httpfs; LOAD httpfs; INSTALL json; LOAD json; INSTALL aws; LOAD aws;")
     c.execute("SET memory_limit='10GB'; SET threads=8; SET preserve_insertion_order=false")
     c.execute(
@@ -127,7 +127,7 @@ def bucket_of(uri: str) -> str:
 
 def files(c, glob: str) -> int:
     try:
-        return c.execute(f"SELECT count(*) FROM glob('{glob}')").fetchone()[0]  # nosec B608 - loader arg
+        return c.execute(f"SELECT count(*) FROM glob('{glob}')").fetchone()[0]  # nosec B608 - loader arg  # nosemgrep: sqlalchemy-execute-raw-query -- loader arg
     except Exception:  # noqa: BLE001
         return 0
 
@@ -158,7 +158,7 @@ def load_cur(c, src: str, out: str, periods: list[str]) -> dict:
             f"TO '{target}' (FORMAT parquet, COMPRESSION zstd)"
         )
         c.execute(sql)
-        n = c.execute(f"SELECT count(*) FROM read_parquet('{target}')").fetchone()[0]  # nosec B608
+        n = c.execute(f"SELECT count(*) FROM read_parquet('{target}')").fetchone()[0]  # nosec B608 - loader-built path  # nosemgrep: sqlalchemy-execute-raw-query -- loader-built path
         summary[p] = {"rows": n, "seconds": round(time.perf_counter() - t0, 1)}
         print(f"cur {p}: {n:,} rows in {summary[p]['seconds']}s", file=sys.stderr, flush=True)
     return summary
@@ -184,7 +184,7 @@ def load_cloudtrail(c, src: str, out: str, regions: list[str], days: list[str]) 
                 f"TO '{target}' (FORMAT parquet, COMPRESSION zstd)"
             )
             c.execute(sql)
-            n = c.execute(f"SELECT count(*) FROM read_parquet('{target}')").fetchone()[0]  # nosec B608
+            n = c.execute(f"SELECT count(*) FROM read_parquet('{target}')").fetchone()[0]  # nosec B608 - loader-built path  # nosemgrep: sqlalchemy-execute-raw-query -- loader-built path
             summary[f"{day}/{region}"] = {
                 "files": n_files,
                 "rows": n,
@@ -227,7 +227,7 @@ def load_cwlogs(c, src: str, out: str) -> dict:
             f"TO '{target}' (FORMAT parquet, COMPRESSION zstd)"
         )
         c.execute(sql)
-        summary[day] = c.execute(f"SELECT count(*) FROM read_parquet('{target}')").fetchone()[0]  # nosec B608
+        summary[day] = c.execute(f"SELECT count(*) FROM read_parquet('{target}')").fetchone()[0]  # nosec B608 - loader-built path  # nosemgrep: sqlalchemy-execute-raw-query -- loader-built path
     summary["seconds"] = round(time.perf_counter() - t0, 1)
     print(f"cwlogs: {summary}", file=sys.stderr, flush=True)
     return summary

@@ -83,14 +83,14 @@ def _mount_scenarios(c: duckdb.DuckDBPyConnection) -> None:
         for name, src in scenario.views.items():
             stmt = f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {src}"  # nosec B608 - name/src are scenario literals derived from operator env, not model input
             if not scenario.lenient:
-                c.execute(
+                c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- static scenario literals
                     stmt
-                )  # nosemgrep: sqlalchemy-execute-raw-query -- static scenario literals
+                )
                 continue
             try:
-                c.execute(
+                c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- operator-env views
                     stmt
-                )  # nosemgrep: sqlalchemy-execute-raw-query -- scenario views from operator env
+                )
             except Exception as e:  # noqa: BLE001 — missing/unreadable dataset
                 VIEW_ERRORS[name] = str(e).split("\n")[0][:200]
         for macro in scenario.macros:

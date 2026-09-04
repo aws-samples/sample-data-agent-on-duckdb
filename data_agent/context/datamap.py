@@ -131,20 +131,20 @@ def ensure_index(conn, lock) -> dict:
                 except Exception:  # noqa: BLE001 — unreachable table: names-only entry
                     cols = ""
             e["columns"] = cols
-        conn.execute(f"DROP TABLE IF EXISTS {INDEX_TABLE}")  # nosec B608 - fixed identifier
+        conn.execute(f"DROP TABLE IF EXISTS {INDEX_TABLE}")  # nosec B608 - fixed identifier  # nosemgrep: sqlalchemy-execute-raw-query -- fixed identifier
         conn.execute(
             f"CREATE TEMP TABLE {INDEX_TABLE} (name VARCHAR, kind VARCHAR, partition_col VARCHAR, "  # nosec B608 - fixed identifier
             "columns VARCHAR, tokens VARCHAR)"
         )
         for e in entries:
-            conn.execute(
+            conn.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- fixed identifier
                 f"INSERT INTO {INDEX_TABLE} VALUES (?, ?, ?, ?, ?)",  # nosec B608 - fixed identifier, bound params
                 [e["name"], e["kind"], e["partition"], e["columns"], _tokens(e)],
             )
         fts = False
         try:
             conn.execute("INSTALL fts; LOAD fts;")
-            conn.execute(
+            conn.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- fixed identifiers
                 f"PRAGMA create_fts_index('{INDEX_TABLE}', 'name', 'tokens', overwrite=1)"  # nosec B608 - fixed identifiers
             )
             fts = True
