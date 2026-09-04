@@ -44,6 +44,27 @@ likely next one.
 
 <img src="docs/architecture.svg" alt="Architecture: Strands agent, context layer, governance rewrite and embedded DuckDB inside one AgentCore session, four S3 access paths" width="100%">
 
+<details>
+<summary>Architecture (text version)</summary>
+
+```
+Streamlit UI ──▶ AgentCore Runtime (1 session = 1 microVM = 1 DuckDB)
+  (Cognito JWT)   ├─ AuthN: inbound JWT authorizer → verified claims {tenant, role}
+   SSE stream ◀── ├─ Strands Agent + Bedrock Claude (writes SQL, reads shaped results)
+                  ├─ Context layer    — data map · cost gate · result shaping · history stubs
+                  ├─ Governance layer — claims → policy, sqlglot RLS/CLS rewrite + hardening
+                  │                     BEFORE the engine
+                  └─ DuckDB in-process (httpfs / iceberg / ducklake / fts extensions)
+                       ├─ Path A: raw Parquet / exports — S3 path glob → explicit partitions
+                       ├─ Path B: S3 Tables     — native Iceberg REST catalog
+                       ├─ Path C: Glue catalog  — same table, federated endpoint
+                       ├─ Path D: DuckLake      — SQL-database catalog, Parquet on S3
+                       └─ _r_<n> result tables · session working sets (temp, die with the session)
+Aux: IAM execution role (least privilege) · CloudWatch Logs (one EMF audit line per statement)
+Every run_sql streams its gate → govern → cost → execute trace back over the same SSE channel.
+```
+</details>
+
 ## Why in-process
 
 | Mechanism | What a remote query service cannot give you |
@@ -63,24 +84,7 @@ The context layer wraps every statement: before the SQL exists (data map),
 before it runs (cost gate), after it runs (result shaping) and across turns
 (history compression).
 
-```mermaid
-flowchart TD
-    Q[question] --> DM["data map<br/>L0 table map in the prompt · search_schema · DESCRIBE"]
-    DM --> SQL[Claude writes SQL]
-    SQL --> CG{"cost gate<br/>raw partitioned source?"}
-    CG -->|no partition predicate| REJ[rejected before the engine]
-    REJ -->|fix the filter| SQL
-    CG -->|literal predicate| EXP[expanded to explicit partition paths]
-    CG -->|temp table · catalog table| ENG
-    EXP --> ENG[DuckDB executes in-process]
-    ENG --> SZ{result size}
-    SZ -->|≤ 200 rows| INL[rows inline]
-    SZ -->|larger| MAT["temp table _r_n<br/>+ row count · columns · 3 samples · how to read it"]
-    INL --> RD[Claude reads the result]
-    MAT --> RD
-    RD -.->|read back: ordinary SQL, single-digit ms| SQL
-    RD -.->|"history ≥ 60 % of the window"| STUB["old results → one line pointing at _r_n"]
-```
+<img src="docs/context-flow.svg" alt="Context layer: data map before the SQL exists, cost gate before it runs, result shaping after it runs, history compression across turns" width="100%">
 
 | Mechanism | Before | Now | Knobs |
 |---|---|---|---|

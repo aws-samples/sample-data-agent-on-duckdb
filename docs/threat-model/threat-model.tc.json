@@ -2,7 +2,7 @@
  "schema": 1,
  "applicationInfo": {
   "name": "Threat Model Export",
-  "description": "Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).\n\nCode validation re-run 2026-09-03 against the merged code: two complete authorization bypasses (T001 shadowing, T017 opaque statements), one identity-source escalation (T018) and two fail-open defaults (T011) were found and fixed; see docs/design.md."
+  "description": "Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->cost->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).\n\nCode validation re-run 2026-09-03 against the merged code: two complete authorization bypasses (T001 shadowing, T017 opaque statements), one identity-source escalation (T018) and two fail-open defaults (T011) were found and fixed; see docs/design.md."
  },
  "architecture": {
   "description": ""
@@ -682,14 +682,14 @@
    "id": "T015",
    "numericId": 15,
    "threatSource": "Sample consumer (customer engineer)",
-   "prerequisites": "Customer lifts governance.py into a production multi-principal service",
+   "prerequisites": "Customer lifts data_agent/governance/ into a production multi-principal service",
    "threatAction": "Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model",
    "threatImpact": "Cross-principal policy application: user A's query rewritten under user B's policy",
    "impactedGoal": [],
    "impactedAssets": [
     "A001"
    ],
-   "statement": "A Sample consumer (customer engineer) Customer lifts governance.py into a production multi-principal service can Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model, which leads to Cross-principal policy application: user A's query rewritten under user B's policy",
+   "statement": "A Sample consumer (customer engineer) Customer lifts data_agent/governance/ into a production multi-principal service can Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model, which leads to Cross-principal policy application: user A's query rewritten under user B's policy",
    "displayOrder": 15,
    "status": "threatResolved",
    "tags": [
@@ -702,14 +702,14 @@
    "id": "T016",
    "numericId": 16,
    "threatSource": "Restricted end user observing the streaming trace",
-   "prerequisites": "Valid restricted session; the SSE trace emits gate/govern/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[])",
+   "prerequisites": "Valid restricted session; the SSE trace emits gate/govern/cost/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[])",
    "threatAction": "Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges",
    "threatImpact": "Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure",
    "impactedGoal": [],
    "impactedAssets": [
     "A004"
    ],
-   "statement": "A Restricted end user observing the streaming trace Valid restricted session; the SSE trace emits gate/govern/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[]) can Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges, which leads to Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure",
+   "statement": "A Restricted end user observing the streaming trace Valid restricted session; the SSE trace emits gate/govern/cost/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[]) can Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges, which leads to Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure",
    "displayOrder": 16,
    "status": "threatResolved",
    "tags": [
@@ -768,7 +768,7 @@
   }
  ],
  "businessContext": {
-  "description": "Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).",
+  "description": "Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->cost->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).",
   "features": {
    "industry_sector": "Technology",
    "sensitivity_tier": "Public",
@@ -829,7 +829,7 @@
    "service_provider": null,
    "specific_service": null,
    "version": null,
-   "description": "agent.py: extracts claims in trust order: verified JWT claims (custom:tenant/custom:role normalized to tenant/role) -> X-Amzn-Bedrock-AgentCore-Runtime-User-Id header (SigV4 caller asserts) -> payload identity object -> default role. jwt.decode(verify_signature=False) is claims EXTRACTION from a token already verified by the managed authorizer.",
+   "description": "data_agent/scheduling/runtime.py: extracts claims in trust order: verified JWT claims (custom:tenant/custom:role normalized to tenant/role) -> X-Amzn-Bedrock-AgentCore-Runtime-User-Id header (SigV4 caller asserts) -> payload identity object -> default role. jwt.decode(verify_signature=False) is claims EXTRACTION from a token already verified by the managed authorizer.",
    "configuration": null
   },
   {
@@ -839,7 +839,7 @@
    "service_provider": "AWS",
    "specific_service": "Amazon Bedrock",
    "version": null,
-   "description": "LLM writes SQL from natural-language questions; reads tool results; emits streaming events. Its SQL output is untrusted input to the pipeline. The streaming entrypoint maps Strands events to typed SSE envelopes including the per-statement gate/govern/execute trace.",
+   "description": "LLM writes SQL from natural-language questions; reads tool results; emits streaming events. Its SQL output is untrusted input to the pipeline. The streaming entrypoint maps Strands events to typed SSE envelopes including the per-statement gate/govern/cost/execute trace.",
    "configuration": null
   },
   {
@@ -849,12 +849,12 @@
    "service_provider": null,
    "specific_service": null,
    "version": null,
-   "description": "agent.py: async-generator tool. Gate strips leading SQL comments for keyword classification, requires EXACTLY ONE statement (duckdb.extract_statements \u2014 the engine's own parser, no lexer divergence), and allowlists read statements + CREATE TEMP TABLE/VIEW; rejects persistent writes, ATTACH, COPY TO, and multi-statement smuggling. First control in the SQL pipeline; emits gate trace events.",
+   "description": "data_agent/tools.py + data_agent/compute/gate.py: async-generator tool. Gate strips leading SQL comments for keyword classification, requires EXACTLY ONE statement (duckdb.extract_statements \u2014 the engine's own parser, no lexer divergence), and allowlists read statements + CREATE TEMP TABLE/VIEW; rejects persistent writes, ATTACH, COPY TO, and multi-statement smuggling. First control in the SQL pipeline; emits gate trace events.",
    "configuration": null
   },
   {
    "id": "C007",
-   "name": "Governance rewrite (governance.py)",
+   "name": "Governance rewrite (data_agent/governance/)",
    "type": "Security",
    "service_provider": null,
    "specific_service": null,
@@ -1648,7 +1648,7 @@
     "Encryption",
     "Output Encoding"
    ],
-   "description": "Governed results (rows JSON + engine metrics + trace envelopes) stream back to the UI over SSE; per-statement trace exposes gate/govern/execute metadata but only policy-permitted data.",
+   "description": "Governed results (rows JSON + engine metrics + trace envelopes) stream back to the UI over SSE; per-statement trace exposes gate/govern/cost/execute metadata but only policy-permitted data.",
    "protocol": "HTTPS",
    "encryption": true,
    "authenticated": false,
@@ -1663,7 +1663,7 @@
    "decision": "Mitigated",
    "residual_severity": "Low",
    "residual_likelihood": "Unlikely",
-   "rationale": "AST-level rewrite covers all four access paths; the completeness rules close the two bypasses found on 2026-09-03 - local names may not shadow a governed table (M018) and unmodellable statement shapes are rejected (M017) - so a governed name always denotes the governed table and no statement reaches the engine unrewritten. 49 adversarial regressions (nine shadowing shapes incl. recursive CTE, CTAS target and alias forms) plus per-persona cloud verification on runtime v15. Residual: novel sqlglot-vs-DuckDB semantic divergence, bounded by fail-closed parsing and a read-only worst case.",
+   "rationale": "AST-level rewrite covers all four access paths; the completeness rules close the two bypasses found on 2026-09-03 - local names may not shadow a governed table (M018) and unmodellable statement shapes are rejected (M017) - so a governed name always denotes the governed table and no statement reaches the engine unrewritten. 49 adversarial regressions (nine shadowing shapes incl. recursive CTE, CTAS target and alias forms) plus per-persona cloud verification on the deployed runtime. Residual: novel sqlglot-vs-DuckDB semantic divergence, bounded by fail-closed parsing and a read-only worst case.",
    "is_current": true
   },
   {
@@ -1814,7 +1814,7 @@
    "Agentic AI",
    "Cloud-native"
   ],
-  "description": "Python 3.11-3.13 on Amazon Bedrock AgentCore Runtime (one microVM per session). Core modules: (1) agent.py - Strands Agent + Bedrock Claude with one gated async-generator run_sql tool over an in-memory DuckDB (httpfs/iceberg/ducklake extensions). The read-only gate enforces EXACTLY ONE statement per call (duckdb.extract_statements, the engine's own parser) and strips leading SQL comments before keyword classification; identity resolution chain: verified JWT claims (custom:tenant/custom:role normalized) -> runtime user-id header -> payload identity -> default role. The streaming entrypoint (async generator -> SSE) emits typed envelopes incl. a per-statement gate/govern/execute trace. (2) governance.py - authorization: principal->role->policy mapping where an unknown role inside a known tenant falls back to that tenant's MOST RESTRICTED policy (content-derived restrictiveness ranking, declaration-order independent); sqlglot AST rewrite injecting RLS predicates via guarded subqueries and schema-aware CLS EXCLUDE; explicit selection of a denied column is rejected with a legible policy error naming column and role; raw table functions are governed by an ALLOWLIST on AST shape (only exp.Identifier FROM/JOIN sources allowed; pure generators excepted) rather than a function-name denylist; fail-closed on unparseable SQL. (3) ui/app.py - Streamlit chat client: Cognito USER_PASSWORD_AUTH login (client secret via env), sends the ID token as bearer to the runtime over raw HTTPS, renders the interleaved reasoning+tool transcript and a Trace tab. (4) infra/ CDK - S3 buckets (SSE, BlockPublicAccess, enforce_ssl), Cognito user pool + app client, least-privilege execution role, CloudWatch logs. CI: GitLab pipeline with ruff/bandit/semgrep/detect-secrets/pytest gates (96 offline unit tests incl. mutation-verified fail-closed authz tests)."
+  "description": "Python 3.11-3.13 on Amazon Bedrock AgentCore Runtime (one microVM per session). Core modules: (1) agent.py (composition root) and the data_agent/ package - one sub-package per layer (scheduling, context, governance, compute, storage) and a statement pipeline gate -> govern -> cost -> execute; Strands Agent + Bedrock Claude with one gated async-generator run_sql tool over an in-memory DuckDB (httpfs/iceberg/ducklake extensions). The read-only gate enforces EXACTLY ONE statement per call (duckdb.extract_statements, the engine's own parser) and strips leading SQL comments before keyword classification; identity resolution chain: verified JWT claims (custom:tenant/custom:role normalized) -> runtime user-id header -> payload identity -> default role. The streaming entrypoint (async generator -> SSE) emits typed envelopes incl. a per-statement gate/govern/cost/execute trace. (2) data_agent/governance/ - authorization: principal->role->policy mapping where an unknown role inside a known tenant falls back to that tenant's MOST RESTRICTED policy (content-derived restrictiveness ranking, declaration-order independent); sqlglot AST rewrite injecting RLS predicates via guarded subqueries and schema-aware CLS EXCLUDE; explicit selection of a denied column is rejected with a legible policy error naming column and role; raw table functions are governed by an ALLOWLIST on AST shape (only exp.Identifier FROM/JOIN sources allowed; pure generators excepted) rather than a function-name denylist; fail-closed on unparseable SQL. (3) ui/app.py - Streamlit chat client: Cognito USER_PASSWORD_AUTH login (client secret via env), sends the ID token as bearer to the runtime over raw HTTPS, renders the interleaved reasoning+tool transcript and a Trace tab. (4) infra/ CDK - S3 buckets (SSE, BlockPublicAccess, enforce_ssl), Cognito user pool + app client, least-privilege execution role, CloudWatch logs. CI gates: ruff / bandit / semgrep / detect-secrets / pytest (282 offline unit tests incl. mutation-verified fail-closed authz tests)."
  },
  "dataAssetProfiles": [
   {

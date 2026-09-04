@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1000" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" role="img" aria-label="Context layer: the path of one statement">
+<title>Context layer — the path of one statement</title>
+<defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 L9 5 L1 9" fill="none" stroke="context-stroke" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect width="1400" height="1000" fill="#FBFCFE"/>
+<text x="40" y="36" text-anchor="start" font-size="20" font-weight="800" fill="#16202E">Context layer — the path of one statement</text>
+<text x="40" y="58" text-anchor="start" font-size="11.5" font-weight="400" fill="#5A6B7B">four mechanisms, in the order they act · solid = the statement and its result · dashed = a pointer into the engine, no data moves</text>
+<rect x="24" y="95" width="1352" height="95" rx="10" fill="#FFFFFF" stroke="#E6ECF2"/>
+<rect x="24" y="95" width="6" height="95" rx="3" fill="#00A4A6"/>
+<text x="46" y="125" text-anchor="start" font-size="13" font-weight="800" fill="#16202E">Data map</text>
+<text x="46" y="143" text-anchor="start" font-size="10.5" font-weight="400" fill="#5A6B7B">before the SQL exists</text>
+<rect x="24" y="200" width="1352" height="270" rx="10" fill="#FFFFFF" stroke="#E6ECF2"/>
+<rect x="24" y="200" width="6" height="270" rx="3" fill="#E0A82E"/>
+<text x="46" y="230" text-anchor="start" font-size="13" font-weight="800" fill="#16202E">Cost gate</text>
+<text x="46" y="248" text-anchor="start" font-size="10.5" font-weight="400" fill="#5A6B7B">before it runs</text>
+<rect x="24" y="480" width="1352" height="390" rx="10" fill="#FFFFFF" stroke="#E6ECF2"/>
+<rect x="24" y="480" width="6" height="390" rx="3" fill="#8C4FFF"/>
+<text x="46" y="510" text-anchor="start" font-size="13" font-weight="800" fill="#16202E">Result shaping</text>
+<text x="46" y="528" text-anchor="start" font-size="10.5" font-weight="400" fill="#5A6B7B">after it runs</text>
+<rect x="24" y="880" width="1352" height="105" rx="10" fill="#FFFFFF" stroke="#E6ECF2"/>
+<rect x="24" y="880" width="6" height="105" rx="3" fill="#3B4A5A"/>
+<text x="46" y="910" text-anchor="start" font-size="13" font-weight="800" fill="#16202E">History compression</text>
+<text x="46" y="928" text-anchor="start" font-size="10.5" font-weight="400" fill="#5A6B7B">across turns</text>
+<rect x="215.0" y="118.0" width="110" height="44" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
+<text x="270" y="145" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">question</text>
+<rect x="370.0" y="112.0" width="380" height="56" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
+<text x="560" y="137" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">Data map</text>
+<text x="560" y="154" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">L0 table map in the prompt · search_schema (BM25) · DESCRIBE on demand</text>
+<rect x="785.0" y="116.0" width="190" height="48" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
+<text x="880" y="145" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">Claude writes SQL</text>
+<rect x="745.0" y="262.0" width="270" height="56" rx="28.0" fill="#FFF4DC" stroke="#E0A82E" stroke-width="1.4"/>
+<text x="880" y="287" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">Cost gate</text>
+<text x="880" y="304" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">raw partitioned source?</text>
+<rect x="380.0" y="388.0" width="240" height="44" rx="10" fill="#FDECEE" stroke="#DD344C" stroke-width="1.4"/>
+<text x="500" y="415" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">rejected before the engine</text>
+<rect x="735.0" y="388.0" width="290" height="44" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
+<text x="880" y="415" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">expanded to explicit partition paths</text>
+<rect x="760.0" y="506.0" width="240" height="48" rx="10" fill="#FFF9C4" stroke="#E6C300" stroke-width="1.4"/>
+<text x="880" y="535" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">DuckDB executes in-process</text>
+<rect x="780.0" y="606.0" width="200" height="48" rx="24.0" fill="#FFF4DC" stroke="#E0A82E" stroke-width="1.4"/>
+<text x="880" y="635" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">result size</text>
+<rect x="390.0" y="708.0" width="220" height="44" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
+<text x="500" y="735" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">rows inline</text>
+<rect x="970.0" y="702.0" width="320" height="56" rx="10" fill="#F3EDFF" stroke="#8C4FFF" stroke-width="1.4"/>
+<text x="1130" y="727" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">temp table _r_n</text>
+<text x="1130" y="744" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">row count · columns · 3 sample rows · how to read it</text>
+<rect x="760.0" y="806.0" width="240" height="48" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
+<text x="880" y="835" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">Claude reads the result</text>
+<rect x="570.0" y="904.0" width="620" height="56" rx="10" fill="#F3EDFF" stroke="#8C4FFF" stroke-width="1.4"/>
+<text x="880" y="929" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">old results → one line pointing at _r_n</text>
+<text x="880" y="946" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">when history reaches 60 % of the model window · superseded first · current turn untouched</text>
+<path d="M325.0,140.0 L370.0,140.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M750.0,140.0 L785.0,140.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M880.0,164.0 L880.0,262.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M745.0,290.0 L514.0,290.0 Q500.0,290.0 500.0,304.0 L500.0,388.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="546.2" y="267.0" width="151.5" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="622" y="282.0" text-anchor="middle" font-size="11" fill="#3B4A5A">no partition predicate</text></g>
+<path d="M880.0,318.0 L880.0,388.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="914.6" y="342.0" width="120.7" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="975" y="357.0" text-anchor="middle" font-size="11" fill="#3B4A5A">literal predicate</text></g>
+<path d="M1015.0,290.0 L1116.0,290.0 Q1130.0,290.0 1130.0,304.0 L1130.0,516.0 Q1130.0,530.0 1116.0,530.0 L1000.0,530.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="1151.9" y="394.0" width="176.2" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="1240" y="409.0" text-anchor="middle" font-size="11" fill="#3B4A5A">temp table · catalog table</text></g>
+<path d="M880.0,432.0 L880.0,506.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M380.0,410.0 L194.0,410.0 Q180.0,410.0 180.0,396.0 L180.0,89.0 Q180.0,75.0 194.0,75.0 L866.0,75.0 Q880.0,75.0 880.0,89.0 L880.0,116.0" fill="none" stroke="#DD344C" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="348.9" y="64.0" width="102.2" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="400" y="79.0" text-anchor="middle" font-size="11" fill="#3B4A5A">fix the filter</text></g>
+<path d="M880.0,554.0 L880.0,606.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M780.0,630.0 L514.0,630.0 Q500.0,630.0 500.0,644.0 L500.0,708.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="601.2" y="607.0" width="77.6" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="640" y="622.0" text-anchor="middle" font-size="11" fill="#3B4A5A">≤ 200 rows</text></g>
+<path d="M980.0,630.0 L1116.0,630.0 Q1130.0,630.0 1130.0,644.0 L1130.0,702.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="1028.5" y="607.0" width="53.0" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="1055" y="622.0" text-anchor="middle" font-size="11" fill="#3B4A5A">larger</text></g>
+<path d="M500.0,752.0 L500.0,816.0 Q500.0,830.0 514.0,830.0 L760.0,830.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M1130.0,758.0 L1130.0,816.0 Q1130.0,830.0 1116.0,830.0 L1000.0,830.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M1290.0,730.0 L1326.0,730.0 Q1340.0,730.0 1340.0,716.0 L1340.0,154.0 Q1340.0,140.0 1326.0,140.0 L975.0,140.0" fill="none" stroke="#8C4FFF" stroke-width="2.2" stroke-dasharray="6 6" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="1028.8" y="117.0" width="262.4" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="1160" y="132.0" text-anchor="middle" font-size="11" fill="#3B4A5A">read back: ordinary SQL, single-digit ms</text></g>
+<path d="M880.0,854.0 L880.0,904.0" fill="none" stroke="#8C4FFF" stroke-width="2.2" stroke-dasharray="6 6" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+</svg>
