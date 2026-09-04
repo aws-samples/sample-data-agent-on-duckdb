@@ -1,0 +1,53 @@
+# cost — the partition filter is enforced by the rewrite layer, not hoped for.
+- id: cost-no-date-rejected-then-repaired
+  persona: admin
+  prompt: >
+    Run exactly: SELECT count(*) FROM eth_traces
+    If that is refused, fix it in the smallest way and tell me the count for 2025-02-21.
+  max_tool_calls: 5
+  expect:
+    rejected_contains: partition column
+    partition_filter_all: true
+
+- id: cost-between-expands
+  persona: admin
+  prompt: >
+    Using the raw eth_traces view, count internal calls with value > 0 where
+    date BETWEEN '2025-02-21' AND '2025-02-23'. One query.
+  max_tool_calls: 3
+  expect:
+    expanded_paths_min: 3
+    partition_filter_all: true
+    sql_regex_any: 'BETWEEN'
+
+- id: cost-in-list-expands
+  persona: admin
+  prompt: >
+    Using the raw eth_traces view, how many internal calls with value > 0 happened
+    on 2025-02-21 or 2025-02-23? Use WHERE date IN (...) in a single query.
+  max_tool_calls: 3
+  expect:
+    expanded_paths_min: 2
+    partition_filter_all: true
+
+- id: cost-catalog-leg-exempt
+  persona: admin
+  prompt: >
+    Count rows in dl.blockchain.eth_traces (the DuckLake catalog). No date filter needed.
+  max_tool_calls: 3
+  expect:
+    no_rejections: true
+    sql_regex_any: 'dl\.blockchain\.eth_traces'
+    answer_number: {value: 3492205, rel_tol: 0.001}
+
+- id: cost-investigator-rls-composes
+  persona: investigator
+  prompt: >
+    Using the view named eth_traces (reference it by name, not via read_parquet or
+    a catalog), count internal calls with value > 0 up to and including
+    2025-02-23 (WHERE date <= '2025-02-23').
+  max_tool_calls: 4
+  expect:
+    governed_any: true
+    partition_filter_all: true
+    expanded_paths_min: 3

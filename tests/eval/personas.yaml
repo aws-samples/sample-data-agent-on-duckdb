@@ -1,0 +1,20 @@
+# Eval personas → (local governance role, Cognito user for --mode cloud).
+# Passwords are never stored here: --mode cloud reads EVAL_PASSWORD.
+admin:
+  role: ops:admin
+  user: ops-admin
+investigator:
+  role: exchange-a:investigator
+  user: inv-a
+junior:
+  role: exchange-a:junior
+  user: jr-a
+finops:
+  role: ops:finops
+  user: finops-a
+secops:
+  role: ops:secops
+  user: sec-a
+secops_junior:
+  role: ops:secops-junior
+  user: sec-jr

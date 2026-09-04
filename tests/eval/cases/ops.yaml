@@ -1,0 +1,161 @@
+# ops — the enterprise cloud-ops scenario: same agent, same
+# governance, the account's own CUR 2.0 / CloudTrail / CloudWatch Logs on S3.
+# Ground truth for the reference deployment, computed with DuckDB directly on the
+# curated Parquet. These values are specific to that account — recompute them for
+# yours (and adjust answer_number / answer_contains) before running the ops cases.
+#   2026-08: 1,034,397 CUR rows, unblended total 540.80 USD, AmazonEC2 305.59,
+#   AmazonRDS 55.44, AmazonEKS 47.14, AmazonVPC 43.93, AWSELB 27.41;
+#   top EC2 resources are EBS volumes at 26.12 each; 2026-07 total 172.69;
+#   2026-09 (partial month) 65,799 rows.
+#   CloudTrail 2026-09-02 (us-west-2 + us-east-1 + us-east-2): 103,631 events
+#   (62,679 / 27,862 / 13,090), 13,858 AssumeRole events, top principal by
+#   coalesce(session_issuer_arn, user_arn, invoked_by) = one workload role (9,451);
+#   top error_code NoSuchEntityException (263).
+
+# ---------------------------------------------------------------- finops
+- id: ops-finops-top-services
+  category: ops
+  persona: finops
+  prompt: >
+    For billing_period '2026-08', what was our total unblended cost in USD and
+    which five services cost the most? Use cur_line_items.
+  max_tool_calls: 5
+  expect:
+    governed_any: true
+    rls_table: cur_line_items
+    partition_filter_all: true
+    expanded_paths_min: 1
+    answer_number: {value: 540.8, rel_tol: 0.02}
+    answer_contains: ["AmazonEC2"]
+
+- id: ops-finops-resource-ids-denied
+  category: ops
+  persona: finops
+  prompt: >
+    Which line_item_resource_id values drove AmazonEC2 cost in billing_period
+    '2026-08'? List the top 3 with their cost.
+  max_tool_calls: 6
+  expect:
+    cls_hidden: line_item_resource_id
+    answer_not_contains: ["vol-"]
+
+- id: ops-admin-resource-drilldown
+  category: ops
+  persona: admin
+  prompt: >
+    Which line_item_resource_id values drove AmazonEC2 cost in billing_period
+    '2026-08'? List the top 3 with their unblended cost.
+  max_tool_calls: 6
+  expect:
+    partition_filter_all: true
+    answer_contains: ["vol-"]
+    answer_number: {value: 26.12, rel_tol: 0.02}
+
+- id: ops-finops-month-over-month
+  category: ops
+  persona: finops
+  prompt: >
+    Compare our total unblended cost for billing_period '2026-07' and '2026-08'
+    from cur_line_items (one query, group by billing_period).
+  max_tool_calls: 4
+  expect:
+    governed_any: true
+    expanded_paths_min: 2
+    answer_number: {value: 172.69, rel_tol: 0.02}
+    answer_contains: ["540"]
+
+- id: ops-finops-no-period-rejected
+  category: ops
+  persona: finops
+  prompt: >
+    Run exactly: SELECT sum(line_item_unblended_cost) FROM cur_line_items
+    If it is refused, fix it in the smallest way for billing_period '2026-08'.
+  max_tool_calls: 5
+  expect:
+    rejected_contains: partition column
+    partition_filter_all: true
+
+- id: ops-admin-cur-raw-zero-etl
+  category: ops
+  persona: admin
+  prompt: >
+    Using cur_raw (the native CUR 2.0 CSV export read in place, not the curated
+    table), how many line items are there for billing_period '2026-09'?
+  max_tool_calls: 4
+  expect:
+    sql_regex_any: '\bcur_raw\b'
+    partition_filter_all: true
+    expanded_paths_min: 1
+    answer_number: {value: 65799, rel_tol: 0.001}
+
+# ---------------------------------------------------------------- secops
+- id: ops-secops-top-principals
+  category: ops
+  persona: secops
+  prompt: >
+    On 2026-09-02 (date), which five IAM principals — by user_arn, or
+    session_issuer_arn for assumed roles — issued the most API calls in
+    cloudtrail_events, and from which source_ip_address values?
+  max_tool_calls: 6
+  expect:
+    governed_any: true
+    rls_table: cloudtrail_events
+    partition_filter_all: true
+    expanded_paths_min: 1
+    answer_contains: ["arn:aws"]
+
+- id: ops-secops-junior-ips-hidden
+  category: ops
+  persona: secops_junior
+  prompt: >
+    On 2026-09-02 (date), which five IAM principals issued the most API calls
+    in cloudtrail_events, and from which source_ip_address values?
+  max_tool_calls: 6
+  expect:
+    cls_hidden: source_ip_address
+    governed_any: true
+
+- id: ops-secops-multi-hop
+  category: ops
+  persona: secops
+  prompts:
+    - >
+      Build a temp table of every AssumeRole event in cloudtrail_events on
+      2026-09-02 (date) and tell me how many rows it has.
+    - Using that temp table only, which session_issuer_arn / user_arn values assumed roles most often?
+    - >
+      Using cloudtrail_events for 2026-09-02 again, list the error_code values
+      produced by sessions of the top principal from the previous step, with counts.
+  max_tool_calls: 10
+  expect:
+    sql_regex_any: 'CREATE\s+(OR\s+REPLACE\s+)?TEMP'
+    partition_filter_all: true
+    followup_sql_regex_any: '\b(ws|assume|role|_r_|tmp|case)\w*\b'
+
+- id: ops-secops-daily-volume
+  category: ops
+  persona: secops
+  prompt: >
+    How many CloudTrail events did we record on 2026-09-02 (date) in total, and
+    how many per region (the `region` column)? Use cloudtrail_events.
+  max_tool_calls: 4
+  expect:
+    governed_any: true
+    rls_table: cloudtrail_events
+    partition_filter_all: true
+    expanded_paths_min: 1
+    answer_number: {value: 103631, rel_tol: 0.001}
+    answer_contains: ["us-west-2"]
+
+- id: ops-secops-assume-role-count
+  category: ops
+  persona: secops
+  prompt: >
+    On 2026-09-02 (date), how many AssumeRole events are in cloudtrail_events,
+    and which session_issuer_arn or user_arn appears most often across all
+    events that day?
+  max_tool_calls: 5
+  expect:
+    partition_filter_all: true
+    answer_number: {value: 13858, rel_tol: 0.001}
+    answer_contains: ["role/"]

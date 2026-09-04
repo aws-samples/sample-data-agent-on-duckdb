@@ -35,11 +35,14 @@ COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")  # required
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET", "")  # required to log in
 
 # Demo personas for the login dropdown: username → the tenant:role it maps to.
-# The row/column policy each principal gets is defined in governance.py.
+# The row/column policy each principal gets is defined in data_agent/governance/.
 DEMO_PERSONAS = {
     "inv-a — exchange-a : investigator (sees subject_identity)": "inv-a",
     "jr-a — exchange-a : junior (subject_identity hidden by CLS)": "jr-a",
     "ops-admin — ops : admin (unrestricted)": "ops-admin",
+    "finops-a — ops : finops (own account, resource ids hidden)": "finops-a",
+    "sec-a — ops : secops (CloudTrail, full rows)": "sec-a",
+    "sec-jr — ops : secops-junior (source IP / user agent hidden by CLS)": "sec-jr",
 }
 
 # ONE shared investigation script for every persona, so you can log in as each
@@ -63,6 +66,15 @@ EXAMPLE_QUESTIONS = [
     "risk_tier AND the subject_identity (the customer behind each deposit address)",
     "⚖️ Permission test — run a direct read_parquet() over the raw eth/traces S3 path "
     "for 2025-02-21 and count the rows.",
+    # ---- cloud-ops scenario: same method, the company's own AWS estate
+    "☁️ Cost: for billing_period '2026-08', total unblended cost by product_servicecode "
+    "(top 10) and the share of the biggest service.",
+    "☁️ Cost drill-down: which line_item_resource_id drove the top service's cost in "
+    "2026-08, and what usage types?",
+    "☁️ CloudTrail: on 2026-09-02, which IAM principals (user_arn / session_issuer_arn) "
+    "issued the most API calls, and from which source IPs?",
+    "☁️ CloudTrail hop: take the top role from the previous step — list its AssumeRole "
+    "events, then every error_code its sessions produced that day.",
 ]
 
 
@@ -138,6 +150,7 @@ def render_stream(id_token: str, prompt: str, session_id: str) -> dict:
     container = st.container()
     segments: list[dict] = []  # serializable ordered transcript
     final_trace: list = []
+    session = None
     cur_text: dict | None = None
     cur_tool: dict | None = None
 
@@ -204,11 +217,12 @@ def render_stream(id_token: str, prompt: str, session_id: str) -> dict:
             final_trace.append(env)
         elif kind == "result":
             final_trace = env.get("trace", final_trace)
+            session = env.get("session", session)
 
     # strip live-only slot handles before persisting
     clean = [{k: v for k, v in s.items() if not k.startswith("_")} for s in segments]
     answer = "".join(s["text"] for s in clean if s["type"] == "text")
-    return {"answer": answer, "segments": clean, "trace": final_trace}
+    return {"answer": answer, "segments": clean, "trace": final_trace, "session": session}
 
 
 def replay_transcript(segments: list[dict]) -> None:
@@ -275,13 +289,29 @@ def _phase_line(env: dict) -> str:
             detail = "; ".join(bits) if bits else "policy applied"
             return f"🛡️ **govern** — `{env.get('principal')}`: {detail}"
         return f"🛡️ **govern** — `{env.get('principal')}`: no restriction (unrestricted role)"
+    if phase == "cost":
+        if env.get("rejected"):
+            return f"💰 **cost** — ❌ REJECTED: {env.get('reason', '')}"
+        srcs = ", ".join(f"`{s}`" for s in env.get("sources") or [])
+        detail = f"partition filter present on {srcs}"
+        if env.get("expanded_paths"):
+            detail += f" · expanded to {env['expanded_paths']} explicit path(s), no prefix LIST"
+        return f"💰 **cost** — {detail}"
     if phase == "execute":
         if "error" in env:
             return "⚡ **execute** — engine error (returned to the model for self-repair)"
-        return (
+        line = (
             f"⚡ **execute** — 🦆 in-process DuckDB · **{env.get('engine_ms')} ms** · "
             f"{env.get('rows')} rows · 0 network hops"
         )
+        if env.get("shape") == "summary":  # shaped, not truncated
+            line += (
+                f" · 📦 kept whole in temp table `{env.get('materialized')}`, "
+                "model got a schema summary"
+            )
+        if env.get("evicted"):
+            line += f" · dropped {', '.join(env['evicted'])} (LRU)"
+        return line
     return f"· {phase}"
 
 
@@ -387,7 +417,9 @@ def main() -> None:
                     "wall_ms": wall,
                 }
             )
-            st.session_state.traces.append({"prompt": prompt, "trace": out["trace"]})
+            st.session_state.traces.append(
+                {"prompt": prompt, "trace": out["trace"], "session": out.get("session")}
+            )
 
     with trace_tab:
         _render_trace_tab(st.session_state.traces)
@@ -407,6 +439,13 @@ def _render_trace_tab(traces: list) -> None:
     c1, c2 = st.columns(2)
     c1.metric("SQL statements executed", n_stmts)
     c2.metric("Total in-process engine time", f"{total_engine:.0f} ms")
+    sess = traces[-1].get("session") if traces else None
+    if sess:  # cumulative per session, from the audit counters
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Statements (session)", sess.get("statements", 0))
+        s2.metric("Rejected by a gate", sess.get("rejected", 0))
+        s3.metric("Results materialized", sess.get("materialized", 0))
+        s4.metric("History stubs (compression)", sess.get("compressed", 0))
     st.caption("Every statement ran in-process — no external query service, no MCP round-trip.")
     for i, item in enumerate(reversed(traces), 1):
         with st.expander(f"Q{len(traces) - i + 1}: {item['prompt'][:80]}…", expanded=(i == 1)):

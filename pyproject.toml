@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "PyYAML"]  # PyYAML: scripts/run_eval.py case files
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,31 @@
+# multi_turn — session working sets: follow-ups must hit in-memory tables.
+- id: mt-working-set-reuse
+  persona: investigator
+  prompts:
+    - >
+      The exploiter address is 0x47666fab8bd0ac7003bce3f5c3585383f09486e2. Build a
+      temp table of ALL its outbound internal calls from s3t.blockchain.eth_traces
+      (from_address = it, value > 0) and tell me how many rows it has.
+    - Using that temp table only, who are the top 5 recipients by total ETH?
+    - Using that temp table only, how many distinct recipients are there in total?
+  max_tool_calls: 8
+  expect:
+    sql_regex_any: 'CREATE\s+(OR\s+REPLACE\s+)?TEMP'
+    followup_sql_regex_any: '\b(ws|case|work|out|fan|_r_)\w*\b'
+    followup_engine_ms_max: 250
+
+- id: mt-summary-readback
+  persona: admin
+  prompts:
+    - >
+      From s3t.blockchain.eth_traces on 2025-02-21, list every (from_address,
+      to_address, value) row with value > 1000 ETH (value is in wei). I want the
+      rows, not an aggregate.
+    - >
+      Using the temp table you were pointed to (do not re-scan), how many distinct
+      to_address are in that result and which three received the most ETH in total?
+  max_tool_calls: 8
+  expect:
+    materialized_min: 1
+    readback: true
+    followup_engine_ms_max: 250

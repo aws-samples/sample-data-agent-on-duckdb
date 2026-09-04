@@ -1,0 +1,53 @@
+# routing — does the agent pick the right access path / table for the ask?
+- id: rt-catalog-leg-named
+  persona: admin
+  prompt: >
+    Using the S3 Tables catalog (s3t.blockchain.eth_traces), how many internal
+    calls are in the loaded incident-window slice? Just the count.
+  max_tool_calls: 4
+  expect:
+    sql_regex_any: 's3t\.blockchain\.eth_traces'
+    no_rejections: true
+    answer_number: {value: 3492205, rel_tol: 0.001}
+
+- id: rt-glue-leg-named
+  persona: admin
+  prompt: >
+    Count the rows of glue.blockchain.eth_traces (the Glue Data Catalog path to
+    the same incident-window table). Just the number.
+  max_tool_calls: 4
+  expect:
+    sql_regex_any: 'glue\.blockchain\.eth_traces'
+    answer_number: {value: 3492205, rel_tol: 0.001}
+
+- id: rt-raw-view-with-date
+  persona: admin
+  prompt: >
+    Using the raw eth_traces view (not a catalog), count internal calls with
+    value > 0 on 2025-02-21 only. Write the date filter as WHERE date = '2025-02-21'.
+  max_tool_calls: 4
+  expect:
+    sql_regex_any: '\beth_traces\b'
+    partition_filter_all: true
+    expanded_paths_min: 1
+    no_rejections: true
+
+- id: rt-label-table-lookup
+  persona: admin
+  prompt: How many addresses are on the OFAC sanctions list table, and what are its columns?
+  max_tool_calls: 4
+  expect:
+    sql_regex_any: '\bofac_addresses\b'
+    answer_number: {value: 120, rel_tol: 0.05}
+
+- id: rt-search-schema-discovery
+  persona: admin
+  prompt: >
+    I don't remember the table names. Use search_schema to find the table that
+    holds OFAC-sanctioned addresses and the table with exchange deposit labels,
+    then count the rows in each.
+  max_tool_calls: 5
+  expect:
+    sql_regex_any: '\bofac_addresses\b'
+    answer_contains: ["ofac_addresses", "cex_deposit_labels"]
+    no_rejections: true

@@ -10,16 +10,24 @@ import duckdb
 import pytest
 
 import agent as agent_mod
-import governance
-from agent import _run_sql_core as run_sql
-from data_catalog import (
-    CATALOG_DOC,
+from data_agent import governance
+from data_agent.compute import engine
+from data_agent.context import prompt
+from data_agent.governance import policies as gov_policies
+from data_agent.pipeline import run_text as run_sql
+from data_agent.scheduling import runtime
+from data_agent.storage import legs
+from data_agent.storage.scenarios import onchain
+from data_agent.storage.scenarios.onchain import (
     S3_BASE,
     VIEW_DEFS,
-    build_catalog_doc,
     build_label_views,
     validate_labels_prefix,
 )
+
+# the raw-only data section of the prompt (no legs, no labels, no ops)
+CATALOG_DOC = prompt.catalog_doc([])
+build_catalog_doc = prompt.catalog_doc
 
 UNRESTRICTED = "ops:admin"
 
@@ -39,7 +47,7 @@ def local_conn(monkeypatch):
     """Swap the S3-backed connection for a plain in-memory DuckDB."""
     conn = duckdb.connect()
     conn.execute("CREATE TABLE t AS SELECT range AS id, 'x' || range AS name FROM range(500)")
-    monkeypatch.setattr(agent_mod, "get_conn", lambda: conn)
+    monkeypatch.setattr(engine, "get_conn", lambda: conn)
     yield conn
     conn.close()
 
@@ -114,10 +122,19 @@ def test_result_is_json_with_column_names(local_conn):
     ]
 
 
-def test_truncation_at_row_cap(local_conn):
+def test_oversized_result_is_materialized_not_truncated(local_conn):
+    """Invariant 9: 500 rows > MAX_RESULT_ROWS → the model gets a schema
+    summary with a retrieval path; the full result sits in a session temp table."""
     out = run_sql("SELECT * FROM t")
-    assert "[TRUNCATED at 200 rows" in out
-    assert len(json.loads(out.split("\n")[0])) == 200
+    assert "TRUNCATED" not in out
+    summary = json.loads(out.split("\n")[0])
+    assert summary["shape"] == "summary" and summary["rows"] == 500
+    assert summary["ref"].startswith("_r_")
+    assert [c["name"] for c in summary["columns"]] == ["id", "name"]
+    assert len(summary["sample"]) == 3
+    # read-back is an ordinary governed query against the temp table
+    back = run_sql(f"SELECT count(*) AS n FROM {summary['ref']}")
+    assert '"n": "500"' in back
 
 
 def test_engine_error_returned_verbatim_for_model_repair(local_conn):
@@ -148,10 +165,12 @@ def test_engine_metrics_appended(local_conn):
     assert isinstance(metrics["engine_ms"], int | float) and metrics["engine_ms"] >= 0
 
 
-def test_metrics_present_even_when_truncated(local_conn):
+def test_metrics_present_for_summary_shape(local_conn):
     out = run_sql("SELECT * FROM t")
-    assert '"engine_ms"' in out
-    assert "[TRUNCATED at 200 rows" in out
+    metrics = json.loads(out.split("\n")[1])
+    assert metrics["shape"] == "summary" and metrics["ref"].startswith("_r_")
+    assert metrics["rows"] == 500 and metrics["engine_ms"] >= 0
+    assert out.split("\n")[2].startswith("[Result not shown inline")
 
 
 # ---------------------------------------------------------------- catalog
@@ -175,15 +194,15 @@ def test_catalog_doc_teaches_date_filter_discipline():
 
 # ------------------------------------------------------------- catalog legs
 def test_active_legs_follow_env_toggles(monkeypatch):
-    monkeypatch.setattr(agent_mod, "S3_TABLES_ARN", "")
-    monkeypatch.setattr(agent_mod, "GLUE_CATALOG", "")
-    monkeypatch.setattr(agent_mod, "DUCKLAKE_CATALOG", "")
-    assert agent_mod.active_legs() == []
-    monkeypatch.setattr(agent_mod, "S3_TABLES_ARN", "arn:aws:s3tables:x")
-    monkeypatch.setattr(agent_mod, "DUCKLAKE_CATALOG", "s3://b/cat.ducklake")
-    assert agent_mod.active_legs() == ["s3t", "dl"]
-    monkeypatch.setattr(agent_mod, "GLUE_CATALOG", "123456789012:s3tablescatalog/tb")
-    assert agent_mod.active_legs() == ["s3t", "glue", "dl"]
+    monkeypatch.setattr(legs, "S3_TABLES_ARN", "")
+    monkeypatch.setattr(legs, "GLUE_CATALOG", "")
+    monkeypatch.setattr(legs, "DUCKLAKE_CATALOG", "")
+    assert legs.active_legs() == []
+    monkeypatch.setattr(legs, "S3_TABLES_ARN", "arn:aws:s3tables:x")
+    monkeypatch.setattr(legs, "DUCKLAKE_CATALOG", "s3://b/cat.ducklake")
+    assert legs.active_legs() == ["s3t", "dl"]
+    monkeypatch.setattr(legs, "GLUE_CATALOG", "123456789012:s3tablescatalog/tb")
+    assert legs.active_legs() == ["s3t", "glue", "dl"]
 
 
 def test_catalog_doc_raw_only_omits_leg_sections():
@@ -212,7 +231,9 @@ def test_catalog_doc_full_spectrum_has_scenario_table():
 
 def test_catalog_doc_label_section_gated_by_flag():
     assert "Attribution label tables" not in build_catalog_doc([])
-    doc = build_catalog_doc([], labels=True)
+    doc = prompt.catalog_doc(
+        [], scenarios=[onchain.build("s3://duckdb-agent-ducklake-123456789012/labels")]
+    )
     assert "Attribution label tables" in doc
     assert "ofac_addresses" in doc and "cex_deposit_labels" in doc
 
@@ -250,11 +271,11 @@ def test_attach_legs_mounts_ducklake_readonly(monkeypatch, tmp_path):
     src.execute(f"ATTACH 'ducklake:{tmp_path}/cat.ducklake' AS dl (DATA_PATH '{tmp_path}/data')")
     src.execute("CREATE TABLE dl.t AS SELECT 42 AS x")
     src.close()
-    monkeypatch.setattr(agent_mod, "S3_TABLES_ARN", "")
-    monkeypatch.setattr(agent_mod, "GLUE_CATALOG", "")
-    monkeypatch.setattr(agent_mod, "DUCKLAKE_CATALOG", f"{tmp_path}/cat.ducklake")
+    monkeypatch.setattr(legs, "S3_TABLES_ARN", "")
+    monkeypatch.setattr(legs, "GLUE_CATALOG", "")
+    monkeypatch.setattr(legs, "DUCKLAKE_CATALOG", f"{tmp_path}/cat.ducklake")
     conn = duckdb.connect()
-    agent_mod._attach_legs(conn)
+    legs.attach(conn)
     assert conn.execute("SELECT x FROM dl.main.t").fetchone() == (42,)
     with pytest.raises(duckdb.Error):  # READ_ONLY mount rejects writes
         conn.execute("INSERT INTO dl.main.t VALUES (1)")
@@ -338,7 +359,7 @@ def test_rls_applies_inside_cte_and_ctas_but_not_to_local_names():
 
 def test_raw_path_access_rejected_for_restricted_role():
     governance.set_active_role(INVESTIGATOR)
-    with pytest.raises(ValueError, match="raw file access"):
+    with pytest.raises(ValueError, match="raw file access|is not allowed"):
         governance.apply_governance(
             "SELECT count(*) FROM read_parquet('s3://aws-public-blockchain/x/*.parquet')"
         )
@@ -464,7 +485,7 @@ def test_semicolons_that_are_not_statement_separators_are_allowed(sql, local_con
 )
 def test_every_file_reading_table_function_is_rejected(func):
     governance.set_active_role(INVESTIGATOR)
-    with pytest.raises(ValueError, match="raw file access"):
+    with pytest.raises(ValueError, match="raw file access|is not allowed"):
         governance.apply_governance(f"SELECT 1 FROM {func}('s3://aws-public-blockchain/x')")
 
 
@@ -485,7 +506,7 @@ def test_raw_path_rejection_reaches_nested_scopes():
         "WITH w AS (SELECT * FROM parquet_scan('s3://b/x')) SELECT * FROM w",
         "SELECT * FROM btc_transactions JOIN glob('s3://b/*') g ON TRUE",
     ):
-        with pytest.raises(ValueError, match="raw file access"):
+        with pytest.raises(ValueError, match="raw file access|is not allowed"):
             governance.apply_governance(sql)
 
 
@@ -526,7 +547,7 @@ def _two_policy_tenant(monkeypatch):
     indistinguishable, which is why the order-dependent bug passed every test.
     """
     monkeypatch.setattr(
-        governance,
+        gov_policies,
         "POLICIES",
         {
             "ops:admin": {"allow_raw_paths": True, "tables": {}},
@@ -553,9 +574,9 @@ def test_unknown_role_falls_back_to_most_restricted_not_first_declared(monkeypat
 def test_unknown_role_fallback_is_independent_of_declaration_order(monkeypatch):
     _two_policy_tenant(monkeypatch)
     reordered = {
-        "cex-a:analyst": governance.POLICIES["cex-a:analyst"],
-        "cex-a:admin": governance.POLICIES["cex-a:admin"],
-        "ops:admin": governance.POLICIES["ops:admin"],
+        "cex-a:analyst": gov_policies.POLICIES["cex-a:analyst"],
+        "cex-a:admin": gov_policies.POLICIES["cex-a:admin"],
+        "ops:admin": gov_policies.POLICIES["ops:admin"],
     }
     monkeypatch.setattr(governance, "POLICIES", reordered)
     assert governance.resolve_role({"tenant": "cex-a", "role": "intern"}) == "cex-a:analyst"
@@ -567,7 +588,7 @@ def test_unknown_role_fallback_actually_restricts_at_the_engine(monkeypatch):
     governance.set_active_role(governance.resolve_role({"tenant": "cex-a", "role": "intern"}))
     out = governance.apply_governance("SELECT count(*) FROM btc_transactions")
     assert "date >= '2026-08-24'" in out and "EXCLUDE (fee)" in out
-    with pytest.raises(ValueError, match="raw file access"):
+    with pytest.raises(ValueError, match="raw file access|is not allowed"):
         governance.apply_governance("SELECT 1 FROM read_parquet('s3://b/x')")
 
 
@@ -580,7 +601,7 @@ def test_restrictiveness_ranks_raw_path_denial_above_table_count(monkeypatch):
     """Denying raw file access outranks table count: a path read bypasses the
     table policies entirely, so it is the widest hole available."""
     monkeypatch.setattr(
-        governance,
+        gov_policies,
         "POLICIES",
         {
             "t:wide": {"allow_raw_paths": True, "tables": {"a": {}, "b": {}, "c": {}}},
@@ -709,28 +730,28 @@ def test_streaming_tool_reports_governance_rejection_for_denied_column(local_con
 # --------------------------------------------- entrypoint event envelope (P2)
 def test_map_event_translates_strands_events_and_accumulates_trace():
     trace = []
-    assert agent_mod._map_event({"reasoningText": "thinking"}, trace)["kind"] == "reasoning"
-    txt = agent_mod._map_event({"data": "answer chunk"}, trace)
+    assert runtime.map_event({"reasoningText": "thinking"}, trace)["kind"] == "reasoning"
+    txt = runtime.map_event({"data": "answer chunk"}, trace)
     assert txt == {"kind": "text", "text": "answer chunk"}
-    tool = agent_mod._map_event(
+    tool = runtime.map_event(
         {"current_tool_use": {"toolUseId": "t1", "name": "run_sql", "input": "SELECT 1"}}, trace
     )
     assert tool["kind"] == "tool_start" and tool["tool"] == "run_sql"
     # a run_sql phase yield surfaces as a trace envelope AND is accumulated
-    ph = agent_mod._map_event(
+    ph = runtime.map_event(
         {"tool_stream_event": {"tool_use": {}, "data": {"phase": "execute", "engine_ms": 5}}}, trace
     )
     assert ph["kind"] == "trace" and ph["phase"] == "execute"
     assert trace == [{"phase": "execute", "engine_ms": 5}]
     # unmapped events are dropped
-    assert agent_mod._map_event({"init_event_loop": True}, trace) is None
+    assert runtime.map_event({"init_event_loop": True}, trace) is None
 
 
 def test_map_event_does_not_confuse_tool_stream_data_with_text():
     """A tool_stream_event dict must not be mis-read as an assistant text delta."""
     trace = []
     ev = {"tool_stream_event": {"tool_use": {}, "data": {"phase": "gate", "allowed": True}}}
-    out = agent_mod._map_event(ev, trace)
+    out = runtime.map_event(ev, trace)
     assert out["kind"] == "trace"
 
 
@@ -930,7 +951,7 @@ def test_unknown_role_key_falls_to_deny_all_not_admin():
 
 def test_deny_all_outranks_every_other_policy_in_restrictiveness(monkeypatch):
     monkeypatch.setattr(
-        governance,
+        gov_policies,
         "POLICIES",
         {
             "t:none": {"allow_raw_paths": False, "deny_all": True, "tables": {}},
@@ -974,11 +995,11 @@ def test_entrypoint_short_circuits_deny_all_without_running_the_agent(monkeypatc
 def test_malformed_policy_tables_are_rejected_at_load(bad):
     bad.setdefault(governance.DENY_ALL_ROLE, {"deny_all": True, "tables": {}})
     with pytest.raises(ValueError, match="governance:"):
-        governance._validate_policies(bad)
+        gov_policies._validate_policies(bad)
 
 
 def test_shipped_policy_table_validates_and_contains_the_floor():
-    governance._validate_policies(governance.POLICIES)
+    gov_policies._validate_policies(governance.POLICIES)
     assert governance.DENY_ALL_ROLE in governance.POLICIES
 
 

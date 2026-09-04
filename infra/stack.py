@@ -132,8 +132,55 @@ class DataAgentStack(Stack):
                 resources=["*"],  # LF vends per-table credentials; action takes no resource
             )
         )
-        # Path D: DuckLake catalog file + Parquet data
+        # Path D: DuckLake catalog file + Parquet data (and the curated ops/ prefix)
         ducklake_bucket.grant_read(exec_role)
+        # --- cloud-ops scenario -------------------------------------------
+        # The agent reads the account's own CUR 2.0 export and CloudTrail
+        # buckets in place (zero-ETL views) — pass their names at deploy time:
+        #   cdk deploy -c opsSourceBuckets=<cur-bucket>,<cloudtrail-bucket>
+        ops_buckets = [
+            b.strip()
+            for b in (self.node.try_get_context("opsSourceBuckets") or "").split(",")
+            if b.strip()
+        ]
+        if ops_buckets:
+            exec_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="OpsSourceRead",
+                    actions=["s3:GetObject", "s3:ListBucket"],
+                    resources=[
+                        arn
+                        for b in ops_buckets
+                        for arn in (f"arn:aws:s3:::{b}", f"arn:aws:s3:::{b}/*")
+                    ],
+                )
+            )
+        # CloudWatch Logs export tasks deliver into ops/cwlogs-export/ of the
+        # solution bucket; the logs service principal needs these two grants.
+        logs_principal = iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com")
+        ducklake_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="CloudWatchLogsExportAclCheck",
+                principals=[logs_principal],
+                actions=["s3:GetBucketAcl"],
+                resources=[ducklake_bucket.bucket_arn],
+                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+            )
+        )
+        ducklake_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="CloudWatchLogsExportWrite",
+                principals=[logs_principal],
+                actions=["s3:PutObject"],
+                resources=[ducklake_bucket.arn_for_objects("ops/cwlogs-export/*")],
+                conditions={
+                    "StringEquals": {
+                        "s3:x-amz-acl": "bucket-owner-full-control",
+                        "aws:SourceAccount": self.account,
+                    }
+                },
+            )
+        )
         # Logs
         log_group.grant_write(exec_role)
 
@@ -195,6 +242,12 @@ class DataAgentStack(Stack):
             "DuckLakeCatalog",
             value=f"s3://{ducklake_bucket.bucket_name}/catalog/blockchain.ducklake",
             description="DUCKLAKE_CATALOG env value (Path D)",
+        )
+        CfnOutput(
+            self,
+            "OpsPrefix",
+            value=f"s3://{ducklake_bucket.bucket_name}/ops",
+            description="OPS_PREFIX env value (curated CUR / CloudTrail / CloudWatch Logs Parquet)",
         )
         CfnOutput(
             self,
