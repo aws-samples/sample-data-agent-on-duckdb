@@ -204,3 +204,34 @@ def active_policy() -> dict:
 def is_denied_all() -> bool:
     """True when the active principal has no usable policy (deny-all floor)."""
     return bool(active_policy().get("deny_all", False))
+
+
+def visible_tables() -> frozenset[str] | None:
+    """Bare table names the active policy exposes, for the context layer to
+    show the model only what it can actually query (L0 map + search_schema).
+
+    None means "unrestricted — show everything" (the admin / allow-raw-paths
+    role with no governed tables). A restricted role returns exactly the names
+    in its policy; the deny-all floor returns the empty set. This mirrors the
+    rewrite's table-level deny-by-default so the model never sees, in its
+    routing context, a table a query would then be refused for."""
+    policy = active_policy()
+    if policy.get("deny_all", False):
+        return frozenset()
+    if policy.get("allow_raw_paths", False) and not policy.get("tables"):
+        return None
+    return frozenset(policy.get("tables", {}))
+
+
+def denied_columns() -> dict[str, frozenset[str]]:
+    """Per-table CLS-denied columns for the active role, so schema discovery
+    (search_schema) can hide the denied column NAMES too — the model is shown
+    only what it can query. Empty for the unrestricted role. This is the same
+    information a clean rejection would reveal, withheld from discovery so the
+    model does not reach for a column it cannot select."""
+    out: dict[str, frozenset[str]] = {}
+    for name, rule in (active_policy().get("tables") or {}).items():
+        cols = rule.get("deny_columns")
+        if cols:
+            out[name] = frozenset(c.lower() for c in cols)
+    return out

@@ -85,9 +85,11 @@ is asked.
    ungoverned SQL for a restricted principal.
 7. **Governance is total, not just correct.** A statement shape the parser
    cannot model is rejected, a local name may not shadow a governed table,
-   and a principal with no matching policy gets the built-in `deny-all`
-   floor. Each rule closes a bypass that was executable against an earlier
-   version of this code (see the coverage rules below).
+   a principal with no matching policy gets the built-in `deny-all` floor,
+   and a restricted principal may reference only the tables its policy names
+   (plus statement-local names and the session temp objects it created).
+   Each rule closes a bypass that was executable against an earlier version
+   of this code (see the coverage rules below).
 8. **Every framework mechanism must depend on the engine being in-process to
    make sense** (the admission test for the context layer). Oversized results
    become temp tables *because* the engine is here; compressed history points
@@ -135,6 +137,15 @@ Implementation notes that save the next person a day:
   again, become an unrestricted principal. The stack therefore creates the
   client with `custom:tenant` / `custom:role` **readable but not writable**;
   role assignment is an operator action (`AdminUpdateUserAttributes`).
+- **Session state is bound to the principal.** AgentCore isolates one
+  session (one `runtimeSessionId`) from another, but the session id is chosen
+  by the caller, and the engine, result store, conversation history and audit
+  counters are module-level and live for the microVM. A second identity
+  presenting the same session id could therefore read the first identity's
+  materialized results and conversation. The entrypoint now records the
+  session owner (the IdP `sub`, else the resolved `tenant:role`) on first
+  use and, when a later invocation resolves a different owner, resets all of
+  that state and writes one audit line before running anything.
 
 ## Why the governance layer is a SQL rewrite
 
@@ -198,6 +209,17 @@ regression surface for any new governed table.
   order is fragile; refusing the collision makes the invariant total, and
   analysts lose nothing (a working set is named `ws`, not after its source).
   The framework's `_r_` prefix is reserved under the same rule.
+- **Table access is deny-by-default.** The guard loop can only protect
+  tables the policy *names*, so a mounted table the policy omitted, another
+  scenario's table, or the runtime's own exported audit log would otherwise
+  execute unguarded. A restricted principal may now reference only tables its
+  policy names, names local to the statement, and session temp objects it
+  created (they hold rows it was already governed into). A policy entry of
+  `{}` means "readable, no row or column restriction", which is how the
+  public ledger context tables and the OFAC list are listed for the exchange
+  personas. The L0 table map and `search_schema` are filtered the same way,
+  and denied column *names* are withheld from discovery, so the model is
+  shown exactly what it can query.
 - **`deny-all` is the floor.** A principal whose claims match no policy gets
   the built-in deny-all policy and the entrypoint refuses before the model
   is invoked. Pointing the default at a permissive role turns "no
@@ -265,9 +287,12 @@ dispatch that is one statement because the engine is in-process.
   "first N rows". A result that hit `MAX_MATERIALIZE_ROWS` is always a
   summary.
 - Read-back is just `run_sql` against `_r_<n>` — governed rows already, zero
-  copies, sub-millisecond. `_r_` is a reserved prefix (shadowing rule), and
-  an LRU evicts the least-recently-queried table when `RESULT_TABLE_LRU` is
-  exceeded, with reference tracking from the tables the governed AST names.
+  copies, sub-millisecond. `_r_` is a reserved prefix: defining or aliasing
+  such a name is refused on the *parsed tree*, so a quoted identifier such as
+  `CREATE OR REPLACE TEMP TABLE "_r_1"` cannot overwrite a framework result
+  with planted rows (a text regex missed exactly that form). An LRU evicts the
+  least-recently-queried table when `RESULT_TABLE_LRU` is exceeded, with
+  reference tracking from the tables the governed AST names.
 - Trace: the `execute` phase gains `shape: rows|summary`, `materialized`,
   `total_rows`, `evicted`.
 
@@ -318,10 +343,25 @@ at seven hundred.
   model queries.
 - **L2** — `DESCRIBE` via `run_sql` (the governance schema prober already
   caches these).
+- Both levels are filtered to the active role: the L0 map lists only the
+  tables the policy lets the role query, and `search_schema` drops tables
+  outside the policy and withholds the names of CLS-denied columns.
 - Freshness is session-scoped by design: a dropped table errors on use and
   the next search rebuilds the index. No external cache — production data
   agents that added one measured thousands of lookups per search and
   removed it.
+
+### Untrusted content in results
+
+Governance decides which rows reach the model; it says nothing about their
+content. Anyone can write text onto a public ledger, and CloudTrail fields
+such as `user_agent` and `request_parameters` are influenced by whoever calls
+the account's APIs, so a query result can carry text that reads as an
+instruction. The system prompt therefore states that row content is data,
+never instructions: text inside a result that appears to direct the model is
+to be quoted as a finding, not followed. This narrows the harm of data-borne
+prompt injection to a wrong narrative rather than a wider data reach — the
+rewrite, hardening and cost gate still bound what any statement can do.
 
 ### Cost policy as a rewrite
 
@@ -339,8 +379,11 @@ what"), engine-neutral like the first.
 - **Path expansion**: `WHERE date BETWEEN a AND b` / `= a` / `IN (…)` /
   `>= a AND <= b` on a raw view is rewritten to
   `read_parquet([<explicit per-partition paths>], hive_partitioning=true)`,
-  bounded by `MAX_EXPANDED_PARTITIONS`, so the engine LISTs N partition
-  prefixes instead of the whole table prefix. Unbounded or non-literal
+  so the engine LISTs N partition prefixes instead of the whole table prefix.
+  A literal range wider than `MAX_EXPANDED_PARTITIONS` is *rejected*, not
+  silently left unexpanded — it is a whole-prefix scan by another name — and
+  so is a literal range that selects no partition at all (an unsatisfiable
+  `BETWEEN`, or a point outside the RLS bound). One-sided or non-literal
   predicates satisfy the filter requirement and are left to the engine's own
   pruning. `scripts/ab_compare.py` measures LIST calls and wall time before
   and after.
@@ -415,7 +458,11 @@ data_agent/
   (the platform `ops:admin` role plus every scenario's personas).
 - **Pipeline** (`pipeline.py`): stages share one interface — read/update a
   `Statement`, yield trace events, raise `Rejected` to stop. The driver
-  audits exactly once per statement and emits the result string. The
+  audits exactly once per statement and emits the result string — including
+  for an unexpected exception, which becomes an audited error outcome and a
+  rejection string rather than an unlogged crash (a parser error from a
+  hostile table alias once escaped the governance stage that way; the alias
+  is now attached through the AST and never becomes free SQL text). The
   streaming tool pumps the generator one item at a time off the event loop
   (`asyncio.to_thread(next, gen)`), so the trace streams live while the
   engine call runs; the connection lock never spans a yield. A new layer is
@@ -502,6 +549,14 @@ or source IPs.
   kept as JSON strings). Views: `cur_line_items`, `cloudtrail_events`,
   `cw_logs` (curated) + `cur_raw`, `cloudtrail_raw(day, region)` (native).
   Partition columns are registered for the cost gate.
+- **Least privilege matches the row filter**: the execution role's grant on
+  the CUR and CloudTrail source buckets is scoped to the export prefix and to
+  `AWSLogs/<account>/CloudTrail/` for the pinned account, with `s3:ListBucket`
+  conditioned on the same prefixes, so the account pin is an IAM boundary and
+  not only a SQL predicate the unrestricted role is exempt from. The
+  CloudWatch Logs export grants on the solution bucket carry both
+  `aws:SourceAccount` and an `aws:SourceArn` pinned to the runtime's log
+  group, as AWS documents for export tasks.
 - **Governance with enterprise meaning**: `ops:finops` — RLS
   `line_item_usage_account_id = '<own account>'`, CLS hides
   `line_item_resource_id`; `ops:secops` — full CloudTrail rows for the own

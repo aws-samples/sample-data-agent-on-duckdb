@@ -42,6 +42,11 @@ def resolve_claims(payload, context) -> dict | None:
             return {
                 "tenant": decoded.get("custom:tenant") or decoded.get("tenant", ""),
                 "role": decoded.get("custom:role") or decoded.get("role", ""),
+                # `sub` is the IdP's stable per-user id — carried only to bind
+                # the session to an owner (resolve_role ignores it). Two users
+                # who share a role still get distinct owners, so a reused
+                # session id between them still triggers a state reset.
+                "sub": decoded.get("sub", ""),
             }
         except Exception:  # noqa: BLE001 — fall through to weaker sources
             pass
@@ -53,6 +58,60 @@ def resolve_claims(payload, context) -> dict | None:
     if isinstance(identity, dict):
         return identity
     return None
+
+
+# The engine, result store, conversation history and audit counters are all
+# module-level and live for the microVM's lifetime. AgentCore gives one
+# session per microVM, but the runtimeSessionId is chosen by the CALLER, so
+# session isolation is only as good as the caller's id hygiene (documented as
+# a shared-responsibility boundary). Nothing in the app re-bound that retained
+# state to a principal: a second identity presenting the same session id read
+# the first's materialized results and conversation (T003, verified locally —
+# a junior counted an admin-materialized _r_1 in full). We bind the session to
+# its owner here and reset everything the moment the owner changes.
+_session: dict = {"owner": None}
+
+
+def _owner_key(claims: dict | None, role: str) -> str:
+    """Stable identity for the session: the IdP `sub` when present (survives a
+    role change for the same user), else the resolved tenant:role."""
+    if claims and claims.get("sub"):
+        return f"sub:{claims['sub']}"
+    return f"role:{role}"
+
+
+def _bind_session(owner: str) -> bool:
+    """Record the session owner; return True when it CHANGED from a previously
+    bound owner (→ the caller reused a session id across identities: reset)."""
+    prev = _session["owner"]
+    _session["owner"] = owner
+    return prev is not None and prev != owner
+
+
+def _reset_session_state(agent, conversation_manager) -> None:
+    """Wipe everything scoped to one principal: the in-process engine (and its
+    temp `_r_<n>` results), the result-store bookkeeping, the data map, the L0
+    prompt injection, the audit counters and the conversation history."""
+    import sys
+
+    from data_agent.compute import engine
+    from data_agent.context import datamap, results
+
+    # The rebind audit line is written BEFORE the model runs, so it lands right
+    # after the previous invoke's streamed answer text, which Strands' printing
+    # handler leaves on stdout without a trailing newline. Terminate that line
+    # first, or the EMF JSON is glued to prose and CloudWatch cannot extract its
+    # metrics (seen in the cloud: 1 of 37 audit lines).
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    engine.reset()
+    results.STORE.reset()
+    datamap.reset()
+    prompt.reset()
+    audit.reset_session()
+    agent.messages.clear()
+    conversation_manager.stubbed = 0
+    conversation_manager.reclaimed_bytes = 0
 
 
 def envelope(kind: str, **fields) -> dict:
@@ -100,7 +159,20 @@ async def stream(agent, conversation_manager, payload, context=None):
     The consolidated `trace` array in the final event backs a Trace tab.
     """
     claims = resolve_claims(payload, context)
-    governance.set_active_role(governance.resolve_role(claims))
+    role = governance.resolve_role(claims)
+    governance.set_active_role(role)
+    # Bind the session to its owner; if a different identity reused this
+    # session id, drop all state retained under the previous principal before
+    # doing anything else (T003).
+    if _bind_session(_owner_key(claims, role)):
+        _reset_session_state(agent, conversation_manager)
+        audit.record(
+            principal=role,
+            sql="(session rebind: principal changed on a reused session id)",
+            outcome="rejected",
+            stage="session",
+            reason="session state reset — a different identity presented this session id",
+        )
     if governance.is_denied_all():
         # No usable identity → the deny-all floor. Refuse before the model runs:
         # run_sql would reject every statement anyway (defence in depth), but

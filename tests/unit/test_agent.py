@@ -410,6 +410,155 @@ def test_governed_flag_false_for_unrestricted(local_conn):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Table-level deny-by-default (threat model T001/T002): a restricted
+# principal may reference ONLY the tables its policy names, session temp
+# objects it created, or names local to the statement. A mounted-but-unlisted
+# table used to execute ungoverned (the rewrite only guards NAMED tables).
+# ═══════════════════════════════════════════════════════════════════════════
+@pytest.fixture()
+def two_scenario_conn(local_conn):
+    """Tables from both shipped scenarios mounted together — the default
+    configuration in which the finding was reproduced."""
+    local_conn.execute(
+        "CREATE TABLE cex_deposit_labels AS SELECT 'exchange-a' AS exchange, "
+        "'cust-1' AS subject_identity, '0xabc' AS address"
+    )
+    local_conn.execute(
+        "CREATE TABLE cloudtrail_events AS SELECT 'unset-account' AS recipient_account_id, "
+        "'203.0.113.9' AS source_ip_address, 'AssumeRole' AS event_name, '2026-09-02' AS date"
+    )
+    local_conn.execute(
+        "CREATE TABLE cw_logs AS SELECT '2026-09-02' AS date, 'audit line' AS message"
+    )
+    return local_conn
+
+
+@pytest.mark.parametrize(
+    "role, sql, leaked",
+    [
+        # an ops persona reaching the OTHER scenario's attribution table (incl. PII)
+        ("ops:secops", "SELECT * FROM cex_deposit_labels", "cust-1"),
+        # the finops (cost) persona reading CloudTrail source IPs it never governs
+        (
+            "ops:finops",
+            "SELECT source_ip_address FROM cloudtrail_events WHERE date='2026-09-02'",
+            "203.0.113.9",
+        ),
+        # an exchange persona reaching the operator's CloudTrail
+        (
+            "exchange-a:junior",
+            "SELECT * FROM cloudtrail_events WHERE date='2026-09-02'",
+            "203.0.113.9",
+        ),
+        # anyone but admin reading the agent's own exported audit log (T002)
+        ("ops:secops", "SELECT * FROM cw_logs WHERE date='2026-09-02'", "audit line"),
+        ("exchange-a:junior", "SELECT message FROM cw_logs WHERE date='2026-09-02'", "audit line"),
+    ],
+)
+def test_unlisted_table_is_refused_for_restricted_principals(
+    two_scenario_conn, role, sql, leaked
+):
+    governance.set_active_role(role)
+    out = run_sql(sql)
+    assert out.startswith("ERROR: governance:") and "not in the access policy" in out
+    assert leaked not in out  # the row contents never surface
+
+
+def test_admin_still_reads_every_mounted_table_including_cw_logs(two_scenario_conn):
+    """T002 remedy is deny-by-default, not unmounting: cw_logs stays available
+    to the unrestricted operator role and nobody else."""
+    governance.set_active_role("ops:admin")
+    out = run_sql("SELECT message FROM cw_logs WHERE date='2026-09-02'")
+    assert '"message": "audit line"' in out
+
+
+def test_unrestricted_readable_table_needs_no_guard(local_conn):
+    """A policy entry of {} means 'readable, no row/column restriction' — the
+    public OFAC list for the exchange personas."""
+    local_conn.execute(
+        "CREATE TABLE ofac_addresses AS SELECT '0xabc' AS address, 'CYBER' AS program"
+    )
+    governance.set_active_role(INVESTIGATOR)
+    out = governance.apply_governance("SELECT count(*) FROM ofac_addresses")
+    # readable, so allowed — but NO guard subquery is injected for a {} entry
+    assert "EXCLUDE" not in out and ") AS ofac_addresses" not in out
+    assert not run_sql("SELECT count(*) AS n FROM ofac_addresses").startswith("ERROR")
+
+
+def test_restricted_principal_reads_back_its_own_session_temp_table(two_scenario_conn):
+    """Deny-by-default must not break the working-set pattern: a temp table the
+    principal created (built from a GOVERNED statement) stays readable."""
+    governance.set_active_role(JUNIOR)
+    created = run_sql("CREATE TEMP TABLE ws AS SELECT * FROM cex_deposit_labels")
+    assert not created.startswith("ERROR")
+    out = run_sql("SELECT count(*) AS n FROM ws")
+    assert '"n": "1"' in out and not out.startswith("ERROR")
+
+
+def test_l0_map_and_search_show_only_the_roles_visible_tables(two_scenario_conn):
+    from data_agent.context import datamap, prompt
+
+    governance.set_active_role("ops:secops")
+    datamap.reset()
+    l0 = prompt.l0_block()
+    assert "cloudtrail_events" in l0  # secops governs it
+    assert "cex_deposit_labels" not in l0 and "cw_logs" not in l0  # not this role's
+    hits = json.loads(agent_mod.search_schema._tool_func("deposit labels identity", 10))["hits"]
+    assert all(h["table"].rsplit(".", 1)[-1] != "cex_deposit_labels" for h in hits)
+
+
+def test_search_schema_hides_cls_denied_column_names(two_scenario_conn):
+    """Discovery shows the junior the tables it can query, but not the NAME of a
+    column its policy denies — the model is never pointed at subject_identity."""
+    from data_agent.context import datamap
+
+    governance.set_active_role(JUNIOR)
+    datamap.reset()
+    out = json.loads(agent_mod.search_schema._tool_func("deposit labels identity", 10))
+    cex = next(h for h in out["hits"] if h["table"].rsplit(".", 1)[-1] == "cex_deposit_labels")
+    assert "subject_identity" not in cex["columns"]  # denied column name withheld
+    assert "exchange" in cex["columns"] and "address" in cex["columns"]  # visible ones stay
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Session binding (threat model T003): retained engine/result/history
+# state is module-level; a different identity on a reused runtimeSessionId used
+# to read the prior principal's materialized results and conversation.
+# ═══════════════════════════════════════════════════════════════════════════
+def test_session_rebind_detects_a_changed_owner():
+    runtime._session["owner"] = None
+    assert runtime._bind_session(runtime._owner_key({"sub": "u-1"}, "ops:admin")) is False  # first
+    assert runtime._bind_session(runtime._owner_key({"sub": "u-1"}, "ops:admin")) is False  # same
+    assert runtime._bind_session(runtime._owner_key({"sub": "u-2"}, "exchange-a:junior")) is True
+    # SigV4 path with no sub falls back to the resolved role as the owner
+    runtime._session["owner"] = None
+    runtime._bind_session(runtime._owner_key(None, "ops:admin"))
+    assert runtime._bind_session(runtime._owner_key(None, "exchange-a:junior")) is True
+
+
+def test_session_reset_clears_engine_results_history_and_counters(
+    local_conn, monkeypatch, capsys
+):
+    from data_agent import audit
+    from data_agent.context import results
+
+    calls = {"engine": 0}
+    monkeypatch.setattr(engine, "reset", lambda: calls.__setitem__("engine", calls["engine"] + 1))
+    agent_mod.agent.messages.append({"role": "user", "content": [{"text": "prior turn"}]})
+    audit.record(principal="ops:admin", sql="x", outcome="executed")
+    assert audit.session_counters()["statements"] >= 1
+    capsys.readouterr()  # discard the audit line above
+    runtime._reset_session_state(agent_mod.agent, agent_mod.conversation_manager)
+    # the reset terminates any pending stdout line so the rebind audit record
+    # that follows is a standalone EMF JSON line (metric-extractable)
+    assert capsys.readouterr().out.endswith("\n")
+    assert calls["engine"] == 1  # engine dropped → next get_conn is a fresh engine
+    assert agent_mod.agent.messages == []  # conversation history gone
+    assert audit.session_counters()["statements"] == 0  # counters zeroed
+    assert results.STORE.refs() == []  # result-table bookkeeping cleared
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Code validation, round 1: three fail-open defects in the authorization path
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -513,21 +662,24 @@ def test_raw_path_rejection_reaches_nested_scopes():
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT count(*) FROM btc_transactions",  # bare table
-        "SELECT count(*) FROM s3t.blockchain.btc_transactions",  # catalog-qualified
-        "SELECT count(*) FROM glue.blockchain.btc_transactions t",  # + alias
-        "SELECT count(*) FROM dl.blockchain.btc_transactions",
+        "SELECT count(*) FROM eth_traces WHERE date >= '2025-02-21'",  # bare table (in policy)
+        "SELECT count(*) FROM s3t.blockchain.eth_traces",  # catalog-qualified
+        "SELECT count(*) FROM glue.blockchain.eth_traces t",  # + alias
+        "SELECT count(*) FROM dl.blockchain.eth_traces",
         "WITH w AS (SELECT 1 AS a) SELECT * FROM w",  # CTE name
         "SELECT * FROM (SELECT 1 AS a) s",  # subquery
-        "SELECT * FROM ws",  # session temp table
+        "SELECT * FROM ws",  # session temp table the principal created
         "SELECT unnest([1, 2]) AS x",  # nested-column analysis
         "SELECT * FROM range(5)",  # pure generator, allowlisted
         "SELECT * FROM generate_series(1, 5)",
     ],
 )
-def test_allowlist_does_not_break_legitimate_table_references(sql):
-    """Inverting the posture must not cost the queries analysts actually run —
-    including unnest for BTC's nested output column."""
+def test_allowlist_does_not_break_legitimate_table_references(sql, monkeypatch):
+    """The raw-path allowlist (Identifier sources + pure generators pass, table
+    functions are refused) and table-level deny-by-default must not cost
+    the queries analysts actually run: in-policy tables, CTEs, subqueries, the
+    principal's own temp tables, unnest, and generators."""
+    monkeypatch.setattr(governance.rewrite, "_session_lister", lambda: {"ws"})
     governance.set_active_role(INVESTIGATOR)
     governance.apply_governance(sql)  # must not raise
 
@@ -652,14 +804,35 @@ def test_hostile_alias_cannot_append_a_statement_to_the_rewrite(local_conn):
 
     hostile = 'SELECT 1 FROM eth_traces AS "x; DROP TABLE victim"'
     governed = governance.apply_governance(hostile)
-    assert "DROP" not in governed.upper(), governed
+    # the alias is attached through the AST, so the payload stays INSIDE a
+    # quoted identifier (inert) instead of becoming free SQL — one statement,
+    # and the DROP text, if present, is only within the quoted alias
     assert len(duckdb.extract_statements(governed)) == 1
+    assert '"x; DROP TABLE victim"' in governed  # quoted identifier, not a statement
 
     run_sql(hostile)
     still_there = local_conn.execute(
         "SELECT count(*) FROM duckdb_tables() WHERE table_name='victim'"
     ).fetchone()[0]
     assert still_there == 1, "rewrite must never emit an attacker's statement"
+
+
+def test_hostile_alias_that_breaks_the_parse_is_a_clean_audited_rejection(local_conn):
+    """An alias like `a)` used to raise a sqlglot ParseError (not a ValueError)
+    that escaped the Govern stage's handler, leaving the attempt unaudited and
+    surfacing as an unhandled framework error (T006). It must now become a
+    clean, audited outcome — never an uncaught exception."""
+    from data_agent import audit
+
+    local_conn.execute(
+        "CREATE TABLE cex_deposit_labels AS "
+        "SELECT 'exchange-a' AS exchange, 'c1' AS subject_identity, '0xabc' AS address"
+    )
+    governance.set_active_role(JUNIOR)
+    audit.reset_session()
+    out = run_sql('SELECT address FROM cex_deposit_labels AS "a)"')  # must not raise
+    assert not out.startswith("Traceback") and "ParseError" not in out
+    assert audit.session_counters()["statements"] == 1  # audited exactly once
 
 
 # ------------------------------------------------- streaming trace tool (P2)

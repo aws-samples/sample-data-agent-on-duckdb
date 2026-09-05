@@ -317,11 +317,12 @@ def _phase_line(env: dict) -> str:
 
 # ------------------------------------------------------------------- app
 def main() -> None:
-    st.set_page_config(page_title="On-chain Investigations Agent", page_icon="🔎", layout="wide")
-    st.title("🔎 On-chain Investigations Agent")
+    st.set_page_config(page_title="Data Agent on DuckDB", page_icon="🔎", layout="wide")
+    st.title("🔎 Data Agent on DuckDB")
     st.caption(
-        "In-process DuckDB on Amazon Bedrock AgentCore — watch the SQL run in the "
-        "engine, inside the agent, with identity-aware row/column governance."
+        "In-process DuckDB on Amazon Bedrock AgentCore — on-chain and cloud-ops "
+        "investigations; watch the SQL run in the engine, inside the agent, under "
+        "identity-aware row/column governance."
     )
 
     if "auth" not in st.session_state:
@@ -374,8 +375,9 @@ def main() -> None:
             st.divider()
             st.subheader("Investigation script")
             st.caption(
-                "Same questions for every persona — run them as investigator, then "
-                "log out and re-run as junior to see questions 4 and 5 diverge."
+                "Same questions for every persona. 1–5: the on-chain case (run as "
+                "investigator, then as junior — 4 and 5 diverge). 6–9: the cloud-ops "
+                "case (finops, secops, secops-junior see different columns)."
             )
             for i, q in enumerate(EXAMPLE_QUESTIONS, 1):
                 if st.button(f"{i}. {q}", use_container_width=True, key=f"ex{i}"):

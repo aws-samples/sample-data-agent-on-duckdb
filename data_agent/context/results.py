@@ -52,14 +52,38 @@ _RESERVED_DEF_RE = re.compile(
 )
 
 
+_RESERVED_NAME_RE = re.compile(r"^_r_\d+$", re.IGNORECASE)
+_RESERVED_MSG = (
+    f"names starting with {RESULT_PREFIX} are reserved for framework-materialized "
+    "results — read them (FROM _r_<n>), never define or alias them"
+)
+
+
+def _defined_names(tree: exp.Expression) -> set[str]:
+    """Every name the statement DEFINES or aliases (never a plain read): CTE
+    names, the CREATE target, table/derived-table aliases and column aliases."""
+    names = {cte.alias_or_name for cte in tree.find_all(exp.CTE)}
+    if isinstance(tree, exp.Create):
+        names.add(tree.this.name)
+    names.update(a.name for a in tree.find_all(exp.TableAlias))
+    names.update(a.alias for a in tree.find_all(exp.Alias))
+    return {n for n in names if n}
+
+
 def reserved_name_misuse(sql: str) -> str | None:
-    """Error text if the statement defines/aliases a framework result name."""
-    if _RESERVED_DEF_RE.search(sql):
-        return (
-            f"names starting with {RESULT_PREFIX} are reserved for framework-materialized "
-            "results — read them (FROM _r_<n>), never define or alias them"
-        )
-    return None
+    """Error text if the statement DEFINES or aliases a framework result name.
+
+    On the parsed tree, not the text: a regex over the statement string missed
+    the quoted form (`CREATE OR REPLACE TEMP TABLE "_r_1" AS ...`), which let
+    the model overwrite a framework result table and be shown fabricated rows
+    (T005). Reading a reserved name (`FROM _r_7`) is the whole point and stays
+    allowed — only defining/aliasing one is refused. The textual scan remains
+    as a fail-closed fallback for SQL sqlglot cannot parse."""
+    try:
+        tree = sqlglot.parse_one(sql, read="duckdb")
+    except Exception:  # noqa: BLE001 — unparseable: fall back to the textual scan
+        return _RESERVED_MSG if _RESERVED_DEF_RE.search(sql) else None
+    return _RESERVED_MSG if any(_RESERVED_NAME_RE.match(n) for n in _defined_names(tree)) else None
 
 
 def _existing_limit(sql: str) -> tuple[bool, int | None]:

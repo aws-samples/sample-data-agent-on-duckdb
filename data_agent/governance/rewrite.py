@@ -73,6 +73,30 @@ def set_schema_prober(fn) -> None:
     _schema_cache.clear()
 
 
+# Table-level deny-by-default: a restricted principal may reference a
+# table only if its policy names it, it is local to the statement (CTE / CTAS
+# target / alias), or it is a session temp object the principal created. The
+# session-object lister is registered by the pipeline (compute.engine), so
+# this module still imports nothing from compute. No lister → fail closed:
+# the empty set means a bare temp read is refused rather than allowed.
+_session_lister = None
+
+
+def set_session_lister(fn) -> None:
+    """Register `fn() -> set[str]` returning the session's temp object names."""
+    global _session_lister
+    _session_lister = fn
+
+
+def _session_objects() -> frozenset[str]:
+    if _session_lister is None:
+        return frozenset()
+    try:
+        return frozenset(n.lower() for n in _session_lister())
+    except Exception:  # noqa: BLE001 — listing failed → no exemptions (fail closed)
+        return frozenset()
+
+
 def _columns_of(ref_sql: str) -> frozenset | None:
     if _schema_prober is None:
         return None
@@ -128,19 +152,21 @@ def _guard_subquery(tbl: exp.Table, rule: dict) -> exp.Subquery:
         if cols is not None:
             deny = [c for c in deny if c.lower() in cols]
     exclude = f" EXCLUDE ({', '.join(deny)})" if deny else ""
-    # Injection note: `alias` comes from the model (Table.alias, a raw string)
-    # and `ref_sql`/`pred` from sqlglot and the policy respectively. This string
-    # is never executed — it is parsed, and only the exp.Subquery node is
-    # extracted and returned, so anything an alias appends after the subquery is
-    # discarded rather than emitted. Verified: an alias of
-    # `x; DROP TABLE victim` yields `... ) AS x` and the tail never reaches the
-    # engine. That safety rests on taking find(exp.Subquery) from the parse
-    # result — if this ever returns the whole tree instead, quote `alias` first.
+    # `ref_sql` (sqlglot re-serialization) and `pred`/`deny` (validated policy)
+    # are safe to interpolate; `alias` is the one part that arrives from the
+    # model as a raw string (Table.alias). It is NOT interpolated into the
+    # parsed text — the guard body is parsed with a fixed placeholder alias and
+    # the real alias is attached through the AST, quoted when it is not a bare
+    # identifier. A hostile alias therefore cannot (a) break the parse — an
+    # alias of `a)` used to raise a sqlglot ParseError that escaped the Govern
+    # stage's ValueError handler and left the attempt unaudited (T006) — nor
+    # (b) append a statement, since it never becomes free SQL text at all.
     wrapped = parse_one(
-        f"SELECT * FROM (SELECT *{exclude} FROM {ref_sql} WHERE {pred}) AS {alias}",  # nosec B608 - see injection note above
+        f"SELECT * FROM (SELECT *{exclude} FROM {ref_sql} WHERE {pred}) AS _guard",  # nosec B608 - ref_sql/pred are sqlglot/policy-derived; alias attached via AST below
         read="duckdb",
     )
     guard = wrapped.find(exp.Subquery)
+    guard.set("alias", exp.TableAlias(this=exp.to_identifier(alias)))
     if pivots:
         guard.set("pivots", pivots)
     return guard
@@ -222,11 +248,33 @@ def apply_governance(sql: str) -> str:
     # scopes, DuckDB's temp-schema search order); refusing the collision is
     # not. With no collision, every exp.Table node that carries a governed
     # name IS a reference to the governed table, and every one gets guarded.
-    clash = sorted(_local_names(tree) & set(governed_tables))
+    local = _local_names(tree)
+    clash = sorted(local & set(governed_tables))
     if clash:
         raise ValueError(
             f"governance: local name(s) {clash} shadow governed table(s) — a CTE, temp "
             "table/view or alias may not reuse a governed table's name; choose another name"
+        )
+
+    # Table-level deny-by-default: the rewrite only guards tables the
+    # policy NAMES, so a mounted-but-unlisted table (another scenario's, or
+    # the runtime's own cw_logs export) would otherwise execute ungoverned —
+    # a restricted principal read the full contents with an ordinary question.
+    # Refuse every base-table reference that the policy does not name, is not
+    # local to the statement, and is not a session temp object the principal
+    # created. A policy entry with an empty rule ({}) means "readable, no
+    # row/column restriction"; it is allowed here and skipped by the guard
+    # loop below. Path refs and table functions were already handled above.
+    referenced = {
+        t.name.lower() for t in tree.find_all(exp.Table) if isinstance(t.this, exp.Identifier)
+    }
+    unknown = referenced - set(governed_tables) - local
+    stray = sorted(unknown - _session_objects()) if unknown else []
+    if stray:
+        allowed = sorted(governed_tables) or ["(none)"]
+        raise ValueError(
+            f"governance: table(s) {stray} are not in the access policy for role "
+            f"'{policies.active_role()}' — this role may query: {allowed}"
         )
 
     # A restricted principal that explicitly names a denied column is a clean
@@ -238,9 +286,10 @@ def apply_governance(sql: str) -> str:
 
     for tbl in list(tree.find_all(exp.Table)):
         name = tbl.name.lower()
-        if name not in governed_tables:
+        rule = governed_tables.get(name)
+        if not rule:  # unlisted (refused above) or listed with no restriction ({})
             continue
-        guard = _guard_subquery(tbl, governed_tables[name])
+        guard = _guard_subquery(tbl, rule)
         parent = tbl.parent
         if isinstance(parent, exp.Describe | exp.Summarize) and parent.this is tbl:
             # DESCRIBE <table> / SUMMARIZE <table> take a relation, not a

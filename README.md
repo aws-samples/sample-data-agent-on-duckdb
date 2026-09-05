@@ -111,11 +111,20 @@ executable against this code (rationale in [docs/design.md](docs/design.md)):
 
 | Rule | Closes |
 |---|---|
+| a restricted role may reference only tables its policy names (plus its own session temp tables and statement-local names) | a mounted-but-unlisted table — another scenario's, or the runtime's own `cw_logs` export — being read ungoverned |
 | statement shapes are an allowlist on the parsed root | `EXPLAIN ANALYZE` and other opaque commands passing through ungoverned |
 | a local name may not shadow a governed table | `WITH cex_deposit_labels AS (…)` unguarding the real table |
 | no policy means the built-in `deny-all` floor | a missing claim becoming the admin role |
 | DML behind a CTE prefix is rejected for every role | `WITH x AS (SELECT 1) DELETE …` executing for the unrestricted role |
 | host-reaching functions and non-`s3://` paths are refused for every role | `read_text('/proc/self/environ')`, `FROM '/etc/passwd'` |
+
+The session is bound to its principal: a reused `runtimeSessionId` presenting a
+different identity resets the engine, materialized results, history and audit
+counters before any query runs, so retained state never crosses a principal
+change. Governance is total at the **table** level, not only for the tables a
+policy happens to name — see [docs/design.md](docs/design.md) and the regenerated
+threat model in [`docs/threat-model/`](docs/threat-model/) (20 Mitigated,
+7 Accepted, 0 Open).
 
 ## Four ways to reach the same data on S3
 
@@ -208,12 +217,30 @@ with DuckDB on the curated Parquet). 2026-08 unblended cost 540.80 USD (AmazonEC
 305.59) · 103,631 CloudTrail events on 2026-09-02 across three regions · 13,858
 AssumeRole events, with one workload role as the top principal.
 
-**Using it.** Log in as `finops-a` and ask for the month's total and top five
-services, then for the resource ids behind the EC2 cost — the second answer is a
-clean policy rejection naming the column. Log in as `sec-a`, build a temp table
-of the day's AssumeRole events, then interrogate it: who assumed roles most
-often, which error codes their sessions produced. As `sec-jr` the same question
-comes back without source IPs.
+**Using it.** The sidebar script's questions 6–9 are this scenario. Log in as
+`finops-a` and ask for the month's cost by service: the tool card shows the row
+filter on the account, the hidden `line_item_resource_id` column and the cost
+gate turning `billing_period = '2026-08'` into one explicit partition path; the
+engine answers in well under a second.
+
+![finops tool card: RLS on the account, resource-id column hidden, cost gate expanded to one path, in-process execution](docs/images/ui-ops-finops-cost-card.png)
+![finops answer: top services by unblended cost for the month with key findings](docs/images/ui-ops-finops-cost-answer.png)
+
+Ask for the resource ids behind the EC2 cost and the drill-down comes back by
+usage type and product family instead — the column is hidden by policy, and any
+statement that names a hidden column is a clean rejection naming column and
+role. Log in as `sec-jr` and ask which principals issued the most calls and from
+which IPs: the first statement selects `source_ip_address` and is rejected by
+policy; the model's fallback `DESCRIBE` on the raw view is refused by the cost
+gate for lacking a `date` filter; it then re-scopes to the day and answers with
+principals and error codes but no IPs.
+
+![secops-junior: policy rejection for source_ip_address, then the cost gate refusing a DESCRIBE without a partition filter](docs/images/ui-ops-secops-junior-ips-hidden.png)
+
+The **Trace** tab totals the session — statements, gate rejections, materialized
+results, compression stubs, engine time:
+
+![Trace tab: session totals for the cloud-ops session](docs/images/ui-ops-trace-tab.png)
 
 ## Evaluation and observability
 
@@ -346,7 +373,7 @@ All framework knobs are documented in `.env.example`.
 | `scripts/load_ops_data.py` | Cloud-ops data load — CUR 2.0 / CloudTrail / CloudWatch Logs exports to partitioned Parquet |
 | `scripts/run_eval.py` + `tests/eval/` | Evaluation suite: yaml cases, trace-event assertions, local or cloud mode |
 | `scripts/jwt_invoke.py` · `scripts/stream_smoke.py` · `scripts/ab_compare.py` | Headless invoke (JWT / SigV4) · in-process vs query-service comparison |
-| `tests/unit/` | 282 unit tests — gate, governance, cost, results, context, data map, audit, ops personas, storage registry, pipeline stages; no network |
+| `tests/unit/` | 303 unit tests — gate, governance, cost, results, context, data map, audit, ops personas, storage registry, pipeline stages; no network |
 | `docs/design.md` | Design notes: five layers, invariants, context-layer mechanisms, governance rationale, scenarios, decision table |
 | `docs/threat-model/` | Threat model (Threat Composer format + report) |
 

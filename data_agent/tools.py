@@ -57,7 +57,12 @@ def search_schema(query: str, limit: int = 10) -> str:
     """
     try:
         hits = datamap.search(
-            engine.get_conn(), engine.conn_lock, query, max(1, min(int(limit), 50))
+            engine.get_conn(),
+            engine.conn_lock,
+            query,
+            max(1, min(int(limit), 50)),
+            visible=governance.visible_tables(),
+            denied=governance.denied_columns(),
         )
     except Exception as e:  # noqa: BLE001 — never let discovery kill the turn
         return json.dumps({"query": query, "hits": [], "error": str(e)[:300]})

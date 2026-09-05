@@ -28,6 +28,10 @@ from data_agent.context import cost, results
 # exposes (DESCRIBE, cached per reference). Wired here — the point where the
 # governance and compute layers meet — so neither imports the other.
 governance.set_schema_prober(engine.probe_columns)
+# Table-level deny-by-default needs to know which temp objects the
+# session created, so a principal can read its own working sets while a
+# mounted-but-unlisted table stays refused. Same wiring point, same reason.
+governance.set_session_lister(engine.session_objects)
 
 
 @dataclass
@@ -96,9 +100,13 @@ class Govern:
     def run(self, st: Statement) -> Iterator[dict]:
         try:
             st.governed_sql = governance.apply_governance(st.sql)
-        except ValueError as e:
-            yield {"phase": "rewrite", "rejected": True, "reason": str(e)}
-            raise Rejected(str(e), audit_stage="governance") from e
+        except Exception as e:  # noqa: BLE001 — governance fails CLOSED: any error is a refusal
+            # ValueError is the layer's own rejection; anything else (a sqlglot
+            # ParseError from a hostile alias, T006) must still refuse and be
+            # audited, never crash the turn or slip through unlogged.
+            reason = str(e) if isinstance(e, ValueError) else f"rewrite failed: {e}"
+            yield {"phase": "rewrite", "rejected": True, "reason": reason}
+            raise Rejected(reason, audit_stage="governance") from e
         st.governed = st.governed_sql != st.sql
         st.applied = governance.describe_applied(st.sql)
         yield {
@@ -195,6 +203,13 @@ def run(sql: str) -> Iterator[dict | str]:
     except Rejected as r:
         _audit(st, outcome=r.outcome, stage=r.audit_stage, reason=r.reason)
         yield r.text
+        return
+    except Exception as e:  # noqa: BLE001 — last-resort net: every statement is audited exactly once
+        # Stages convert their own failures into Rejected; this catch exists so
+        # a genuinely unexpected error still produces one audit line and one
+        # error string rather than an unhandled, unlogged exception (T006).
+        _audit(st, outcome="error", stage="pipeline", reason=str(e))
+        yield f"ERROR: {e}"
         return
     _audit(st, outcome="executed")
     yield results.format_result(st.result, st.governed)

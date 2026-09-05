@@ -82,10 +82,32 @@ def apply(sql: str) -> tuple[str, dict]:
             )
         info["partition_filter"] = True
         parts = _literal_partitions(in_scope, spec["granularity"])
-        if parts and len(parts) <= MAX_EXPANDED_PARTITIONS:
-            tbl.replace(_expanded_table(tbl, spec, parts))
-            info["expanded_paths"] += len(parts)
-            changed = True
+        if parts is None:
+            # non-literal or one-sided predicate (`date >= x`, `date = (subquery)`):
+            # the filter requirement is met and the engine prunes on listing.
+            continue
+        if not parts:
+            # a literal but UNSATISFIABLE range (lower bound above upper) — it
+            # would read nothing, and before the fix it fell through to a
+            # whole-prefix scan because no paths were expanded (T004).
+            raise CostRejected(
+                f"cost policy: the filter on `{name}` selects no `{column}` partitions — "
+                "the bounds are unsatisfiable (e.g. a lower bound later than the upper). "
+                "Fix the range; an empty range must not degrade to a full scan."
+            )
+        if len(parts) > MAX_EXPANDED_PARTITIONS:
+            # a literal range too wide to expand is a whole-prefix scan by another
+            # name — the exact cost the gate exists to refuse. Before the fix it
+            # recorded the filter as satisfied and then declined to expand (T004).
+            raise CostRejected(
+                f"cost policy: the `{column}` range on `{name}` spans more than "
+                f"{MAX_EXPANDED_PARTITIONS} {spec['granularity']} partitions — that is a "
+                "full-prefix scan and is refused before the engine runs. Narrow the range, "
+                "or use a catalog leg (s3t/glue/dl) which prunes by metadata."
+            )
+        tbl.replace(_expanded_table(tbl, spec, parts))
+        info["expanded_paths"] += len(parts)
+        changed = True
     return (tree.sql(dialect="duckdb") if changed else sql), info
 
 
@@ -281,8 +303,10 @@ def _shift(v: str, granularity: str, n: int) -> str | None:
 
 def _range(lo: str, hi: str, granularity: str) -> list[str] | None:
     a, b = _parse(lo, granularity), _parse(hi, granularity)
-    if a is None or b is None or a > b:
-        return None
+    if a is None or b is None:
+        return None  # non-literal bound: undeterminable, leave to the engine
+    if a > b:
+        return []  # determinable and empty: an unsatisfiable range (caller rejects)
     out = []
     cur = a
     while cur <= b and len(out) <= MAX_EXPANDED_PARTITIONS:

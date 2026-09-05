@@ -165,10 +165,28 @@ attribution.
 """
 
 # ----------------------------------------------------------------- policies
+# Table-level deny-by-default: a restricted persona may reference
+# ONLY the tables its policy names (plus session temp objects it creates).
+# So each persona must list every table it legitimately reads — an empty rule
+# `{}` means "readable, no row/column restriction". The public ledger context
+# tables and the public OFAC list are readable as-is; the row/column scoping
+# that the demo is about lives on `eth_traces` (the incident window) and
+# `cex_deposit_labels` (own-exchange rows; junior also loses subject_identity).
+# A table NOT listed here (e.g. the cloud-ops tables mounted by the other
+# scenario) is refused for these personas — the cross-scenario isolation the
+# T001 finding was about.
+_LEDGER_CONTEXT = {  # public Ethereum context tables — readable, cost-gated by date
+    "eth_transactions": {},
+    "eth_blocks": {},
+    "eth_token_transfers": {},
+    "eth_logs": {},
+    "ofac_addresses": {},  # public OFAC sanctions list
+}
 POLICIES = {
     "exchange-a:investigator": {
         "allow_raw_paths": False,
         "tables": {
+            **_LEDGER_CONTEXT,
             # ledger: only the open-case incident window
             "eth_traces": {"row_filter": "date >= '2025-02-21'"},
             # attribution: this tenant sees only its own exchange's labels
@@ -178,6 +196,7 @@ POLICIES = {
     "exchange-a:junior": {
         "allow_raw_paths": False,
         "tables": {
+            **_LEDGER_CONTEXT,
             "eth_traces": {"row_filter": "date >= '2025-02-21'"},
             "cex_deposit_labels": {
                 "row_filter": "exchange = 'exchange-a'",

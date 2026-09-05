@@ -6,7 +6,7 @@
 #   2026-08: 1,034,397 CUR rows, unblended total 540.80 USD, AmazonEC2 305.59,
 #   AmazonRDS 55.44, AmazonEKS 47.14, AmazonVPC 43.93, AWSELB 27.41;
 #   top EC2 resources are EBS volumes at 26.12 each; 2026-07 total 172.69;
-#   2026-09 (partial month) 65,799 rows.
+#   2026-09 is a MOVING partial month (65,799 rows on 09-04, 100,478 on 09-05) — never assert on it.
 #   CloudTrail 2026-09-02 (us-west-2 + us-east-1 + us-east-2): 103,631 events
 #   (62,679 / 27,862 / 13,090), 13,858 AssumeRole events, top principal by
 #   coalesce(session_issuer_arn, user_arn, invoked_by) = one workload role (9,451);
@@ -78,15 +78,20 @@
 - id: ops-admin-cur-raw-zero-etl
   category: ops
   persona: admin
+  # pinned to a CLOSED billing period: the native export for the current month
+  # is re-delivered as the month progresses (2026-09 grew from 65,799 to
+  # 100,478 rows between 2026-09-04 and 2026-09-05), so only a closed month has
+  # a stable ground truth. cur_raw == cur_line_items == 1,034,397 for 2026-08
+  # (verified through the runtime 2026-09-05).
   prompt: >
     Using cur_raw (the native CUR 2.0 CSV export read in place, not the curated
-    table), how many line items are there for billing_period '2026-09'?
+    table), how many line items are there for billing_period '2026-08'?
   max_tool_calls: 4
   expect:
     sql_regex_any: '\bcur_raw\b'
     partition_filter_all: true
     expanded_paths_min: 1
-    answer_number: {value: 65799, rel_tol: 0.001}
+    answer_number: {value: 1034397, rel_tol: 0.001}
 
 # ---------------------------------------------------------------- secops
 - id: ops-secops-top-principals

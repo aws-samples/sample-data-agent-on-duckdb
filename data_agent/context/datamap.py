@@ -93,16 +93,30 @@ def _probe_sql(qualified: str, spec: dict | None) -> str:
     return f"DESCRIBE SELECT * FROM {qualified} LIMIT 0"  # nosec B608 - identifier from duckdb_tables()
 
 
+def _bare(name: str) -> str:
+    """Last segment of a possibly catalog-qualified name (s3t.blockchain.x → x)."""
+    return name.rsplit(".", 1)[-1].lower()
+
+
+def _visible(entries: list[dict], visible: frozenset[str] | None) -> list[dict]:
+    """Keep only tables the active role may query (None = unrestricted). Shows
+    the model exactly what it can reach, so its routing context matches the
+    rewrite's table-level deny-by-default."""
+    if visible is None:
+        return entries
+    return [e for e in entries if _bare(e["name"]) in visible]
+
+
 # --------------------------------------------------------------------- L0
-def l0_doc(entries: list[dict]) -> str:
-    """Compact routing context for the system prompt."""
+def l0_doc(entries: list[dict], visible: frozenset[str] | None = None) -> str:
+    """Compact routing context for the system prompt (filtered to the role)."""
     lines = [
         "## Tables the engine can see (generated from the catalog at session start)",
         "",
         "| Table | Kind | Partition column (required in WHERE) |",
         "|---|---|---|",
     ]
-    for e in entries:
+    for e in _visible(entries, visible):
         part = (
             f"`{e['partition']}`" if e["partition"] else "— (catalog/label table, no filter needed)"
         )
@@ -160,18 +174,38 @@ def _tokens(e: dict) -> str:
     return " ".join(_TOKEN_RE.findall(raw.lower().replace("_", " ").replace(".", " ")))
 
 
-def search(conn, lock, query: str, limit: int = 10) -> list[dict]:
+def _strip_denied(name: str, cols: str, denied: dict[str, frozenset[str]] | None) -> str:
+    """Drop CLS-denied column names from a discovery hit's column list, so the
+    model is never shown a column it could not select."""
+    if not denied:
+        return cols
+    hide = denied.get(_bare(name))
+    if not hide:
+        return cols
+    return " ".join(c for c in cols.split() if c.lower() not in hide)
+
+
+def search(
+    conn,
+    lock,
+    query: str,
+    limit: int = 10,
+    visible: frozenset[str] | None = None,
+    denied: dict[str, frozenset[str]] | None = None,
+) -> list[dict]:
     state = ensure_index(conn, lock)
     q = " ".join(_TOKEN_RE.findall(query.lower().replace("_", " ")))
     if not q:
         return []
+    # over-fetch when filtering so the role's visible tables still fill `limit`
+    fetch = limit if visible is None else max(limit * 4, 50)
     with lock:
         if state["fts"]:
             rows = conn.execute(
                 f"SELECT name, kind, partition_col, columns, "  # nosec B608 - fixed identifiers, bound params
                 f"{FTS_SCHEMA}.match_bm25(name, ?) AS score FROM {INDEX_TABLE} "
                 "WHERE score IS NOT NULL ORDER BY score DESC, name LIMIT ?",
-                [q, limit],
+                [q, fetch],
             ).fetchall()
             engine = "duckdb fts (bm25)"
         else:
@@ -179,15 +213,17 @@ def search(conn, lock, query: str, limit: int = 10) -> list[dict]:
                 f"SELECT name, kind, partition_col, columns, "  # nosec B608 - fixed identifiers, bound params
                 f"len(list_intersect(string_split(tokens, ' '), string_split(?, ' '))) AS score "
                 f"FROM {INDEX_TABLE} WHERE score > 0 ORDER BY score DESC, name LIMIT ?",
-                [q, limit],
+                [q, fetch],
             ).fetchall()
             engine = "token overlap (fallback: fts unavailable)"
+    if visible is not None:
+        rows = [r for r in rows if _bare(r[0]) in visible][:limit]
     return [
         {
             "table": r[0],
             "kind": r[1],
             "partition_column": r[2],
-            "columns": (r[3] or "")[:400],
+            "columns": _strip_denied(r[0], (r[3] or "")[:400], denied),
             "score": round(float(r[4]), 3),
             "engine": engine,
         }

@@ -113,9 +113,30 @@ def test_direct_whole_prefix_read_parquet_is_expanded_too():
     assert info["sources"] == ["eth_traces"] and _paths(out) == [D1] and " AS r" in out
 
 
-def test_range_beyond_cap_is_allowed_but_not_expanded(monkeypatch):
+def test_literal_range_beyond_cap_is_rejected_not_scanned(monkeypatch):
+    """A literal range too wide to expand is a whole-prefix scan by another
+    name — the exact cost the gate exists to refuse. It used to record the
+    filter as satisfied and then decline to expand, degrading to a full scan
+    (T004)."""
     monkeypatch.setattr(cost, "MAX_EXPANDED_PARTITIONS", 2)
-    sql = f"SELECT * FROM eth_traces WHERE date BETWEEN '{D1}' AND '{D3}'"
+    sql = f"SELECT * FROM eth_traces WHERE date BETWEEN '{D1}' AND '{D3}'"  # 3 days > cap 2
+    with pytest.raises(cost.CostRejected, match="spans more than 2 day partitions"):
+        cost.apply(sql)
+
+
+def test_unsatisfiable_literal_range_is_rejected_not_scanned():
+    """A lower bound above the upper selects no partitions; before the fix it
+    fell through to a whole-prefix scan because nothing was expanded (T004)."""
+    with pytest.raises(cost.CostRejected, match="unsatisfiable"):
+        cost.apply(f"SELECT count(*) FROM eth_traces WHERE date BETWEEN '{D3}' AND '{D1}'")
+    with pytest.raises(cost.CostRejected, match="unsatisfiable|no `date` partitions"):
+        cost.apply(f"SELECT count(*) FROM eth_traces WHERE date = '2020-01-01' AND date >= '{D1}'")
+
+
+def test_unbounded_predicate_still_satisfies_the_gate_without_expansion():
+    """A one-sided/non-literal predicate is NOT rejected — the filter
+    requirement is met and the engine prunes on listing (unchanged design)."""
+    sql = f"SELECT * FROM eth_traces WHERE date >= '{D1}'"
     out, info = cost.apply(sql)
     assert out == sql and info["partition_filter"] is True and info["expanded_paths"] == 0
 

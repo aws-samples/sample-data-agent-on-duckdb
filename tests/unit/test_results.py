@@ -145,11 +145,27 @@ def test_refs_are_monotonic_across_inline_and_summary_results(local_conn):
         "WITH a AS (SELECT 1), _r_3 AS (SELECT 2) SELECT * FROM a",
         "SELECT * FROM t AS _r_4",
         "SELECT * FROM (SELECT 1) AS _r_5",
+        # T005: the QUOTED form slipped past the old text regex and let the
+        # model overwrite a framework result table with fabricated rows
+        'CREATE OR REPLACE TEMP TABLE "_r_1" AS SELECT 1',
+        'CREATE TEMP TABLE "_r_7" AS SELECT 1',
+        'WITH "_r_2" AS (SELECT 1) SELECT * FROM "_r_2"',
+        'SELECT * FROM t AS "_r_4"',
+        'SELECT 1 AS "_r_6"',  # column alias
     ],
 )
 def test_defining_or_aliasing_a_reserved_name_is_rejected(sql, local_conn):
     out = run_sql(sql)
     assert out.startswith("ERROR: names starting with _r_ are reserved")
+
+
+def test_quoted_reserved_name_cannot_overwrite_a_result_table(local_conn):
+    """End-to-end (T005): materialize a result, then try to replace it via the
+    quoted reserved name — the read-back must still be the real rows."""
+    ref = _lines(run_sql("SELECT id, name FROM t"))[0]["ref"]  # _r_1, 500 rows
+    hijack = run_sql(f'CREATE OR REPLACE TEMP TABLE "{ref}" AS SELECT 1 AS id, \'planted\' AS name')
+    assert hijack.startswith("ERROR: names starting with _r_ are reserved")
+    assert "planted" not in run_sql(f"SELECT * FROM {ref} WHERE id = 0")
 
 
 def test_reading_a_reserved_name_is_allowed(local_conn):

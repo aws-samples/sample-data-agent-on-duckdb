@@ -34,11 +34,13 @@ from .policies import (
     POLICIES,
     active_policy,
     active_role,
+    denied_columns,
     is_denied_all,
     resolve_role,
     set_active_role,
+    visible_tables,
 )
-from .rewrite import apply_governance, describe_applied, set_schema_prober
+from .rewrite import apply_governance, describe_applied, set_schema_prober, set_session_lister
 
 __all__ = [
     "DEFAULT_ROLE",
@@ -48,9 +50,12 @@ __all__ = [
     "active_policy",
     "active_role",
     "apply_governance",
+    "denied_columns",
     "describe_applied",
     "is_denied_all",
     "resolve_role",
     "set_active_role",
     "set_schema_prober",
+    "set_session_lister",
+    "visible_tables",
 ]

@@ -144,27 +144,63 @@ class DataAgentStack(Stack):
             if b.strip()
         ]
         if ops_buckets:
+            # Scope the source-bucket grant to the prefixes the scenario actually
+            # reads, NOT the whole bucket. A whole-bucket s3:GetObject let the
+            # unrestricted persona read a path outside the pinned OPS account —
+            # e.g. read_json over AWSLogs/<other-account>/CloudTrail/ — because
+            # the account pin was only a SQL row filter, not an IAM boundary
+            # (threat model T007). Pinning object reads to the CUR export
+            # prefix and to CloudTrail UNDER the ops account makes it an IAM
+            # boundary too. Pass the account and CUR prefix at deploy time:
+            #   -c opsSourceBuckets=<cur>,<trail> -c opsAccountId=<id> -c opsCurPrefix=<prefix>
+            ops_account = self.node.try_get_context("opsAccountId") or self.account
+            cur_prefix = (self.node.try_get_context("opsCurPrefix") or "").strip("/")
+            read_prefixes = [f"AWSLogs/{ops_account}/CloudTrail/"]
+            if cur_prefix:
+                read_prefixes.append(f"{cur_prefix}/")
+            object_arns = [
+                f"arn:aws:s3:::{b}/{p}*" for b in ops_buckets for p in read_prefixes
+            ]
             exec_role.add_to_policy(
                 iam.PolicyStatement(
-                    sid="OpsSourceRead",
-                    actions=["s3:GetObject", "s3:ListBucket"],
-                    resources=[
-                        arn
-                        for b in ops_buckets
-                        for arn in (f"arn:aws:s3:::{b}", f"arn:aws:s3:::{b}/*")
-                    ],
+                    sid="OpsSourceGet",
+                    actions=["s3:GetObject"],
+                    resources=object_arns,
+                )
+            )
+            # ListBucket (the glob LIST the readers do) restricted to those same
+            # prefixes via the s3:prefix condition, so listing cannot enumerate
+            # another account's CloudTrail keys either.
+            exec_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="OpsSourceList",
+                    actions=["s3:ListBucket"],
+                    resources=[f"arn:aws:s3:::{b}" for b in ops_buckets],
+                    conditions={"StringLike": {"s3:prefix": [f"{p}*" for p in read_prefixes]}},
                 )
             )
         # CloudWatch Logs export tasks deliver into ops/cwlogs-export/ of the
         # solution bucket; the logs service principal needs these two grants.
         logs_principal = iam.ServicePrincipal(f"logs.{self.region}.amazonaws.com")
+        # aws:SourceArn pins the confused-deputy condition to THIS log group, not
+        # just this account — AWS documents SourceAccount together with SourceArn,
+        # and without it any log group in the account could target the export
+        # prefix and pollute what the agent presents as its own audit history
+        # (threat model T008). The export delivers the runtime's own log group.
+        log_group_source = (
+            f"arn:aws:logs:{self.region}:{self.account}:"
+            "log-group:/aws/bedrock-agentcore/runtimes/duckdb-analyst:*"
+        )
         ducklake_bucket.add_to_resource_policy(
             iam.PolicyStatement(
                 sid="CloudWatchLogsExportAclCheck",
                 principals=[logs_principal],
                 actions=["s3:GetBucketAcl"],
                 resources=[ducklake_bucket.bucket_arn],
-                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": self.account},
+                    "ArnLike": {"aws:SourceArn": log_group_source},
+                },
             )
         )
         ducklake_bucket.add_to_resource_policy(
@@ -177,7 +213,8 @@ class DataAgentStack(Stack):
                     "StringEquals": {
                         "s3:x-amz-acl": "bucket-owner-full-control",
                         "aws:SourceAccount": self.account,
-                    }
+                    },
+                    "ArnLike": {"aws:SourceArn": log_group_source},
                 },
             )
         )

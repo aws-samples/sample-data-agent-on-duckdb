@@ -120,6 +120,24 @@ def probe_columns(ref: str) -> set[str]:
         return {r[0] for r in rows}
 
 
+def session_objects() -> set[str]:
+    """Names of the session's temp tables/views — the objects a principal
+    created in-session (working sets, framework `_r_<n>` results).
+
+    Governance's table-level deny-by-default (rewrite.py) lets a restricted
+    principal read these: they hold only rows the principal was already
+    governed into (the temp table is built from the GOVERNED statement), so
+    reading them cannot widen access. Only TEMPORARY objects qualify — the
+    mounted scenario views are durable and are governed by the policy, never
+    exempted here. Runs outside the pipeline lock, so it takes conn_lock."""
+    with conn_lock:
+        rows = get_conn().execute(
+            "SELECT table_name FROM duckdb_tables() WHERE temporary "
+            "UNION ALL SELECT view_name FROM duckdb_views() WHERE temporary"
+        ).fetchall()
+        return {r[0] for r in rows}
+
+
 def reset() -> None:
     """Forget the connection (tests, the eval runner): the next get_conn()
     starts a fresh engine with no temp tables."""
