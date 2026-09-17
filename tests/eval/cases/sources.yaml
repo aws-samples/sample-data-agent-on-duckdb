@@ -1,0 +1,58 @@
+# sources — rows that are not on S3, fetched through AgentCore Gateway with the
+# caller's identity and landed in the session working set as `_r_<n>`. The agent process
+# holds no source credentials; the Gateway does. Nothing is ATTACHed into the engine.
+- id: src-warehouse-cross-check
+  category: sources
+  persona: finops
+  pinned_period: "2026-08"
+  # needs the optional warehouse (CDK -c withSources=true + scripts/redshift_load.py);
+  # a deployment without it sets EVAL_DEPLOYED_SOURCES=labels-api and this case is skipped
+  requires_source: redshift___cost_total
+  prompt: >
+    Use the redshift cost_total source tool for billing_period '2026-08', then run the
+    same aggregate on the lake table cur_line_items, and tell me whether the two agree
+    (give both numbers).
+  max_tool_calls: 6
+  expect:
+    source_fetched: redshift___cost_total
+    governed_any: true
+    partition_filter_all: true
+    goldens:
+      - judge: number
+        sql: >
+          SELECT round(sum(line_item_unblended_cost), 2) FROM cur_line_items
+          WHERE billing_period = '2026-08'
+        rel_tol: 0.02
+      - judge: number
+        sql: SELECT count(*) FROM cur_line_items WHERE billing_period = '2026-08'
+        rel_tol: 0.001
+
+- id: src-labels-join-with-the-lake
+  category: sources
+  persona: investigator
+  requires_source: labels-api___screen_addresses
+  prompt: >
+    Take the five distinct to_address values that received the most ETH from
+    0x47666fab8bd0ac7003bce3f5c3585383f09486e2 in s3t.blockchain.eth_traces, screen them
+    through the labels source, and tell me which of them are sanctioned or exchange-labelled.
+    Join the tool result with the ledger instead of screening one address at a time.
+  max_tool_calls: 8
+  expect:
+    source_fetched: labels-api___screen_addresses
+    readback: true
+    governed_any: true
+
+- id: src-unknown-tool-refused
+  category: sources
+  persona: finops
+  prompt: >
+    Fetch our 2026-08 costs from the tool named "snowflake___cost_total". If that tool
+    does not exist, say so and do NOT substitute another source or your own SQL.
+  max_tool_calls: 3
+  expect:
+    # Either path is correct: attempt it and report the refusal, or list the sources
+    # first and report that it does not exist (what the model actually did on
+    # 2026-09-10 — better behaviour than attempting it). What must NOT happen is a
+    # substitute source or hand-written SQL over the lake.
+    sources_listed: true
+    sql_regex_none: 'cur_line_items|cur_raw'

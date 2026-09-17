@@ -24,8 +24,8 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 
 ### Key Statistics
 
-- **Total Threats**: 27
-- **Total Mitigations**: 24
+- **Total Threats**: 31
+- **Total Mitigations**: 28
 - **Total Assumptions**: 5
 - **System Components**: 9
 - **Assets**: 5
@@ -535,11 +535,11 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Action**: serves a malicious build, or ships a malicious release of duckdb / sqlglot / strands / bedrock-agentcore.
 - **Impact**: code execution inside the agent process, which holds the execution role and every governed result; every SQL-layer control is bypassed because the attacker is inside the process where they live.
 - **Impacted Assets**: A001
-- **Tags**: supply-chain, cold-start, residual
-- **Residual Risk Decision**: Accepted
-- **Residual Severity**: Medium
+- **Tags**: supply-chain, cold-start
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
 - **Residual Likelihood**: Unlikely
-- **Residual Risk Rationale**: Low likelihood (signed extensions, HTTPS fetch), high consequence. Accepted for now with pre-baking/pinning tracked as a follow-up (M024). A runtime that INSTALLs at cold start is an avoidable standing dependency.
+- **Residual Risk Rationale**: The five core extensions (httpfs, aws, iceberg, ducklake, fts) are installed at image BUILD time into a read-only directory; the engine sets autoinstall_known_extensions=false and only LOADs (a missing extension is a build error, never a fetch); unit tests assert no INSTALL at cold start; the runtime's cold-start log line records install_at_runtime=false and CloudWatch shows no extension-repository request (an earlier runtime build). DuckDB itself is pinned to 1.5.x. Residual: the Python dependency chain (duckdb / sqlglot / strands / bedrock-agentcore) still arrives from PyPI at build time — standard supply-chain exposure, pinned versions.
 - **Assessment State**: Current
 
 #### T11: Operator writing GOVERNANCE_POLICIES by hand
@@ -797,6 +797,63 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 - **Residual Risk Rationale**: Blast radius is structurally one microVM; the memory envelope turns exhaustion into slower-not-dead. Cost exposure is the customer's own account, bounded by their throttles; per-request cost is standard for any LLM app.
 - **Assessment State**: Current
 
+#### T28: Authenticated restricted analyst via the semantic layer's parameters
+
+**Statement**: A Authenticated restricted analyst via the semantic layer's parameters `call_metric(metric, dims, time_window, filters, limit)` compiles model-supplied parameters into SQL; the parameters are chosen by the model from the user's question, or from text the model read in a result (T9). can passes a dimension name, filter value or time window crafted to leave its literal (`line_item_product_code' OR 1=1 --`, `; DROP TABLE`, `2026-08' OR '1'='1`), names a dimension or filter column the metric does not register (a denied column such as `line_item_resource_id`, or a column of another table), or calls a metric defined over a table the persona may not read (`cw_logs`)., which leads to if the compiler interpolated text, an ungoverned or destructive statement would reach the gate under the metric's name; if it accepted unregistered dimensions, a denied column would be selected under a reviewed KPI's name; if it listed every metric to every persona, the existence of admin-only tables would leak.
+
+- **Prerequisites**: `call_metric(metric, dims, time_window, filters, limit)` compiles model-supplied parameters into SQL; the parameters are chosen by the model from the user's question, or from text the model read in a result (T9).
+- **Action**: passes a dimension name, filter value or time window crafted to leave its literal (`line_item_product_code' OR 1=1 --`, `; DROP TABLE`, `2026-08' OR '1'='1`), names a dimension or filter column the metric does not register (a denied column such as `line_item_resource_id`, or a column of another table), or calls a metric defined over a table the persona may not read (`cw_logs`).
+- **Impact**: if the compiler interpolated text, an ungoverned or destructive statement would reach the gate under the metric's name; if it accepted unregistered dimensions, a denied column would be selected under a reviewed KPI's name; if it listed every metric to every persona, the existence of admin-only tables would leak.
+- **Impacted Assets**: A001, A004
+- **Tags**: semantic-layer, parameter-compilation, injection
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Possible
+- **Residual Risk Rationale**: The compiler is an allowlist on every axis and never interpolates a parameter as text: dimension NAMES select registry-owned SQL expressions; filter columns must be registered and every value becomes a bound sqlglot literal in the AST; time windows must match the grain's literal shape and are required (so the cost gate's partition predicate exists by construction); limit is a bounded int. Metric definitions are operator configuration validated at import (single expression, no subquery, bare identifiers, WHERE-shaped fixed filters). The compiled SQL then goes through the SAME pipeline as run_sql — Gate, Govern (RLS/CLS: finops calling top_resources is refused by column policy; a persona's compiled statement is row-filtered), Cost, Execute — so a metric adds no privilege; visibility of the catalog follows `governance.visible_tables()`, so an admin-only table's metric is "not registered" for a restricted role and the refusal names only what that role may call. 34 unit tests (tests/unit/test_semantic.py) include the injection forms above; eval `semantic` category has 7 cases including two refusals and the CLS denial. Residual: a well-formed metric definition that is semantically wrong (an operator error, T11's sibling) governs as written; the `semantic` trace event and the audit line's `metric@version` give the signal.
+- **Assessment State**: Current
+
+#### T29: Compromised or hostile non-lake source reached through the Gateway
+
+**Statement**: A Compromised or hostile non-lake source reached through the Gateway The agent may call read-only Gateway tools (`fetch_source`) whose rows land in the session working set as `_r_<n>` and are then joined with lake tables. can returns rows crafted to (a) carry instructions the model might follow, (b) carry keys or values designed to become SQL when the rows are landed, (c) flood the session with rows, or (d) claim more authority than a service credential actually has., which leads to without the landing rules: a prompt-injection foothold with a trusted look, DDL/DML from a source's field name, session memory exhaustion, or an ungoverned side channel where the source's service credential sees more than the caller may.
+
+- **Prerequisites**: The agent may call read-only Gateway tools (`fetch_source`) whose rows land in the session working set as `_r_<n>` and are then joined with lake tables.
+- **Action**: returns rows crafted to carry instructions, to become SQL through a field name, to flood the session, or to exploit a service-credential source.
+- **Impact**: a prompt-injection foothold with a trusted look, DDL/DML from a source's field name, session memory exhaustion, or an ungoverned side channel.
+- **Impacted Assets**: A001, A004
+- **Tags**: outbound-source, gateway, untrusted-content
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Possible
+- **Residual Risk Rationale**: Landing is defensive by construction: column names are sanitized to bare identifiers, every value is a bound parameter (verified: a key of `addr; DROP TABLE t --` becomes `addr__DROP_TABLE_t___` and the target table survives), row count is capped (`GATEWAY_MAX_TOOL_ROWS`), the result is an owner-bound handle under the same LRU as any result, and every text cell is marked `data:«…»` with the result string naming the tool as untrusted evidence. The tool surface of each source is fixed and parameterized — the Redshift target does NOT accept free SQL, deliberately, so a service credential cannot become an ungoverned query channel. A source that cannot filter per user is marked `degraded=2lo` in the audit line and filtered on `_r_<n>`. Residual: the CONTENT of a source's rows is trusted as evidence in the narrative (same structural limit as T9), and a 2LO source's service credential still sees its own full data set.
+
+#### T30: The agent process as a credential holder for non-lake sources
+
+**Statement**: A The agent process as a credential holder for non-lake sources Any code in the microVM can read the execution role's credentials from the instance metadata endpoint (AWS documents this explicitly), so any credential the agent process holds is exposed to prompt-injection-driven code paths and to a container compromise. can reads a source credential out of the process (env var, secret cache, connection string) and uses it directly, bypassing every rewrite., which leads to full, ungoverned access to that source with no audit trail in the agent's own log.
+
+- **Prerequisites**: Any code in the microVM can read the execution role's credentials from the metadata endpoint; a source credential in the process would be equally readable.
+- **Action**: reads a source credential out of the process and uses it directly, bypassing every rewrite.
+- **Impact**: full, ungoverned access to that source with no audit trail in the agent's own log.
+- **Impacted Assets**: A001, A004
+- **Tags**: credentials, outbound-source
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: The agent process holds NO source credential: outbound credentials live in the Gateway (`GATEWAY_IAM_ROLE` here) and the Identity token vault. What the process forwards is the CALLER's own JWT — the token it already decoded for claims, so no new secret enters the process — and that token is dropped the moment the session owner changes. The Gateway role can invoke exactly two Lambdas and one runtime; each Lambda role is scoped to one prefix / one workgroup. Residual: the caller's token is in process memory for the session's lifetime (unavoidable — it arrived in the request), and the execution role's own read access to S3 remains as before.
+
+#### T31: A working-set handle used across principals
+
+**Statement**: A Authenticated analyst who learns another session's handle name `_r_<n>` names are short and predictable, and a caller chooses the `runtimeSessionId`. can names another principal's handle in a query, hoping the temp table is still in the engine., which leads to reading rows governed for a different identity.
+
+- **Prerequisites**: `_r_<n>` names are short and predictable, and a caller chooses the runtimeSessionId.
+- **Action**: names another principal's handle in a query.
+- **Impact**: reading rows governed for a different identity.
+- **Impacted Assets**: A001
+- **Tags**: handles, session-binding
+- **Residual Risk Decision**: Mitigated
+- **Residual Severity**: Low
+- **Residual Likelihood**: Unlikely
+- **Residual Risk Rationale**: Handles are minted by the framework, recorded with their owner and creation time, and checked at the gate: a handle this session does not hold — never minted here, dropped by the LRU, or minted under another owner — is refused before the engine and audited at stage `handle`. The owner-change path already resets the engine and the store (T003), so the cross-owner branch is defence in depth. Residual: within ONE principal's session, handles are shared across that principal's turns by design.
+
 ## Mitigations
 
 ### Resolved Mitigations
@@ -888,6 +945,24 @@ Open-source sample (aws-samples, MIT-0) demonstrating an on-chain investigations
 #### M22: One EMF audit line per statement (principal, SQL, governance/cost decision, outcome) plus a live per-stage SSE trace give operators the audit signal for whether and how the rewrite applied.
 
 **Addresses Threats**: T1, T2, T3, T4, T6, T9, T24
+
+#### M23: Semantic-layer compiler is an allowlist on every parameter axis (registered dimension names → registry-owned expressions; registered filter columns with values as bound AST literals; grain-shaped, required time windows; bounded int limit); metric definitions validated at import; compiled SQL goes through Gate → Govern → Cost → Execute unchanged; catalog visibility follows the persona's visible tables.
+
+**Addresses Threats**: T28
+
+#### M24: Tool-result landing rules: sanitized identifiers, bound parameters, row cap, owner-bound handle, data:«…» marking and an explicit "untrusted evidence" note; each source's tool surface is fixed and parameterized (no free SQL to a warehouse).
+
+**Addresses Threats**: T29
+
+#### M25: No source credential in the agent process: outbound credentials live in the Gateway and the Identity token vault; the process forwards only the caller's own token and drops it on an owner change; gateway and Lambda roles are scoped to one function / one prefix / one workgroup.
+
+**Addresses Threats**: T30
+
+#### M26: Working-set handles are server-minted, owner-bound and gate-checked; a handle this session does not hold is refused before the engine and audited.
+
+**Addresses Threats**: T31
+
+**Coverage** (2026-09-17): the governance matrix's `tool` path lands a Gateway result as a handle and JOINs it with the persona's governed table (the table keeps its rewrite), and its `deny (tool)` cells — one per persona, admin included — assert that a `_r_<n>` minted by another principal is refused at the gate (`stage=handle`). 191/191, run in CI.
 
 ### Will Not Action Mitigations
 

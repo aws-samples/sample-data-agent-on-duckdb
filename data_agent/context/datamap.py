@@ -17,6 +17,13 @@ they measure thousands of lookups per search:
 * **L2 — on demand.** `DESCRIBE <table>` through `run_sql` when the model has
   picked a table (the governance schema prober already caches these).
 
+Table cards (`storage.scenarios.base.TableCard`) ride along at every
+level: L0 carries each table's grain and use-when in one short cell, L1 ranks
+on the card text too and returns use-when / avoid-when / caveats with a hit,
+and the reconcile check keeps the card, the prompt doc and the engine schema
+in agreement. Card text is filtered like column names: a CLS-denied column
+never appears in what a restricted role is shown.
+
 Freshness is session-scoped by design: a table dropped mid-conversation
 errors on use and the next search rebuilds the index. Invariant 8 test: this
 map is *derived from the engine's catalog*, which is why it works for any
@@ -30,12 +37,13 @@ import os
 import re
 import time
 
-from data_agent.storage.registry import PARTITIONED_SOURCES
+from data_agent.storage.registry import CARDS, PARTITIONED_SOURCES
 
 INDEX_TABLE = "_catalog"
 FTS_SCHEMA = f"fts_main_{INDEX_TABLE}"
 DESCRIBE_BUDGET_S = float(os.environ.get("DATAMAP_DESCRIBE_BUDGET_S", "20"))
-# a partition that exists, used to DESCRIBE raw sources without listing the prefix
+# a partition that exists, used to DESCRIBE raw sources without listing the
+# prefix — the fallback when a source spec carries no `probe` of its own
 PROBE_PARTITION = os.environ.get("DATAMAP_PROBE_PARTITION", "2025-02-21")
 # False → DESCRIBE the local relation instead of a remote single-partition path
 # (unit tests; a deployment whose raw views are local files)
@@ -78,6 +86,8 @@ def catalog_entries(conn) -> list[dict]:
                 "table": name,
                 "partition": spec["column"] if spec else None,
                 "probe": _probe_sql(qualified, spec),
+                # the same logical table via a catalog leg shares the raw card
+                "card": CARDS.get(name.lower()),
             }
         )
     return out
@@ -87,7 +97,8 @@ def _probe_sql(qualified: str, spec: dict | None) -> str:
     """A DESCRIBE that binds the relation cheaply: raw partitioned sources get
     a single-partition explicit path (no whole-prefix LIST)."""
     if spec and PROBE_REMOTE:
-        path = spec["layout"].format(base=spec["base"].rstrip("/"), part=PROBE_PARTITION)
+        part = spec.get("probe") or PROBE_PARTITION  # a partition known to exist
+        path = spec["layout"].format(base=spec["base"].rstrip("/"), part=part)
         args = f", {spec['args']}" if spec.get("args") else ""
         return f"DESCRIBE SELECT * FROM {spec['reader']}('{path}'{args}) LIMIT 0"  # nosec B608 - catalog-derived literals
     return f"DESCRIBE SELECT * FROM {qualified} LIMIT 0"  # nosec B608 - identifier from duckdb_tables()
@@ -107,24 +118,54 @@ def _visible(entries: list[dict], visible: frozenset[str] | None) -> list[dict]:
     return [e for e in entries if _bare(e["name"]) in visible]
 
 
+def _scrub_denied(name: str, text: str, denied: dict[str, frozenset[str]] | None) -> str:
+    """Card prose may mention a column by name; a CLS-denied column name is
+    withheld from a restricted role's discovery output, same as in the column
+    list — the text says what the table is, never what it hides."""
+    if not text or not denied:
+        return text
+    hide = denied.get(_bare(name))
+    if not hide:
+        return text
+    for col in sorted(hide, key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(col)}\b", "…", text, flags=re.IGNORECASE)
+    return text
+
+
 # --------------------------------------------------------------------- L0
-def l0_doc(entries: list[dict], visible: frozenset[str] | None = None) -> str:
-    """Compact routing context for the system prompt (filtered to the role)."""
+def l0_doc(
+    entries: list[dict],
+    visible: frozenset[str] | None = None,
+    denied: dict[str, frozenset[str]] | None = None,
+) -> str:
+    """Compact routing context for the system prompt (filtered to the role):
+    name, kind, partition column, and the card's grain. Only the grain rides
+    here (names-only budget); use-when / avoid-when / caveats come back with a
+    `search_schema` hit. A catalog-leg copy points at the raw table's card."""
     lines = [
         "## Tables the engine can see (generated from the catalog at session start)",
         "",
-        "| Table | Kind | Partition column (required in WHERE) |",
-        "|---|---|---|",
+        "| Table | Kind | Partition column (required in WHERE) | Grain |",
+        "|---|---|---|---|",
     ]
+    local_names = {e["table"].lower() for e in entries if e["database"] == "main"}
     for e in _visible(entries, visible):
         part = (
             f"`{e['partition']}`" if e["partition"] else "— (catalog/label table, no filter needed)"
         )
-        lines.append(f"| `{e['name']}` | {e['kind']} | {part} |")
+        card = e.get("card")
+        if card is None:
+            about = ""
+        elif e["database"] != "main" and e["table"].lower() in local_names:
+            about = f"slice of `{e['table']}` (same card)"
+        else:
+            about = _scrub_denied(e["name"], card.grain, denied)
+        lines.append(f"| `{e['name']}` | {e['kind']} | {part} | {about} |")
     lines += [
         "",
         "Not sure which table? Call `search_schema(query)` (keyword search over table and "
-        "column names, no network). Then `DESCRIBE <table>` via run_sql for the exact schema.",
+        "column names plus each table's card: when to use it, when not to, caveats; no "
+        "network). Then `DESCRIBE <table>` via run_sql for the exact schema.",
     ]
     return "\n".join(lines)
 
@@ -157,7 +198,7 @@ def ensure_index(conn, lock) -> dict:
             )
         fts = False
         try:
-            conn.execute("INSTALL fts; LOAD fts;")
+            conn.execute("LOAD fts")  # pre-installed (scripts/install_extensions.py); no INSTALL
             conn.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- fixed identifiers
                 f"PRAGMA create_fts_index('{INDEX_TABLE}', 'name', 'tokens', overwrite=1)"  # nosec B608 - fixed identifiers
             )
@@ -169,8 +210,11 @@ def ensure_index(conn, lock) -> dict:
 
 
 def _tokens(e: dict) -> str:
-    """Searchable text: name segments + column names, underscores split."""
-    raw = f"{e['name']} {e.get('columns', '')} {e['kind']} {e.get('partition') or ''}"
+    """Searchable text: name segments + column names + the table card's prose
+    (grain, use-when, avoid-when, caveats), underscores split."""
+    card = e.get("card")
+    about = f"{card.grain} {card.use_when} {card.avoid_when} {card.caveats}" if card else ""
+    raw = f"{e['name']} {e.get('columns', '')} {e['kind']} {e.get('partition') or ''} {about}"
     return " ".join(_TOKEN_RE.findall(raw.lower().replace("_", " ").replace(".", " ")))
 
 
@@ -199,20 +243,24 @@ def search(
         return []
     # over-fetch when filtering so the role's visible tables still fill `limit`
     fetch = limit if visible is None else max(limit * 4, 50)
+    # The score is computed in an inner query and filtered outside it: DuckDB
+    # 2.0-alpha refuses `WHERE score …` when `score` aliases a macro with side
+    # effects (the fts match_bm25 macro) — "Alias referenced but the expression
+    # has side effects" — while 1.5 accepted it. The subquery form runs on both.
     with lock:
         if state["fts"]:
             rows = conn.execute(
-                f"SELECT name, kind, partition_col, columns, "  # nosec B608 - fixed identifiers, bound params
-                f"{FTS_SCHEMA}.match_bm25(name, ?) AS score FROM {INDEX_TABLE} "
+                f"SELECT * FROM (SELECT name, kind, partition_col, columns, "  # nosec B608 - fixed identifiers, bound params
+                f"{FTS_SCHEMA}.match_bm25(name, ?) AS score FROM {INDEX_TABLE}) "
                 "WHERE score IS NOT NULL ORDER BY score DESC, name LIMIT ?",
                 [q, fetch],
             ).fetchall()
             engine = "duckdb fts (bm25)"
         else:
             rows = conn.execute(
-                f"SELECT name, kind, partition_col, columns, "  # nosec B608 - fixed identifiers, bound params
+                f"SELECT * FROM (SELECT name, kind, partition_col, columns, "  # nosec B608 - fixed identifiers, bound params
                 f"len(list_intersect(string_split(tokens, ' '), string_split(?, ' '))) AS score "
-                f"FROM {INDEX_TABLE} WHERE score > 0 ORDER BY score DESC, name LIMIT ?",
+                f"FROM {INDEX_TABLE}) WHERE score > 0 ORDER BY score DESC, name LIMIT ?",
                 [q, fetch],
             ).fetchall()
             engine = "token overlap (fallback: fts unavailable)"
@@ -224,11 +272,25 @@ def search(
             "kind": r[1],
             "partition_column": r[2],
             "columns": _strip_denied(r[0], (r[3] or "")[:400], denied),
+            **_card_fields(r[0], denied),
             "score": round(float(r[4]), 3),
             "engine": engine,
         }
         for r in rows
     ]
+
+
+def _card_fields(name: str, denied: dict[str, frozenset[str]] | None) -> dict:
+    """The card's guidance for a search hit (empty when the table has no card)."""
+    card = CARDS.get(_bare(name))
+    if card is None:
+        return {}
+    return {
+        "grain": card.grain,
+        "use_when": _scrub_denied(name, card.use_when, denied),
+        "avoid_when": _scrub_denied(name, card.avoid_when, denied),
+        "caveats": _scrub_denied(name, card.caveats, denied),
+    }
 
 
 def format_hits(hits: list[dict], query: str) -> str:

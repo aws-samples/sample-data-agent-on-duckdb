@@ -1,0 +1,214 @@
+{
+ "12eb34ed16b511ae7d38469a": {
+  "computed_at": "2026-09-09T16:12:05+00:00",
+  "engine_ms": 251.8,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "3492205"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM dl.blockchain.eth_traces"
+ },
+ "15c9dcad293b179af8b31a17": {
+  "computed_at": "2026-09-09T16:08:07+00:00",
+  "engine_ms": 591.2,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "40"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM s3t.blockchain.eth_traces WHERE from_address = '0x47666fab8bd0ac7003bce3f5c3585383f09486e2' AND value = 10000e18"
+ },
+ "1c2b33f434a7dc6e3d0b31ca": {
+  "computed_at": "2026-09-09T16:20:04+00:00",
+  "engine_ms": 131.6,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "540.8"
+   ]
+  ],
+  "sql": "SELECT round(sum(line_item_unblended_cost), 2) FROM cur_line_items WHERE billing_period = '2026-08'"
+ },
+ "1c770a4b6360e918e075413f": {
+  "computed_at": "2026-09-09T16:21:55+00:00",
+  "engine_ms": 346.8,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "2026-07",
+    "172.69"
+   ],
+   [
+    "2026-08",
+    "540.8"
+   ]
+  ],
+  "sql": "SELECT billing_period, round(sum(line_item_unblended_cost), 2) FROM cur_line_items WHERE billing_period IN ('2026-07', '2026-08') GROUP BY 1 ORDER BY 1"
+ },
+ "2edb4a945cce489ff0733b1a": {
+  "computed_at": "2026-09-09T16:09:45+00:00",
+  "engine_ms": 293.6,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "2"
+   ]
+  ],
+  "sql": "SELECT count(DISTINCT t.to_address) FROM s3t.blockchain.eth_traces t JOIN cex_deposit_labels l ON lower(l.address) = lower(t.to_address) WHERE t.from_address = '0x47666fab8bd0ac7003bce3f5c3585383f09486e2' AND l.exchange = 'exchange-a'"
+ },
+ "349db6c518eb5a8251ec554c": {
+  "computed_at": "2026-09-09T16:28:09+00:00",
+  "engine_ms": 78.7,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "3492205"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM s3t.blockchain.eth_traces"
+ },
+ "3c786674856c01515501e098": {
+  "computed_at": "2026-09-09T16:21:23+00:00",
+  "engine_ms": 199.7,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "26.12"
+   ]
+  ],
+  "sql": "SELECT round(max(c), 2) FROM ( SELECT line_item_resource_id, sum(line_item_unblended_cost) AS c FROM cur_line_items WHERE billing_period = '2026-08' AND line_item_product_code = 'AmazonEC2' AND line_item_resource_id <> '' GROUP BY 1)"
+ },
+ "40a8bcb15249ef6f87b02905": {
+  "computed_at": "2026-09-09T16:08:48+00:00",
+  "engine_ms": 792.0,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "8"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM s3t.blockchain.eth_traces t WHERE lower(t.from_address) IN (SELECT lower(address) FROM ofac_addresses) OR lower(t.to_address) IN (SELECT lower(address) FROM ofac_addresses)"
+ },
+ "4fa9c29e018721f2d8bc2c32": {
+  "computed_at": "2026-09-09T16:26:57+00:00",
+  "engine_ms": 48.5,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "us-west-2",
+    "62679"
+   ],
+   [
+    "us-east-1",
+    "27862"
+   ],
+   [
+    "us-east-2",
+    "13090"
+   ]
+  ],
+  "sql": "SELECT region, count(*) FROM cloudtrail_events WHERE date = '2026-09-02' GROUP BY 1 ORDER BY 2 DESC"
+ },
+ "56f0ba8d430509a1714ac50c": {
+  "computed_at": "2026-09-09T16:30:26+00:00",
+  "engine_ms": 86.1,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "ofac_addresses",
+    "120"
+   ],
+   [
+    "cex_deposit_labels",
+    "5"
+   ]
+  ],
+  "sql": "SELECT 'ofac_addresses' AS t, count(*) FROM ofac_addresses UNION ALL SELECT 'cex_deposit_labels', count(*) FROM cex_deposit_labels"
+ },
+ "70a3ebfb3a69bef37bada974": {
+  "computed_at": "2026-09-09T16:20:05+00:00",
+  "engine_ms": 132.7,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "AmazonEC2"
+   ],
+   [
+    "AmazonRDS"
+   ],
+   [
+    "AmazonEKS"
+   ]
+  ],
+  "sql": "SELECT line_item_product_code FROM cur_line_items WHERE billing_period = '2026-08' GROUP BY 1 ORDER BY sum(line_item_unblended_cost) DESC LIMIT 3"
+ },
+ "7cb993c24eea1d2f2129aabe": {
+  "computed_at": "2026-09-09T16:23:28+00:00",
+  "engine_ms": 9841.0,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "1034397"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM cur_raw WHERE billing_period = '2026-08'"
+ },
+ "80d299250c2189d243509c10": {
+  "computed_at": "2026-09-09T16:29:43+00:00",
+  "engine_ms": 43.2,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "120"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM ofac_addresses"
+ },
+ "96a00080a1c40e48713afdf2": {
+  "computed_at": "2026-09-09T16:27:36+00:00",
+  "engine_ms": 130.2,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "13858"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM cloudtrail_events WHERE date = '2026-09-02' AND event_name = 'AssumeRole'"
+ },
+ "b2fb70a329d008e459bb02d8": {
+  "computed_at": "2026-09-09T16:28:37+00:00",
+  "engine_ms": 198.8,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "3492205"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM glue.blockchain.eth_traces"
+ },
+ "bd91ab361badc980f1f5b021": {
+  "computed_at": "2026-09-09T16:26:57+00:00",
+  "engine_ms": 56.5,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "103631"
+   ]
+  ],
+  "sql": "SELECT count(*) FROM cloudtrail_events WHERE date = '2026-09-02'"
+ },
+ "c9a7c6e97544a64cf8c8dd15": {
+  "computed_at": "2026-09-09T16:07:17+00:00",
+  "engine_ms": 859.2,
+  "role": "ops:admin",
+  "rows": [
+   [
+    "401346.77"
+   ]
+  ],
+  "sql": "SELECT round(max(value) / 1e18, 2) FROM s3t.blockchain.eth_traces WHERE to_address = '0x47666fab8bd0ac7003bce3f5c3585383f09486e2'"
+ }
+}

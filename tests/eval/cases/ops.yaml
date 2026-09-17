@@ -20,13 +20,23 @@
     For billing_period '2026-08', what was our total unblended cost in USD and
     which five services cost the most? Use cur_line_items.
   max_tool_calls: 5
+  pinned_period: "2026-08"   # goldens run only once the month is closed
   expect:
     governed_any: true
     rls_table: cur_line_items
     partition_filter_all: true
     expanded_paths_min: 1
-    answer_number: {value: 540.8, rel_tol: 0.02}
-    answer_contains: ["AmazonEC2"]
+    goldens:
+      - judge: number
+        sql: >
+          SELECT round(sum(line_item_unblended_cost), 2) FROM cur_line_items
+          WHERE billing_period = '2026-08'
+        rel_tol: 0.02
+      - judge: toplist   # the three costliest services, in order (±1 position)
+        sql: >
+          SELECT line_item_product_code FROM cur_line_items
+          WHERE billing_period = '2026-08' GROUP BY 1
+          ORDER BY sum(line_item_unblended_cost) DESC LIMIT 3
 
 - id: ops-finops-resource-ids-denied
   category: ops
@@ -46,23 +56,35 @@
     Which line_item_resource_id values drove AmazonEC2 cost in billing_period
     '2026-08'? List the top 3 with their unblended cost.
   max_tool_calls: 6
+  pinned_period: "2026-08"
   expect:
     partition_filter_all: true
     answer_contains: ["vol-"]
-    answer_number: {value: 26.12, rel_tol: 0.02}
+    golden_sql: >
+      SELECT round(max(c), 2) FROM (
+        SELECT line_item_resource_id, sum(line_item_unblended_cost) AS c FROM cur_line_items
+        WHERE billing_period = '2026-08' AND line_item_product_code = 'AmazonEC2'
+          AND line_item_resource_id <> '' GROUP BY 1)
+    rel_tol: 0.02
 
 - id: ops-finops-month-over-month
   category: ops
   persona: finops
   prompt: >
     Compare our total unblended cost for billing_period '2026-07' and '2026-08'
-    from cur_line_items (one query, group by billing_period).
+    from cur_line_items (one query, group by billing_period; label each total
+    with its billing_period value).
   max_tool_calls: 4
+  pinned_period: "2026-08"
   expect:
     governed_any: true
     expanded_paths_min: 2
-    answer_number: {value: 172.69, rel_tol: 0.02}
-    answer_contains: ["540"]
+    goldens:
+      - judge: pair   # (billing_period, total) for both months
+        sql: >
+          SELECT billing_period, round(sum(line_item_unblended_cost), 2) FROM cur_line_items
+          WHERE billing_period IN ('2026-07', '2026-08') GROUP BY 1 ORDER BY 1
+        rel_tol: 0.02
 
 - id: ops-finops-no-period-rejected
   category: ops
@@ -87,11 +109,13 @@
     Using cur_raw (the native CUR 2.0 CSV export read in place, not the curated
     table), how many line items are there for billing_period '2026-08'?
   max_tool_calls: 4
+  pinned_period: "2026-08"
   expect:
     sql_regex_any: '\bcur_raw\b'
     partition_filter_all: true
     expanded_paths_min: 1
-    answer_number: {value: 1034397, rel_tol: 0.001}
+    golden_sql: SELECT count(*) FROM cur_raw WHERE billing_period = '2026-08'
+    rel_tol: 0.001
 
 # ---------------------------------------------------------------- secops
 - id: ops-secops-top-principals
@@ -149,8 +173,15 @@
     rls_table: cloudtrail_events
     partition_filter_all: true
     expanded_paths_min: 1
-    answer_number: {value: 103631, rel_tol: 0.001}
-    answer_contains: ["us-west-2"]
+    goldens:
+      - judge: number
+        sql: SELECT count(*) FROM cloudtrail_events WHERE date = '2026-09-02'
+        rel_tol: 0.001
+      - judge: pair   # every region with its event count
+        sql: >
+          SELECT region, count(*) FROM cloudtrail_events WHERE date = '2026-09-02'
+          GROUP BY 1 ORDER BY 2 DESC
+        rel_tol: 0.001
 
 - id: ops-secops-assume-role-count
   category: ops
@@ -162,5 +193,36 @@
   max_tool_calls: 5
   expect:
     partition_filter_all: true
-    answer_number: {value: 13858, rel_tol: 0.001}
+    golden_sql: >
+      SELECT count(*) FROM cloudtrail_events
+      WHERE date = '2026-09-02' AND event_name = 'AssumeRole'
+    rel_tol: 0.001
     answer_contains: ["role/"]
+
+# --- The session budget. A statement is bounded by the partition gate; a
+# SESSION is not, so the caps are enforced in the Cost stage. Both cases run
+# with tiny budgets injected through the runtime env (see docs/design.md).
+- id: ops-session-budget-statements
+  category: ops
+  persona: finops
+  requires_env: {SESSION_MAX_STATEMENTS: "2"}
+  prompts:
+    - For billing_period '2026-08', what was our total unblended cost? Use cur_line_items.
+    - And which service cost the most that month?
+    - And how many line items were there in total that month?
+  max_tool_calls: 6
+  expect:
+    budget_refused: true
+    answer_contains: ["budget"]
+
+- id: ops-session-budget-expanded-paths
+  category: ops
+  persona: finops
+  requires_env: {SESSION_MAX_EXPANDED_PATHS: "1"}
+  prompts:
+    - For billing_period '2026-08', what was our total unblended cost from cur_line_items?
+    - Now compare it with billing_period '2026-07' — same table, same measure.
+  max_tool_calls: 5
+  expect:
+    budget_refused: true
+    answer_contains: ["budget"]

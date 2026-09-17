@@ -6,6 +6,7 @@ import asyncio
 
 from data_agent import audit, governance
 from data_agent.context import prompt
+from data_agent.scheduling import gateway_client
 
 
 def resolve_claims(payload, context) -> dict | None:
@@ -22,6 +23,10 @@ def resolve_claims(payload, context) -> dict | None:
     """
     headers = getattr(context, "request_headers", None) or {}
     auth = headers.get("Authorization", "")
+    # The caller's own token is what an outbound gateway call carries.
+    # Nothing new enters the process — this is the token we already decode for
+    # claims — and it is dropped when the session owner changes.
+    gateway_client.set_bearer(auth[7:] if auth.startswith("Bearer ") else None)
     if auth.startswith("Bearer "):
         try:
             import jwt  # PyJWT; validated upstream by the inbound authorizer
@@ -48,7 +53,7 @@ def resolve_claims(payload, context) -> dict | None:
                 # session id between them still triggers a state reset.
                 "sub": decoded.get("sub", ""),
             }
-        except Exception:  # noqa: BLE001 — fall through to weaker sources
+        except Exception:  # noqa: BLE001,S110 — fall through to weaker sources  # nosec B110
             pass
     user_id = headers.get("X-Amzn-Bedrock-AgentCore-Runtime-User-Id")
     if user_id and ":" in user_id:  # convention: "<tenant>:<role>"
@@ -83,8 +88,11 @@ def _owner_key(claims: dict | None, role: str) -> str:
 def _bind_session(owner: str) -> bool:
     """Record the session owner; return True when it CHANGED from a previously
     bound owner (→ the caller reused a session id across identities: reset)."""
+    from data_agent.context import results
+
     prev = _session["owner"]
     _session["owner"] = owner
+    results.STORE.bind(owner)  # Handles minted from now on belong to this owner
     return prev is not None and prev != owner
 
 
@@ -105,7 +113,8 @@ def _reset_session_state(agent, conversation_manager) -> None:
     sys.stdout.write("\n")
     sys.stdout.flush()
     engine.reset()
-    results.STORE.reset()
+    results.STORE.reset()  # handles of the previous owner are gone with the engine
+    gateway_client.set_bearer(None)  # never reuse one principal's token for another
     datamap.reset()
     prompt.reset()
     audit.reset_session()
@@ -119,7 +128,13 @@ def envelope(kind: str, **fields) -> dict:
     return {"kind": kind, **fields}
 
 
-def map_event(ev: dict, trace: list) -> dict | None:
+def new_usage() -> dict:
+    """Per-invoke token accounting: summed over every model call of the
+    turn from Bedrock's stream `metadata.usage` — no PII, just counts."""
+    return {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
+
+
+def map_event(ev: dict, trace: list, usage: dict | None = None) -> dict | None:
     """Translate one Strands stream event into a typed UI envelope, and
     accumulate the per-SQL gate→rewrite→execute trace for the final result.
 
@@ -128,7 +143,16 @@ def map_event(ev: dict, trace: list) -> dict | None:
       {"reasoningText": text, "reasoning": True} -> chain-of-thought delta
       {"current_tool_use": {toolUseId,name,input}} -> tool call assembling
       {"tool_stream_event": {tool_use, data}}    -> our run_sql phase yields
+      {"event": {"metadata": {"usage": {...}}}}  -> one model call's token usage
     """
+    meta = ev.get("event", {}).get("metadata") if isinstance(ev.get("event"), dict) else None
+    if usage is not None and isinstance(meta, dict) and isinstance(meta.get("usage"), dict):
+        u = meta["usage"]
+        usage["input_tokens"] += int(u.get("inputTokens") or 0)
+        usage["output_tokens"] += int(u.get("outputTokens") or 0)
+        usage["model_calls"] += 1
+        audit.note_tokens(usage["input_tokens"])  # On the audit line too
+        return None
     if "reasoningText" in ev:
         return envelope("reasoning", text=ev["reasoningText"])
     if "data" in ev and isinstance(ev.get("data"), str) and "tool_stream_event" not in ev:
@@ -155,7 +179,7 @@ async def stream(agent, conversation_manager, payload, context=None):
       {"kind":"trace", "phase":"gate"|"rewrite"|"cost"|"execute", ...}  — the
         in-process pipeline, one set per SQL statement
       {"kind":"result", "principal": ..., "trace":[...all phases...],
-       "session": {...counters...}}
+       "session": {...counters...}, "usage": {input_tokens, output_tokens, model_calls}}
     The consolidated `trace` array in the final event backs a Trace tab.
     """
     claims = resolve_claims(payload, context)
@@ -192,12 +216,13 @@ async def stream(agent, conversation_manager, payload, context=None):
     )
 
     trace: list = []
+    usage = new_usage()
     yield envelope("start", principal=governance.active_role())
     await asyncio.to_thread(prompt.ensure, agent)  # L0 table map from the engine catalog
     async for ev in agent.stream_async(user_msg):
         if not isinstance(ev, dict):
             continue
-        env = map_event(ev, trace)
+        env = map_event(ev, trace, usage)
         if env is not None:
             yield env
     yield envelope(
@@ -205,4 +230,5 @@ async def stream(agent, conversation_manager, payload, context=None):
         principal=governance.active_role(),
         trace=trace,
         session=audit.session_counters(compressed=conversation_manager.stubbed),
+        usage=usage,  # The eval suite's per-case input-token column
     )

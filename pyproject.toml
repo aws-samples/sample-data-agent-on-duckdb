@@ -4,12 +4,13 @@ version = "0.1.0"
 description = "Data-analyst agent with an in-process DuckDB engine on Amazon Bedrock AgentCore"
 requires-python = ">=3.11"
 dependencies = [
-    "duckdb>=1.3.0",
+    "duckdb>=1.5.5,<1.6",
     "strands-agents",
     "bedrock-agentcore",
     "boto3",
     "sqlglot",
     "PyJWT",
+    "mcp>=1.29,<2",
 ]
 
 [dependency-groups]

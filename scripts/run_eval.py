@@ -9,7 +9,35 @@ answer text. Because the trace is structured, the checks are exact — "every
 raw scan carried a partition filter", "the junior's rewrite hid this column",
 "turn 3 hit the temp table in 4 ms" — no output-text guessing.
 
-Not a CI gate (it spends Bedrock tokens); run it manually or nightly:
+Numbers are not copied into the yaml any more:
+  * `expect.goldens: [{sql, judge, rel_tol}]` (or the shorthand `golden_sql`
+    + `golden_judge`) is RUN at eval time through the statement pipeline as
+    `ops:admin` (`--golden-role` to override), on the same engine and the
+    same S3 data the agent uses; a tolerant judge (number / set / toplist /
+    pair, `scripts/eval_judges.py`) compares the answer text with the rows.
+    Golden rows are cached in tests/eval/golden-cache.json (`--golden
+    compute|cache|auto`): the worker computes, a laptop without S3 reach
+    replays.
+  * `pinned_period: YYYY-MM` on a case: if that month is not closed yet the
+    goldens are skipped with a note (a moving month has no ground truth).
+  * every case records the turn's `input_tokens` / `model_calls` (from the
+    runtime's `result` envelope, or the same accounting in local mode).
+  * `--no-search-schema` (local mode) runs the agent without the discovery
+    tool — the with/without ablation the data-map claims rest on.
+  * `requires_env` on a case names runtime env the case needs (the session
+    budgets): in local mode it is set for that case and restored after;
+    in cloud mode the case is SKIPPED with a note unless the deployed runtime
+    already carries those values (a runtime env change is a deploy, not a
+    per-case switch).
+  * `requires_source` on a case names the Gateway source tool it needs:
+    in cloud mode the case is SKIPPED with a note when EVAL_DEPLOYED_SOURCES
+    (comma-separated tool-name prefixes the deployment actually exposes) is set
+    and does not list it — the warehouse source is optional to deploy and was
+    retired from the reference deployment).
+    Unset EVAL_DEPLOYED_SOURCES means "everything is deployed": the case runs.
+
+Not a CI gate (it spends Bedrock tokens); run it manually, or by
+category on a host with S3 reach:
 
   EVAL_PASSWORD=... python scripts/run_eval.py --mode cloud
   python scripts/run_eval.py --mode local --only cost-no-date,gov-junior-cls
@@ -24,6 +52,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -40,19 +69,25 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import eval_judges  # noqa: E402
+
 CASES_DIR = ROOT / "tests" / "eval" / "cases"
 PERSONAS_FILE = ROOT / "tests" / "eval" / "personas.yaml"
 # --mode cloud targets YOUR deployment: the runtime ARN comes from `agentcore launch`,
 # the Cognito values from the CDK stack outputs. No defaults.
+GOLDEN_CACHE = ROOT / "tests" / "eval" / "golden-cache.json"
 REGION = os.environ.get("AGENT_REGION", "us-west-2")
 RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")  # required for --mode cloud
-_NUM_RE = re.compile(r"(?<![\w.])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|(?<![\w.])-?\d+(?:\.\d+)?")
+GOLDEN_MAX_ROWS = 200  # a golden query is a scalar or a short list, never a dump
+_NUM_RE = eval_judges._NUM_RE
 
 
 # ------------------------------------------------------------------ loading
 def load_cases(only: set[str] | None, category: str | None) -> list[dict]:
     cases: list[dict] = []
     for f in sorted(CASES_DIR.glob("*.yaml")):
+        if f.name.startswith("."):  # editor / AppleDouble sidecars are not cases
+            continue
         for c in yaml.safe_load(f.read_text(encoding="utf-8")) or []:
             c.setdefault("category", f.stem)
             if only and c["id"] not in only:
@@ -75,47 +110,98 @@ class Turn:
         self.principal: str | None = None
         self.http: int | None = None
         self.wall_s: float = 0.0
+        self.usage: dict = {}
+        self.tools: list[str] = []  # source tools named in fetch_source calls
+        self.listed: list[str] = []  # tool names the model called at all
 
     def feed(self, env: dict) -> None:
         kind = env.get("kind")
+        if kind == "tool_start" and env.get("tool"):
+            self.listed.append(env["tool"])
+        if kind == "tool_start" and env.get("tool") in ("fetch_source", "list_sources"):
+            arg = env.get("input")
+            if isinstance(arg, str) and '"tool"' in arg:
+                import re as _re
+
+                m = _re.search(r'"tool"\s*:\s*"([^"]+)"', arg)
+                if m:
+                    self.tools.append(m.group(1))
+            elif isinstance(arg, dict) and arg.get("tool"):
+                self.tools.append(str(arg["tool"]))
         if kind == "text":
             self.text.append(env.get("text", ""))
         elif kind == "trace":
             self.trace.append({k: v for k, v in env.items() if k != "kind"})
         elif kind in ("start", "result") and env.get("principal"):
             self.principal = env["principal"]
+        if kind == "result" and isinstance(env.get("usage"), dict):
+            self.usage = env["usage"]
 
     @property
     def answer(self) -> str:
         return "".join(self.text)
 
 
-def run_local(prompts: list[str], role: str) -> list[Turn]:
+_local_agent_cache: dict = {}
+
+
+def _local_agent(drop: frozenset[str]):
+    """The in-process agent; with an ablation (`--no-search-schema`,
+    `--no-call-metric`) a twin without those tools (same model, prompt and
+    conversation manager)."""
     import agent as agent_mod
+
+    if not drop:
+        return agent_mod.agent
+    key = ",".join(sorted(drop))
+    if key not in _local_agent_cache:
+        from strands import Agent
+
+        from data_agent.context import prompt
+
+        tools = [
+            t
+            for t in (agent_mod.run_sql, agent_mod.search_schema, agent_mod.call_metric)
+            if t.tool_name not in drop
+        ]
+        _local_agent_cache[key] = Agent(
+            model=agent_mod.MODEL_ID,
+            tools=tools,
+            system_prompt=prompt.SYSTEM_PROMPT,
+            conversation_manager=agent_mod.conversation_manager,
+        )
+    return _local_agent_cache[key]
+
+
+def run_local(prompts: list[str], role: str, drop: frozenset[str] = frozenset()) -> list[Turn]:
     from data_agent import governance
     from data_agent.compute import engine
     from data_agent.context import datamap, prompt, results
     from data_agent.scheduling import runtime
 
+    agent = _local_agent(drop)
     governance.set_active_role(role)
-    agent_mod.agent.messages.clear()  # fresh conversation
+    agent.messages.clear()  # fresh conversation
     results.STORE.reset()
     datamap.reset()
     engine.reset()  # fresh engine (temp tables gone)
     prompt.reset()
+    prompt.ensure(agent)  # the L0 table map, exactly as the runtime injects it
     turns: list[Turn] = []
 
-    async def _one(prompt: str) -> Turn:
+    async def _one(user_prompt: str) -> Turn:
         t = Turn()
         t0 = time.perf_counter()
         raw_trace: list = []
-        async for ev in agent_mod.agent.stream_async(prompt):
+        usage = runtime.new_usage()
+        async for ev in agent.stream_async(user_prompt):
             if not isinstance(ev, dict):
                 continue
-            env = runtime.map_event(ev, raw_trace)
+            env = runtime.map_event(ev, raw_trace, usage)
             if env is not None:
                 t.feed(env)
         t.principal = governance.active_role()
+        t.usage = usage
         t.wall_s = round(time.perf_counter() - t0, 1)
         return t
 
@@ -173,6 +259,117 @@ def run_cloud(prompts: list[str], user: str, session_break: bool) -> list[Turn]:
     return turns
 
 
+# ------------------------------------------------------------------ goldens
+def _goldens_of(expect: dict) -> list[dict]:
+    """Normalize `goldens: [...]` / `golden_sql` shorthand to a list of specs."""
+    out = [dict(g) for g in (expect.get("goldens") or [])]
+    if expect.get("golden_sql"):
+        out.insert(
+            0,
+            {
+                "sql": expect["golden_sql"],
+                "judge": expect.get("golden_judge", "number"),
+                "rel_tol": expect.get("rel_tol", 0.01),
+            },
+        )
+    for g in out:
+        g.setdefault("judge", "number")
+        g.setdefault("rel_tol", 0.01)
+    return out
+
+
+def _golden_key(sql: str, role: str) -> str:
+    return hashlib.sha256(f"{role}\n{' '.join(sql.split())}".encode()).hexdigest()[:24]
+
+
+class GoldenRunner:
+    """Runs golden SQL through the statement pipeline (gate → govern → cost →
+    execute, one audit line) as the golden role, with a JSON cache."""
+
+    def __init__(self, mode: str, role: str) -> None:
+        self.mode = mode  # compute | cache | auto
+        self.role = role
+        self.cache: dict = {}
+        if GOLDEN_CACHE.exists():
+            self.cache = json.loads(GOLDEN_CACHE.read_text(encoding="utf-8"))
+        self.dirty = False
+        self.computed = 0
+        self.replayed = 0
+
+    def rows(self, sql: str) -> tuple[list[tuple], str]:
+        key = _golden_key(sql, self.role)
+        if self.mode in ("cache", "auto") and key in self.cache:
+            self.replayed += 1
+            return [tuple(r) for r in self.cache[key]["rows"]], "cached"
+        if self.mode == "cache":
+            raise RuntimeError("golden not in cache and --golden cache forbids computing it")
+        rows, engine_ms = self._compute(sql)
+        self.cache[key] = {
+            "sql": " ".join(sql.split()),
+            "role": self.role,
+            "rows": rows,
+            "engine_ms": engine_ms,
+            "computed_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+        }
+        self.dirty = True
+        self.computed += 1
+        return [tuple(r) for r in rows], f"computed ({engine_ms} ms)"
+
+    def _compute(self, sql: str) -> tuple[list[list], float]:
+        from data_agent import governance, pipeline
+
+        prev = governance.active_role()
+        governance.set_active_role(self.role)
+        try:
+            items = list(pipeline.run(sql))
+        finally:
+            governance.set_active_role(prev)
+        text = items[-1]
+        if not isinstance(text, str) or text.startswith("ERROR"):
+            raise RuntimeError(f"golden SQL failed: {str(text)[:200]}")
+        first = text.split("\n", 1)[0]
+        head = json.loads(first)
+        if isinstance(head, dict) and head.get("shape") == "summary":
+            raise RuntimeError(
+                f"golden SQL returned {head.get('rows')} rows — a golden must fit inline "
+                f"(≤ {GOLDEN_MAX_ROWS}); add a LIMIT or aggregate"
+            )
+        engine_ms = next(
+            (e.get("engine_ms", 0.0) for e in items if isinstance(e, dict) and "engine_ms" in e),
+            0.0,
+        )
+        # golden rows go to the judges as VALUES, without the data:«…» marking the
+        # model-facing string carries — a judge compares against the answer
+        # text the model wrote, which quotes the value, not the wrapper
+        from data_agent.context import results as results_mod
+
+        return [[results_mod.unmark(v) for v in r.values()] for r in head], engine_ms
+
+    def save(self) -> None:
+        if self.dirty:
+            GOLDEN_CACHE.write_text(
+                json.dumps(self.cache, indent=1, ensure_ascii=False, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+
+def _reload_env_knobs() -> None:
+    """Re-read the env-driven knobs a case's `requires_env` changed (local mode:
+    the modules were imported before the case set them)."""
+    from data_agent.context import cost as cost_mod
+
+    cost_mod.SESSION_MAX_STATEMENTS = int(os.environ.get("SESSION_MAX_STATEMENTS", "0"))
+    cost_mod.SESSION_MAX_EXPANDED_PATHS = int(os.environ.get("SESSION_MAX_EXPANDED_PATHS", "0"))
+    cost_mod.SESSION_MAX_ENGINE_MS = float(os.environ.get("SESSION_MAX_ENGINE_MS", "0"))
+
+
+def period_is_closed(pinned: str, today: dt.date | None = None) -> bool:
+    """A `pinned_period` YYYY-MM is closed once the current UTC month is later."""
+    today = today or dt.datetime.now(dt.UTC).date()
+    y, m = (int(x) for x in pinned.split("-")[:2])
+    return (today.year, today.month) > (y, m)
+
+
 # ------------------------------------------------------------- assertions
 def _phases(turns: list[Turn], phase: str, from_turn: int = 0) -> list[dict]:
     return [e for t in turns[from_turn:] for e in t.trace if e.get("phase") == phase]
@@ -195,6 +392,12 @@ def _executed_sqls(turns: list[Turn]) -> list[str]:
     return out
 
 
+def _tool_calls(turns: list[Turn]) -> list[str]:
+    """Names of the non-SQL tools the model called, from the tool_start envelopes
+    (a `fetch_source` call is not a pipeline statement, so it has no trace)."""
+    return [t for turn in turns for t in getattr(turn, "tools", [])]
+
+
 def _rejections(turns: list[Turn]) -> list[str]:
     out = []
     for t in turns:
@@ -207,16 +410,12 @@ def _rejections(turns: list[Turn]) -> list[str]:
 
 
 def _numbers(text: str) -> list[float]:
-    vals = []
-    for m in _NUM_RE.findall(text):
-        try:
-            vals.append(float(m.replace(",", "")))
-        except ValueError:
-            continue
-    return vals
+    return eval_judges.numbers(text)
 
 
-def evaluate(expect: dict, turns: list[Turn]) -> tuple[bool, list[str]]:
+def evaluate(
+    expect: dict, turns: list[Turn], goldens: GoldenRunner | None = None, pinned: str | None = None
+) -> tuple[bool, list[str]]:
     notes: list[str] = []
     ok = True
     answer = "\n".join(t.answer for t in turns)
@@ -272,6 +471,31 @@ def evaluate(expect: dict, turns: list[Turn]) -> tuple[bool, list[str]]:
             fail(f"an executed SQL matches forbidden /{pat}/")
     if expect.get("governed_any") and not any(e.get("governed") for e in _phases(turns, "rewrite")):
         fail("no governed rewrite")
+    # ---- semantic layer
+    if m := expect.get("metric_called"):
+        if not any(
+            e.get("metric") == m and not e.get("rejected") for e in _phases(turns, "semantic")
+        ):
+            fail(f"metric {m!r} was not compiled through call_metric")
+    if expect.get("semantic_rejected") and not any(
+        e.get("rejected") for e in _phases(turns, "semantic")
+    ):
+        fail("expected the semantic layer to refuse the call, it did not")
+    # ---- outbound sources: the audit line is the evidence, not the trace
+    if want := expect.get("source_fetched"):
+        got = [t for t in _tool_calls(turns) if t == want]
+        if not got:
+            fail(f"source tool {want!r} was not fetched (tools called: {_tool_calls(turns)})")
+    if want := expect.get("source_attempted"):
+        if want not in _tool_calls(turns):
+            fail(f"the model never attempted source tool {want!r} (tried: {_tool_calls(turns)})")
+    if expect.get("sources_listed") and not any(
+        "list_sources" in getattr(t, "listed", []) for t in turns
+    ):
+        fail("the model never listed the available sources")
+    # ---- session budget
+    if expect.get("budget_refused") and not any(e.get("budget") for e in _phases(turns, "cost")):
+        fail("expected a session-budget refusal, none happened")
     if tbl := expect.get("rls_table"):
         if not any(
             r.get("table") == tbl for e in _phases(turns, "rewrite") for r in (e.get("rls") or [])
@@ -320,10 +544,31 @@ def evaluate(expect: dict, turns: list[Turn]) -> tuple[bool, list[str]]:
         if s.lower() in answer.lower():
             fail(f"answer contains forbidden {s!r}")
     if spec := expect.get("answer_number"):
+        # legacy literal (kept for cases whose truth is a fixed constant); new
+        # cases use goldens computed at eval time
         target, tol = float(spec["value"]), float(spec.get("rel_tol", 0.01))
         nums = _numbers(answer)
         if not any(abs(v - target) <= tol * abs(target) for v in nums):
             fail(f"no number within {tol:.0%} of {target} in answer (saw {nums[:8]})")
+    # ---- runtime goldens
+    specs = _goldens_of(expect)
+    if specs and pinned and not period_is_closed(pinned):
+        notes.append(f"note: pinned_period {pinned} is not closed — goldens skipped")
+        specs = []
+    if specs and goldens is None:
+        fail("case has goldens but no golden runner is available (see --golden)")
+        specs = []
+    for g in specs:
+        try:
+            rows, how = goldens.rows(g["sql"])
+        except Exception as e:  # noqa: BLE001 — a golden that cannot run is a failure, not a pass
+            fail(f"golden [{g['judge']}] could not be computed: {str(e)[:160]}")
+            continue
+        passed, note = eval_judges.judge(g["judge"], answer, rows, float(g["rel_tol"]))
+        if passed:
+            notes.append(f"golden {g['judge']} ok ({how}): {note}")
+        else:
+            fail(f"golden [{g['judge']}] ({how}): {note}")
     if n := expect.get("max_tool_calls"):
         got = len(_sqls(turns))
         if got > n:
@@ -339,7 +584,7 @@ def evaluate(expect: dict, turns: list[Turn]) -> tuple[bool, list[str]]:
 
 
 # ------------------------------------------------------------------ report
-def summarize(case: dict, turns: list[Turn], ok: bool, notes: list[str]) -> dict:
+def summarize(case: dict, turns: list[Turn], ok: bool, notes: list[str], tag: str = "") -> dict:
     return {
         "id": case["id"],
         "category": case["category"],
@@ -349,6 +594,10 @@ def summarize(case: dict, turns: list[Turn], ok: bool, notes: list[str]) -> dict
         "tool_calls": len(_sqls(turns)),
         "engine_ms_total": round(sum(e.get("engine_ms", 0) for e in _phases(turns, "execute")), 1),
         "wall_s": round(sum(t.wall_s for t in turns), 1),
+        "input_tokens": sum(int(t.usage.get("input_tokens") or 0) for t in turns),
+        "output_tokens": sum(int(t.usage.get("output_tokens") or 0) for t in turns),
+        "model_calls": sum(int(t.usage.get("model_calls") or 0) for t in turns),
+        "tag": tag,
         "rejections": _rejections(turns)[:3],
         "sql": [q[:200] for q in _sqls(turns)],
         "answer": "\n".join(t.answer for t in turns)[:800],
@@ -360,11 +609,14 @@ def summarize(case: dict, turns: list[Turn], ok: bool, notes: list[str]) -> dict
 # AWS keys to secret scanners (and the repo is public-hygiene by policy), so
 # every string in a report row is redacted before it is written.
 _AWS_ID_RE = re.compile(r"\b(?:AROA|AKIA|ASIA|AIDA|AGPA|ANPA|ANVA|ASCA)[0-9A-Z]{16,}\b")
+# 12-digit account ids: identifiers, not secrets, but a published report should
+# not carry the deployer's account (public-hygiene rule)
+_ACCOUNT_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 
 
 def _redact(obj):
     if isinstance(obj, str):
-        return _AWS_ID_RE.sub("<aws-id-redacted>", obj)
+        return _ACCOUNT_RE.sub("<account-id>", _AWS_ID_RE.sub("<aws-id-redacted>", obj))
     if isinstance(obj, dict):
         return {k: _redact(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -372,7 +624,11 @@ def _redact(obj):
     return obj
 
 
-def write_report(rows: list[dict], mode: str, out_md: Path) -> None:
+def _mean(xs: list[float]) -> float:
+    return round(sum(xs) / len(xs), 1) if xs else 0.0
+
+
+def write_report(rows: list[dict], mode: str, out_md: Path, header_note: str = "") -> None:
     rows = _redact(rows)
     by_cat: dict[str, list[dict]] = {}
     for r in rows:
@@ -383,24 +639,35 @@ def write_report(rows: list[dict], mode: str, out_md: Path) -> None:
         "",
         f"{sum(r['passed'] for r in rows)}/{len(rows)} cases passed. "
         "Assertions run on the streamed gate → rewrite → cost → execute trace events, "
-        "not on output text.",
+        "not on output text; numeric truths are computed at eval time by "
+        "running each case's golden SQL through the same pipeline.",
+    ]
+    if header_note:
+        lines += ["", header_note]
+    lines += [
         "",
-        "| Category | Cases | Passed | Pass rate |",
-        "|---|---|---|---|",
+        "| Category | Cases | Passed | Pass rate | Mean SQL calls | Mean input tokens |",
+        "|---|---|---|---|---|---|",
     ]
     for cat, rs in sorted(by_cat.items()):
         p = sum(r["passed"] for r in rs)
-        lines.append(f"| {cat} | {len(rs)} | {p} | {p / len(rs):.0%} |")
+        lines.append(
+            f"| {cat} | {len(rs)} | {p} | {p / len(rs):.0%} | "
+            f"{_mean([r['tool_calls'] for r in rs])} | "
+            f"{_mean([r['input_tokens'] for r in rs]):,.0f} |"
+        )
     lines += [
         "",
-        "| Case | Persona | Result | SQL calls | Engine ms | Wall s | Notes |",
-        "|---|---|---|---|---|---|---|",
+        "| Case | Persona | Result | SQL calls | Engine ms | Input tokens | Model calls "
+        "| Wall s | Notes |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
-        note = "; ".join(r["notes"])[:160] if r["notes"] else ""
+        note = "; ".join(r["notes"])[:200] if r["notes"] else ""
         lines.append(
             f"| {r['id']} | {r['persona']} | {'✅' if r['passed'] else '❌'} | {r['tool_calls']} | "
-            f"{r['engine_ms_total']} | {r['wall_s']} | {note} |"
+            f"{r['engine_ms_total']} | {r['input_tokens']:,} | {r['model_calls']} | {r['wall_s']} "
+            f"| {note} |"
         )
     out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
     out_md.with_suffix(".json").write_text(
@@ -418,12 +685,37 @@ def main() -> None:
     ap.add_argument("--category", default="")
     ap.add_argument("--out", default=str(ROOT / "docs" / "eval-results.md"))
     ap.add_argument("--verbose", "-v", action="store_true")
+    ap.add_argument(
+        "--golden",
+        choices=["auto", "compute", "cache"],
+        default="auto",
+        help="auto: replay cached golden rows else compute; compute: always run the golden SQL "
+        "(needs S3 reach); cache: never compute (laptop without S3 reach)",
+    )
+    ap.add_argument("--golden-role", default="ops:admin", help="role the golden SQL runs as")
+    ap.add_argument(
+        "--no-search-schema",
+        action="store_true",
+        help="local mode: run the agent without the search_schema tool (data-map ablation)",
+    )
+    ap.add_argument(
+        "--no-call-metric",
+        action="store_true",
+        help="local mode: run the agent without the call_metric tool (semantic-layer A/B)",
+    )
+    ap.add_argument("--tag", default="", help="free label stored on every result row")
     args = ap.parse_args()
 
     personas = load_personas()
     cases = load_cases(set(filter(None, args.only.split(","))), args.category or None)
     if not cases:
         sys.exit("no cases selected")
+    drop = frozenset(
+        (["search_schema"] if args.no_search_schema else [])
+        + (["call_metric"] if args.no_call_metric else [])
+    )
+    if drop and args.mode != "local":
+        sys.exit("--no-search-schema / --no-call-metric are local-mode ablations")
     if args.mode == "cloud":
         # Pre-flight: the deployment must be named explicitly (no defaults), and a
         # login failure must abort the run, not become 35 fake FAILs that overwrite
@@ -450,6 +742,8 @@ def main() -> None:
                 _cloud_token(personas[name]["user"])
             except Exception as e:  # noqa: BLE001 — report and stop
                 sys.exit(f"pre-flight login failed for persona {name!r}: {e}")
+    goldens = GoldenRunner(args.golden, args.golden_role)
+    tag = args.tag or ("no-" + "-no-".join(sorted(drop)) if drop else "")
     rows = []
     for case in cases:
         persona = personas[case.get("persona", "admin")]
@@ -457,21 +751,56 @@ def main() -> None:
         print(
             f"▶ {case['id']} [{case['category']}] as {case.get('persona', 'admin')} …", flush=True
         )
+        needs = case.get("requires_env") or {}
+        skipped = ""
+        if needs and args.mode == "cloud":
+            missing = {k: v for k, v in needs.items() if os.environ.get(f"RUNTIME_{k}") != str(v)}
+            if missing:
+                skipped = (
+                    f"skipped in cloud mode: needs runtime env {needs} "
+                    "(deploy with those values, or run this case with --mode local)"
+                )
+        source = case.get("requires_source")
+        deployed = os.environ.get("EVAL_DEPLOYED_SOURCES")
+        if source and args.mode == "cloud" and deployed is not None:
+            prefixes = [p.strip() for p in deployed.split(",") if p.strip()]
+            if not any(source.startswith(p) for p in prefixes):
+                skipped = (
+                    f"skipped in cloud mode: needs source tool {source!r}, not in "
+                    f"EVAL_DEPLOYED_SOURCES={deployed!r} (deploy the source, or unset the variable)"
+                )
+        if skipped:
+            rows.append(summarize(case, [Turn()], True, [f"note: {skipped}"], tag))
+            print(f"   SKIP · {skipped}")
+            continue
+        saved_env = {k: os.environ.get(k) for k in needs}
         try:
+            for k, v in needs.items():
+                os.environ[k] = str(v)
+            if needs:
+                _reload_env_knobs()
             if args.mode == "local":
-                turns = run_local(prompts, persona["role"])
+                turns = run_local(prompts, persona["role"], drop)
             else:
                 turns = run_cloud(prompts, persona["user"], bool(case.get("session_break", False)))
         except Exception as e:  # noqa: BLE001 — record and continue
             turns = [Turn()]
             turns[0].text.append(f"[runner error] {e}")
-        ok, notes = evaluate(case.get("expect", {}), turns)
-        row = summarize(case, turns, ok, notes)
+        finally:
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            if needs:
+                _reload_env_knobs()
+        ok, notes = evaluate(case.get("expect", {}), turns, goldens, case.get("pinned_period"))
+        row = summarize(case, turns, ok, notes, tag)
         rows.append(row)
         verdict = "PASS" if ok else "FAIL"
         print(
             f"   {verdict} · {row['tool_calls']} SQL · {row['engine_ms_total']} ms engine"
-            f" · {row['wall_s']} s"
+            f" · {row['input_tokens']:,} in-tokens · {row['model_calls']} calls · {row['wall_s']} s"
         )
         for n in notes:
             print("   ", n)
@@ -480,7 +809,12 @@ def main() -> None:
                 for e in t.trace:
                     print("     ", json.dumps(e)[:200])
             print("     answer:", row["answer"][:400].replace("\n", " "))
-    write_report(rows, args.mode, Path(args.out))
+    goldens.save()
+    note = (
+        f"Goldens: {goldens.computed} computed at eval time, {goldens.replayed} replayed from "
+        f"cache (role `{goldens.role}`)." + (f" Tag: `{tag}`." if tag else "")
+    )
+    write_report(rows, args.mode, Path(args.out), note)
     passed = sum(r["passed"] for r in rows)
     print(f"\n{passed}/{len(rows)} passed → {args.out}")
     sys.exit(0 if passed == len(rows) else 1)

@@ -68,3 +68,54 @@ def test_legs_doc_section_names_only_active_legs():
     assert "`s3t` — S3 Tables" in doc and "`glue` — same Iceberg tables" in doc
     assert "DuckLake" not in doc
     assert "| `s3t.*` |" in doc and "| `dl.*` |" not in doc
+
+
+class _Recorder:
+    """A connection stand-in that records every statement (no engine)."""
+
+    def __init__(self) -> None:
+        self.sql: list[str] = []
+
+    def execute(self, sql, *a, **k):
+        self.sql.append(sql)
+        return self
+
+    def fetchall(self):
+        return []
+
+
+def test_cold_start_loads_extensions_but_never_installs(monkeypatch):
+    """The image ships the extensions; the runtime only LOADs. An
+    INSTALL at cold start would be a download from the extension repository
+    on every microVM (threat T10/T012)."""
+    from data_agent.compute import engine
+
+    rec = _Recorder()
+    monkeypatch.setattr(engine, "EXTENSION_DIR", "/opt/duckdb-extensions")
+    engine._configure(rec)
+    monkeypatch.setattr(legs, "S3_TABLES_ARN", "arn:aws:s3tables:us-west-2:1:bucket/b")
+    monkeypatch.setattr(legs, "GLUE_CATALOG", "1:s3tablescatalog/b")
+    monkeypatch.setattr(legs, "DUCKLAKE_CATALOG", "s3://b/catalog/x.ducklake")
+    legs.attach(rec)
+    datamap.ensure_index(rec, __import__("threading").Lock())
+    statements = [s.strip().lower() for s in rec.sql]
+    assert not [s for s in statements if s.startswith("install")], statements
+    loads = [s for s in statements if s.startswith("load ")]
+    assert {"load httpfs", "load aws", "load iceberg", "load ducklake", "load fts"} <= set(loads)
+    assert "set extension_directory='/opt/duckdb-extensions'" in statements
+    assert "set autoinstall_known_extensions=false" in statements
+
+
+def test_missing_extension_fails_with_the_fix_not_a_download():
+    import duckdb as _duckdb
+
+    from data_agent.compute import engine
+
+    class Boom(_Recorder):
+        def execute(self, sql, *a, **k):
+            if sql.startswith("LOAD"):
+                raise _duckdb.IOException("Extension not found")
+            return super().execute(sql)
+
+    with __import__("pytest").raises(RuntimeError, match="install_extensions.py"):
+        engine.load_extension(Boom(), "iceberg")

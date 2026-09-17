@@ -16,17 +16,20 @@ import uuid
 
 import boto3
 
-ARN = os.environ["AGENT_RUNTIME_ARN"]  # from `agentcore launch`
+ARN = os.environ.get("AGENT_RUNTIME_ARN", "")  # required: from `agentcore launch`
+REGION = os.environ.get("AGENT_REGION", "us-west-2")
 
 
 def main() -> None:
+    if not ARN:
+        sys.exit("set AGENT_RUNTIME_ARN from your deployment (agentcore status prints it)")
     prompt = sys.argv[1] if len(sys.argv) > 1 else "Summarize the incident under investigation."
     identity = json.loads(sys.argv[2]) if len(sys.argv) > 2 else None
     payload = {"prompt": prompt}
     if identity:
         payload["identity"] = identity
 
-    client = boto3.client("bedrock-agentcore", region_name="us-west-2")
+    client = boto3.client("bedrock-agentcore", region_name=REGION)
     resp = client.invoke_agent_runtime(
         agentRuntimeArn=ARN,
         runtimeSessionId=uuid.uuid4().hex + uuid.uuid4().hex,  # >= 33 chars

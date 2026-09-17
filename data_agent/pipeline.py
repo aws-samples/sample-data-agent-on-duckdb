@@ -1,4 +1,4 @@
-"""One statement through the layers: gate → govern → cost → execute → shape.
+"""One statement through the layers: gate → semantic → govern → cost → execute → shape.
 
 The pipeline is an ordered list of stages with one interface. A stage reads
 and updates the `Statement`, yields its trace event(s) — the live
@@ -47,14 +47,15 @@ class Statement:
     final_sql: str = ""
     cost: dict | None = None
     result: dict | None = None
+    metric: dict | None = None  # {"name", "version", "owner", "table"} when compiled by call_metric
 
 
 class Rejected(Exception):
     """A stage refused the statement (or the engine failed it).
 
     `reason` is what the audit line records, `text` the string the model
-    reads, `audit_stage` the audit vocabulary (gate | governance | cost |
-    engine), `outcome` rejected | error.
+    reads, `audit_stage` the audit vocabulary (gate | handle | semantic |
+    governance | cost | engine), `outcome` rejected | error.
     """
 
     def __init__(
@@ -86,8 +87,37 @@ class Gate:
         if err:
             yield {"phase": "gate", "allowed": False, "sql": st.sql[:400]}
             raise Rejected(err, audit_stage="gate", text=err)
+        # A `_r_<n>` named here must be a handle THIS session holds
+        # (minted under this owner, not dropped) — refused before the engine
+        bad = results.STORE.check_refs(st.sql)
+        if bad:
+            yield {"phase": "gate", "allowed": False, "sql": st.sql[:400], "handle": bad}
+            raise Rejected(bad, audit_stage="handle", text=f"ERROR: {bad}")
         st.query_shaped = gate.query_shaped(st.sql)
         yield {"phase": "gate", "allowed": True, "sql": st.sql[:400]}
+
+
+class Semantic:
+    """The semantic layer's place in the pipeline. Ordinary SQL passes
+    through untouched. A statement compiled by `call_metric` carries its metric
+    and gets one trace event naming the reviewed definition it came from —
+    the evidence that the number has a registered cost basis. Governance and
+    the cost gate run AFTER this stage on the compiled SQL, so a metric adds
+    no privilege: a denied column or an unlisted table is refused there."""
+
+    phase = "semantic"
+
+    def run(self, st: Statement) -> Iterator[dict]:
+        if st.metric is None:
+            return
+        yield {
+            "phase": "semantic",
+            "metric": st.metric["name"],
+            "version": st.metric["version"],
+            "owner": st.metric["owner"],
+            "table": st.metric["table"],
+            "compiled_sql": st.sql[:600],
+        }
 
 
 class Govern:
@@ -127,7 +157,13 @@ class Cost:
 
     def run(self, st: Statement) -> Iterator[dict]:
         try:
+            # The session's budget is checked before the statement's cost —
+            # a spent session refuses everything, cheap statements included.
+            cost.check_budget(audit.session_counters())
             st.final_sql, st.cost = cost.apply(st.governed_sql)
+        except cost.BudgetExceeded as e:
+            yield {"phase": "cost", "rejected": True, "budget": True, "reason": str(e)}
+            raise Rejected(str(e), audit_stage="budget") from e
         except cost.CostRejected as e:
             yield {"phase": "cost", "rejected": True, "reason": str(e)}
             raise Rejected(str(e), audit_stage="cost") from e
@@ -154,8 +190,20 @@ class Execute:
                 engine.get_conn(), st.final_sql, st.query_shaped, engine.conn_lock
             )
         except Exception as e:  # noqa: BLE001 — surface engine errors for self-repair
-            yield {"phase": "execute", "error": str(e)}
-            raise Rejected(str(e), audit_stage="engine", outcome="error") from e
+            # Invariant 5: the engine's message goes back verbatim; a hint step appends
+            # one zero-network hint AFTER it (which visible table has that
+            # column), never replacing or trimming the original.
+            text = str(e)
+            hint = engine.similar_names(
+                text, governance.visible_tables(), governance.denied_columns()
+            )
+            yield {"phase": "execute", "error": text, **({"hint": hint} if hint else {})}
+            raise Rejected(
+                text,
+                audit_stage="engine",
+                outcome="error",
+                text=f"ERROR: {text}" + (f"\n{hint}" if hint else ""),
+            ) from e
         yield {
             "phase": "execute",
             "engine": "in-process duckdb",
@@ -167,7 +215,7 @@ class Execute:
         }
 
 
-STAGES: list[Stage] = [Gate(), Govern(), Cost(), Execute()]
+STAGES: list[Stage] = [Gate(), Semantic(), Govern(), Cost(), Execute()]
 
 
 def _audit(st: Statement, *, outcome: str, stage: str | None = None, reason: str | None = None):
@@ -186,17 +234,21 @@ def _audit(st: Statement, *, outcome: str, stage: str | None = None, reason: str
         rows=res.get("total_rows"),
         engine_ms=res.get("engine_ms"),
         materialized=res.get("ref"),
+        metric=f"{st.metric['name']}@{st.metric['version']}" if st.metric else None,
+        owner=results.STORE.owner_id,
+        user_sub=results.STORE.owner_id,  # The user chain, same digest
     )
 
 
-def run(sql: str) -> Iterator[dict | str]:
+def run(sql: str, metric: dict | None = None) -> Iterator[dict | str]:
     """Drive one statement through STAGES.
 
     Yields each stage's trace events (dicts with a "phase" key) and then
     exactly one string — the result the model reads. Every statement is
-    audited once, whatever the outcome.
+    audited once, whatever the outcome. `metric` is set by `call_metric` for
+    a statement the semantic layer compiled (audited as `<name>@<version>`).
     """
-    st = Statement(sql=sql, principal=governance.active_role())
+    st = Statement(sql=sql, principal=governance.active_role(), metric=metric)
     try:
         for stage in STAGES:
             yield from stage.run(st)

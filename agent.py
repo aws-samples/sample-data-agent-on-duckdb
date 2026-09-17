@@ -7,8 +7,10 @@ governance, context, compute, scheduling; see its docstring); this file only
 wires them: the Strands agent with its tools and conversation manager, the
 AgentCore app, and the two ways in.
 
-Runs in two modes:
+Runs in three modes:
   - AgentCore Runtime entrypoint (default): `app.run()` serves /invocations
+  - MCP server (`AGENT_SURFACE=mcp`, the MCP-protocol runtime): the same three
+    read-only tools over the Model Context Protocol (`scheduling/mcp.py`)
   - Local CLI: `python agent.py --as <tenant>:<role> "your question"`
 """
 
@@ -20,7 +22,7 @@ from strands import Agent
 
 from data_agent.context import compression, prompt
 from data_agent.scheduling import cli, runtime
-from data_agent.tools import run_sql, search_schema
+from data_agent.tools import call_metric, fetch_source, list_sources, run_sql, search_schema
 
 MODEL_ID = os.environ.get("MODEL_ID", "global.anthropic.claude-sonnet-4-6")
 
@@ -29,7 +31,7 @@ MODEL_ID = os.environ.get("MODEL_ID", "global.anthropic.claude-sonnet-4-6")
 conversation_manager = compression.ResultStubConversationManager()
 agent = Agent(
     model=MODEL_ID,
-    tools=[run_sql, search_schema],
+    tools=[run_sql, search_schema, call_metric, list_sources, fetch_source],
     system_prompt=prompt.SYSTEM_PROMPT,
     conversation_manager=conversation_manager,
 )
@@ -47,5 +49,9 @@ async def invoke(payload, context=None):
 if __name__ == "__main__":
     if len(sys.argv) > 1:  # local one-shot: agent.py --as ops:admin "question"
         cli.main(sys.argv[1:], agent)
+    elif os.environ.get("AGENT_SURFACE") == "mcp":
+        from data_agent.scheduling import mcp as mcp_surface
+
+        mcp_surface.main()  # MCP-protocol runtime: streamable HTTP on /mcp
     else:
         app.run()

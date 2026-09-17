@@ -12,8 +12,14 @@ def _phases(items):
 
 
 def test_stages_are_ordered_gate_govern_cost_execute():
-    assert [type(s).__name__ for s in pipeline.STAGES] == ["Gate", "Govern", "Cost", "Execute"]
-    assert [s.phase for s in pipeline.STAGES] == ["gate", "rewrite", "cost", "execute"]
+    assert [type(s).__name__ for s in pipeline.STAGES] == [
+        "Gate",
+        "Semantic",
+        "Govern",
+        "Cost",
+        "Execute",
+    ]
+    assert [s.phase for s in pipeline.STAGES] == ["gate", "semantic", "rewrite", "cost", "execute"]
 
 
 def test_run_yields_trace_events_then_exactly_one_result_string(local_conn):
@@ -52,6 +58,8 @@ def test_engine_errors_are_audited_as_errors_and_returned_verbatim(local_conn):
         "materialized": 0,
         "engine_ms": 0.0,
         "rows": 0,
+        "expanded_paths": 0,
+        "input_tokens": 0,
         "compressed": 0,
     }
 

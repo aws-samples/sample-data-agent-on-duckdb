@@ -1,4 +1,6 @@
-# accuracy — known numbers of the incident window (spec V5-1, verified on EC2).
+# accuracy — the incident window's numbers are computed at eval time by running each
+# case's golden SQL through the pipeline as ops:admin, never copied in by hand.
+# Reference values from the 2026-09-05 run: 401,346.77 ETH · 40 · 8 · 2.
 - id: acc-largest-inbound-call
   persona: investigator
   prompt: >
@@ -7,7 +9,10 @@
     (ETH amount + tx hash).
   max_tool_calls: 6
   expect:
-    answer_number: {value: 401346.77, rel_tol: 0.001}
+    golden_sql: >
+      SELECT round(max(value) / 1e18, 2) FROM s3t.blockchain.eth_traces
+      WHERE to_address = '0x47666fab8bd0ac7003bce3f5c3585383f09486e2'
+    rel_tol: 0.001
 
 - id: acc-fanout-count
   persona: investigator
@@ -17,7 +22,10 @@
     exactly 10,000 ETH, and how many distinct recipients received them?
   max_tool_calls: 6
   expect:
-    answer_number: {value: 40, rel_tol: 0.0}
+    golden_sql: >
+      SELECT count(*) FROM s3t.blockchain.eth_traces
+      WHERE from_address = '0x47666fab8bd0ac7003bce3f5c3585383f09486e2' AND value = 10000e18
+    rel_tol: 0.0
 
 - id: acc-ofac-exposure
   persona: investigator
@@ -27,7 +35,11 @@
     (ofac_addresses, join on lower(address))? Just the count.
   max_tool_calls: 6
   expect:
-    answer_number: {value: 8, rel_tol: 0.0}
+    golden_sql: >
+      SELECT count(*) FROM s3t.blockchain.eth_traces t
+      WHERE lower(t.from_address) IN (SELECT lower(address) FROM ofac_addresses)
+         OR lower(t.to_address) IN (SELECT lower(address) FROM ofac_addresses)
+    rel_tol: 0.0
 
 - id: acc-cashout-hits
   persona: investigator
@@ -37,5 +49,42 @@
     cex_deposit_labels? How many hits?
   max_tool_calls: 8
   expect:
-    answer_number: {value: 2, rel_tol: 0.0}
+    # the persona's RLS scope (exchange-a) is written into the admin golden explicitly
+    golden_sql: >
+      SELECT count(DISTINCT t.to_address) FROM s3t.blockchain.eth_traces t
+      JOIN cex_deposit_labels l ON lower(l.address) = lower(t.to_address)
+      WHERE t.from_address = '0x47666fab8bd0ac7003bce3f5c3585383f09486e2' AND l.exchange = 'exchange-a'
+    rel_tol: 0.0
     rls_table: cex_deposit_labels
+
+# --- A wrong column name must be repaired in ONE extra run_sql, using the
+# hint appended after the engine's verbatim error (which visible table has it).
+- id: acc-typo-recovery-column-on-another-table
+  category: accuracy
+  persona: secops
+  prompt: >
+    Run exactly this query first, without changing it:
+    SELECT count(*) FROM cloudtrail_events WHERE date = '2026-09-02' AND line_item_product_code = 'AmazonEC2'
+    If the engine rejects it, read the error, fix the query in the smallest way that
+    answers "how many CloudTrail events were there on 2026-09-02", and give the number.
+  max_tool_calls: 3
+  expect:
+    partition_filter_all: true
+    golden_sql: SELECT count(*) FROM cloudtrail_events WHERE date = '2026-09-02'
+    rel_tol: 0.001
+
+- id: acc-typo-recovery-misspelled-column
+  category: accuracy
+  persona: finops
+  prompt: >
+    Run exactly this query first, without changing it:
+    SELECT sum(line_item_unblendd_cost) FROM cur_line_items WHERE billing_period = '2026-08'
+    If the engine rejects it, read the error, fix the spelling and give me the total.
+  max_tool_calls: 3
+  pinned_period: "2026-08"
+  expect:
+    partition_filter_all: true
+    golden_sql: >
+      SELECT round(sum(line_item_unblended_cost), 2) FROM cur_line_items
+      WHERE billing_period = '2026-08'
+    rel_tol: 0.02

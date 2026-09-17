@@ -38,7 +38,8 @@
   expect:
     no_rejections: true
     sql_regex_any: 'dl\.blockchain\.eth_traces'
-    answer_number: {value: 3492205, rel_tol: 0.001}
+    golden_sql: SELECT count(*) FROM dl.blockchain.eth_traces
+    rel_tol: 0.001
 
 - id: cost-investigator-rls-composes
   persona: investigator

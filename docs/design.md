@@ -3,15 +3,16 @@
 Design rationale and invariants behind the sample. The README covers what it
 does and how to run it; this document covers why it is built this way.
 
-## Architecture — five layers
+## Architecture — five layers and a semantic stage
 
 A traditional database owns everything: storage, catalog, permissions,
 scheduling and execution. This solution keeps only execution in-process and
 externalizes the rest, then adds the one layer an *agent* needs that a
 database does not: a context layer between the model and the engine. Each
 layer has one responsibility and one place to live, listed in the order a
-request flows through them. The layering is additive — a semantic layer is
-the likely next one. Governance and Context are deliberately separate:
+request flows through them. The layering is additive — the semantic layer
+was added as one pipeline stage without touching the others. Governance and
+Context are deliberately separate:
 Governance is authorization and nothing else; Context is what the model sees
 and what the engine is asked to do. Storage is the durable data on S3 and
 nothing else — session working sets and `_r_<n>` result tables are engine
@@ -19,32 +20,28 @@ temp tables and belong to Compute.
 
 | Layer | Lives in | Responsibility | Mechanism |
 |---|---|---|---|
-| Scheduling | AgentCore Runtime; `data_agent/scheduling/` is what it calls into | session and resource management | one session = one microVM = one engine; claims in, streamed envelopes out |
+| Scheduling | AgentCore Runtime; `data_agent/scheduling/` is what it calls into (HTTP entrypoint, MCP surface, outbound Gateway client) | session and resource management | one session = one microVM = one engine; verified claims in, streamed envelopes out; the same pipeline behind the HTTP and the MCP protocol |
+| Semantic | `data_agent/semantic/` (model · registry · compile) | stable KPIs as reviewed definitions | registered metrics compiled deterministically to one governed SELECT (`call_metric`); an unregistered metric, dimension or filter column is refused, never improvised |
 | Context | `data_agent/context/` (datamap · cost · results · compression · prompt) | what the model sees, what the engine is asked | data map from the engine catalog; partition-filter cost gate + path expansion; shape not truncate; measured-pressure history stubs |
 | Governance | `data_agent/governance/` (policies · hardening · rewrite, sqlglot) | authorization | RLS/CLS rewrite before the engine, from verified JWT claims; fail closed; total by construction; universal hardening |
 | Compute | in-process DuckDB (`data_agent/compute/`) | SQL execution | engine inside the agent process, S3 read in place; working sets and `_r_<n>` results kept as session temp tables |
 | Storage | Amazon S3 (`data_agent/storage/`: legs + scenarios) | durable data | Parquet / native exports, Iceberg (S3 Tables, Glue), DuckLake — four access paths to the same data |
 
 ```
-User ──▶ Streamlit chat UI ── Cognito login → ID token (JWT)
-              │  raw HTTPS POST /invocations + Bearer token + session id
-              ▼
-        AgentCore Runtime (1 session = 1 microVM = 1 DuckDB)
-          ├─ AuthN: managed inbound JWT authorizer — signature + audience
-          │         validated BEFORE agent code runs
-          ├─ Strands Agent + Bedrock Claude (writes SQL, reads shaped results)
-          │    └─ streaming: typed SSE envelope, per-SQL gate→govern→cost→execute
-          ├─ Context layer      — data map · cost gate · result shaping · history stubs
-          ├─ Governance layer   — verified claims → role policy,
-          │                       sqlglot RLS/CLS rewrite + hardening BEFORE the engine
-          └─ DuckDB in-process (httpfs/iceberg/ducklake/fts extensions)
-               ├─ Path A: raw Parquet / native exports — S3 path glob → explicit partitions
-               ├─ Path B: S3 Tables     — native Iceberg REST catalog
-               ├─ Path C: Glue catalog  — same table, federated endpoint
-               ├─ Path D: DuckLake      — SQL-database catalog, Parquet on S3
-               ├─ label tables — OFAC list (real, public) + synthetic exchange labels
-               └─ _r_<n> result tables · session working sets (temp, die with the session)
-Aux: IAM execution role (least privilege) · CloudWatch Logs (EMF audit metrics)
+UI / CLI ──▶ AgentCore Runtime (HTTP, 1 session = 1 microVM)  ┐ same image, same pipeline
+Coding agent (MCP client) ──▶ AgentCore Runtime (MCP protocol) ┘ identity = verified JWT
+           ├── AuthN: managed inbound JWT authorizer — signature + audience validated
+           │          BEFORE agent code runs (Cognito ID token, allowedAudience)
+           ├── Strands Agent + Bedrock Claude   (writes SQL / calls metrics, reads shaped results)
+           ├── Semantic layer                   (registered metrics → compiled SQL)
+           ├── Context layer                    (table cards · table map · cost gate · shaping · handles)
+           ├── Governance layer                 (RLS/CLS rewrite · table-level deny · hardening)
+           └── DuckDB in-process (baked ext.)   (executes governed, cost-gated SQL)
+                  ├──▶ S3: raw Parquet/exports · S3 Tables · Glue · DuckLake
+                  │       + label tables — OFAC list (real, public) + synthetic exchange labels
+                  └──◀ _r_<n> handles: query results AND rows fetched through
+                        AgentCore Gateway (an HTTP API, a warehouse) with the caller's token
+Aux: IAM execution role (scoped read) · CloudWatch Logs (EMF audit: agent, user, tokens) · dashboard
 ```
 
 The layering follows one principle: **externalize everything except compute,
@@ -98,12 +95,41 @@ is asked.
    A mechanism that would work identically with a remote query service (a
    cheap side-model for summaries, a REST adapter layer, generic prompt
    compression) does not belong in this solution.
+   *Clarification (how the semantic layer was admitted):* a mechanism that
+   compiles user intent into SQL and hands that SQL to this pipeline satisfies
+   the invariant when its reconciliation runs against the in-process catalog
+   with zero network calls, its output passes the Govern and Cost stages, and
+   its results stay in the session working set. A mechanism that runs outside
+   the pipeline and neither consumes nor produces the session working set
+   (cross-session memory, scheduled triggers, export) does not.
 9. **Shape, never truncate.** No tool result is silently cut. A result the
    model should not read whole is stored in full and shown in a different
    shape — a schema summary with a retrieval path — never as "the first N
    rows", which reads as complete and misleads the model.
 
-## Authentication (real, not asserted)
+## Identity model — one contract, two inbound paths, outbound through Gateway
+
+All paths converge on `resolve_claims` → `{tenant, role, sub}`. Authentication
+is always outside the agent (the Runtime authorizer or the Gateway authorizer);
+the agent only authorizes (invariants 6 and 7).
+
+| Path | Mechanism |
+|---|---|
+| Inbound 1 — UI / CLI → AgentCore Runtime | Cognito ID token → `customJWTAuthorizer` (`allowedAudience`) → verified claims. The Runtime drops custom headers by default, so `Authorization` must be on the `requestHeaderAllowlist` for the agent to read the token it forwards outbound. |
+| Inbound 2 — coding agent / MCP client → AgentCore Runtime (MCP protocol) | The same tools over MCP on a second runtime (same image, `serverProtocol: MCP`) behind the same authorizer. Identity is the verified token and nothing else: no user-id header convention, no payload identity object. Cognito offers no Dynamic Client Registration and the authorizer needs an ID token, so a client is pre-registered and carries a static bearer header (`scripts/claude_code_mcp.sh`, `scripts/mcp_stdio_proxy.py`). |
+| Outbound — a non-lake source via AgentCore Gateway | The agent forwards the caller's own token; the Gateway validates it per request and reaches the source with its own IAM role. A source that can only be reached with a service identity returns what that identity sees, and the rows are marked `degraded` in the audit line and on the handle. |
+
+Why the MCP surface lives on the Runtime and not behind a Gateway: measured
+against the live control plane, an MCP-protocol Gateway cannot pass the
+caller's JWT through to a Runtime target (`JWT_PASSTHROUGH` is refused for
+every MCP target type, and an `agentcoreRuntime` HTTP target is refused on an
+MCP gateway), so the Gateway hop would replace the user's identity with the
+gateway's IAM identity. Re-test this if the platform gains JWT passthrough for
+runtime targets. Any code in the microVM can read the execution role's
+credentials through the metadata endpoint, so source credentials live in the
+Gateway's credential provider, never in the agent process.
+
+### Authentication on the HTTP path (real, not asserted)
 
 The runtime is deployed with AgentCore's **managed inbound JWT authorizer**
 pointed at a Cognito user pool (CDK-provisioned): token signature and
@@ -145,7 +171,9 @@ Implementation notes that save the next person a day:
   materialized results and conversation. The entrypoint now records the
   session owner (the IdP `sub`, else the resolved `tenant:role`) on first
   use and, when a later invocation resolves a different owner, resets all of
-  that state and writes one audit line before running anything.
+  that state and writes one audit line before running anything. The MCP
+  surface binds the identity on every tool call and performs the same reset
+  when the owner changes on a reused connection.
 
 ## Why the governance layer is a SQL rewrite
 
@@ -251,7 +279,7 @@ regression surface for any new governed table.
 A good engine wired into a careless agent loop truncates results, bloats
 context and re-scans S3. The context layer is where the in-process engine's
 advantages are either realized or thrown away, so it is a layer of its own.
-Its four mechanisms answer failure modes measured in production data agents:
+Its mechanisms answer failure modes measured in production data agents:
 results truncated to "3 rows (+276 more)" that the model read as complete; a
 long investigation losing its key result to position-based history
 compression; a catalog of hundreds of databases that cannot live in a
@@ -295,6 +323,20 @@ dispatch that is one statement because the engine is in-process.
   reference tracking from the tables the governed AST names.
 - Trace: the `execute` phase gains `shape: rows|summary`, `materialized`,
   `total_rows`, `evicted`.
+
+**Working-set handles.** `_r_<n>` is not merely a table name the model
+happens to know; it is a server-minted handle bound to the session owner.
+The result store is bound to the principal at session start, records
+`{owner, created_at, rows}` per handle, and the owner appears everywhere as a
+12-hex digest of the owner key (never the raw IdP `sub`). The gate refuses a
+statement that names a handle this session does not hold — unknown or
+LRU-dropped ("re-run the query that produced it") or minted under another
+owner ("belongs to a different principal's session") — audited at stage
+`handle`, before governance runs. The summary shape carries the owner digest,
+the creation time and the lifetime rule, which is the vocabulary a coding
+agent on the MCP surface needs. Rows fetched through the Gateway land through
+the same path (`materialize_rows`): sanitized bare identifiers, every value a
+bound parameter, one owner-bound handle the model then JOINs like any table.
 
 Measured in the cloud: a 1,322-row Iceberg query materialized `_r_1` in about
 2.5 s; the model then read it back seven times (paging, `COUNT(DISTINCT)`,
@@ -346,6 +388,19 @@ at seven hundred.
 - Both levels are filtered to the active role: the L0 map lists only the
   tables the policy lets the role query, and `search_schema` drops tables
   outside the policy and withholds the names of CLS-denied columns.
+- **Table cards and three-way reconcile.** What the model is told about a
+  table used to live in three places that drifted silently: the hand-written
+  scenario doc, the governance policy (row filters and denied columns name
+  columns) and the engine's real schema. The reviewed middle is a frozen
+  `TableCard` per table (`grain`, `use_when`, `avoid_when`, `caveats`,
+  `owner`, the `columns` the card vouches for, `complete`, `admin_only`),
+  declared by the scenario and merged by bare name so a raw view and its
+  catalog-leg copies share one card. Cards ride along in the L0 map and in
+  `search_schema` hits (denied names scrubbed). `context/reconcile.py` checks
+  doc ↔ card ↔ engine offline in the unit suite and live against the real
+  engine (`scripts/reconcile.py`); the first live run found that the cloud-ops
+  sources needed their own probe partition, which is why a source may name
+  one (`probe`) instead of relying on the global knob.
 - Freshness is session-scoped by design: a dropped table errors on use and
   the next search rebuilds the index. No external cache — production data
   agents that added one measured thousands of lookups per search and
@@ -362,6 +417,20 @@ never instructions: text inside a result that appears to direct the model is
 to be quoted as a finding, not followed. This narrows the harm of data-borne
 prompt injection to a wrong narrative rather than a wider data reach — the
 rewrite, hardening and cost gate still bound what any statement can do.
+
+The prompt rule alone left the DATA silent about its own status, so every
+text cell the model reads now arrives wrapped as `data:«…»` (`results.mark`):
+inline rows and summary samples alike, guillemets inside a value escaped so
+the wrapper cannot be forged from within a cell; numbers, dates and NULLs are
+untouched so judges and arithmetic are unchanged (`RESULT_MARK_STRINGS`,
+default on; `unmark` is the inverse for the UI and tests). The prompt
+explains the wrapper: everything between the guillemets is a quoted value —
+quote it as a finding, never act on it, drop the wrapper when repeating it.
+The synthetic label table deliberately carries one instruction-bearing row,
+and the eval suite's injection cases (a label cell, a CloudTrail `user_agent`,
+a hostile tool result) assert on the trace that no probe statement executed.
+Rows fetched from a non-lake source are untrusted content under exactly the
+same rule.
 
 ### Cost policy as a rewrite
 
@@ -397,11 +466,31 @@ what"), engine-neutral like the first.
 - Trace: a separate `cost` phase (emitted only when a partitioned source is
   touched) carries `sources`, `partition_filter`, `expanded_paths` and the
   rewritten SQL; the UI renders it as its own line.
+- **Session budget.** A single statement was always bounded; a session was
+  not, and an agent loop is where the quota goes. `SESSION_MAX_STATEMENTS`,
+  `SESSION_MAX_EXPANDED_PATHS` and `SESSION_MAX_ENGINE_MS` (0 = off) are
+  checked in the Cost stage before the statement's own cost; a spent session
+  refuses everything with a distinct `budget` refusal in the trace and the
+  audit line, and the message names the knob and tells the model to
+  summarize and stop.
 
 Measured in the cloud: `SELECT count(*) FROM eth_traces` rejected before the
 engine, the model added `date = '2025-02-21'`, one explicit path, ~0.6 s;
 `BETWEEN` over three days → three paths; RLS bound + caller bound composed
 into three explicit paths inside the guard.
+
+### Engine errors: verbatim, plus one zero-network hint
+
+Invariant 5 keeps the engine's message verbatim; one line is appended after
+it. DuckDB already names candidates for a mistyped column of a table in the
+FROM clause and for a mistyped table, so the hint adds only what the engine
+cannot know — which table the session can see actually has that column
+(`compute.engine.similar_names` over `duckdb_columns()`, zero network). It is
+filtered by `visible_tables()` and `denied_columns()`, so a restricted role
+never learns of a table outside its policy or of a CLS-denied column name;
+the audit line keeps the engine's reason only. Near-miss matching is a ratio
+plus a length-guarded containment rule (a bare `t` inside every identifier
+made every table a "closest match" in the first version).
 
 ### Knobs
 
@@ -425,13 +514,78 @@ and are mirrored in `.env.example`.
 | `AUDIT_LOG` / `AUDIT_METRIC_NAMESPACE` | 1 / `DataAgentOnDuckDB` | EMF audit lines on stdout → CloudWatch metrics |
 | `OPS_PREFIX`, `OPS_CUR_SRC`, `OPS_CLOUDTRAIL_SRC`, `OPS_ACCOUNT_ID` | unset | cloud-ops scenario mounts and the account the RLS predicates pin to |
 | `DUCKDB_MEMORY_LIMIT` | 2GB | engine envelope |
+| `SESSION_MAX_STATEMENTS`, `SESSION_MAX_EXPANDED_PATHS`, `SESSION_MAX_ENGINE_MS` | 0 (off) | session budget, enforced in the Cost stage as a distinct `budget` refusal |
+| `RESULT_MARK_STRINGS` | 1 | wrap text cells the model reads as `data:«…»` |
+| `DATAMAP_PROBE_REMOTE` | 1 | 0 skips the bounded remote DESCRIBE of raw sources (offline runs) |
+| `OPS_PROBE_MONTH`, `OPS_PROBE_DAY` | 2026-08, 2026-09-02 | the partitions the data map probes for the cloud-ops sources (must exist in your exports) |
+| `DUCKDB_EXTENSION_DIR` | unset | where the image baked the extensions; the engine only LOADs from it |
+| `GATEWAY_MCP_URL`, `GATEWAY_TIMEOUT_S`, `GATEWAY_MAX_TOOL_ROWS`, `GATEWAY_DEGRADED_TOOLS` | unset / 60 / 10000 / `labels-api` | outbound sources; unset URL = no `list_sources` / `fetch_source` tools |
+
+## Semantic layer v0: registered metrics compiled to SQL
+
+Free-form SQL from the model is fine for investigation and wrong for a KPI
+that a reviewer signed off: "month-over-month cost delta" must mean the same
+thing on every call. The semantic layer is the first layer added since the
+context layer, admitted under invariant 8's clarification.
+
+- **Registry** (`semantic/model.py`, `registry.py`): a `Metric` is operator
+  configuration delivered by the scenario (`Scenario.metrics`) — name,
+  version, owner, description, table, `measure_sql`, `time_column`, grain
+  (month | day), `dimensions` (name → SQL expression), allowed `filters`,
+  `fixed_filters`, kind (`aggregate` | `period_delta`). Validated at import
+  like the policies: bare identifiers, a single-expression measure with no
+  subquery, WHERE-shaped fixed filters, defaults ⊆ dimensions. Every column a
+  metric uses must exist on its table's card (the reconcile test).
+- **Compiler** (`semantic/compile.py`) is deterministic and an allowlist on
+  every axis: dimensions and filter columns are looked up, never interpolated;
+  values are bound literals; the time window must be grain-shaped; the output
+  is ONE SELECT. The parameters come from the model and therefore from the
+  user or from data the user read — an authorization-adjacent surface, so a
+  refusal names the accepted shapes rather than guessing.
+- **Pipeline** (`pipeline.Semantic`): `call_metric(metric, dims, time_window,
+  filters, limit)` compiles, then the compiled SQL goes through Govern, Cost
+  and Execute exactly like a hand-written statement, so RLS/CLS, the
+  partition gate and result shaping all apply. Ordinary `run_sql` passes the
+  stage untouched. The audit line records `metric@version`.
+- **Catalog in the prompt**: the metrics the active role may call ride along
+  with the L0 table map, filtered the same way, so the model never sees a KPI
+  the rewrite would refuse.
+
+## Outbound sources through AgentCore Gateway
+
+A lake is not the whole estate. Sources that are not on S3 (an HTTP labels /
+sanctions API, a warehouse) are reachable as read-only tools with the caller's
+identity, and their rows land in the session working set — nothing is
+ATTACHed into the engine and the agent process holds no source credential.
+
+- **Path**: model → `list_sources` / `fetch_source(tool, args)` →
+  `scheduling/gateway_client.py` (MCP over streamable HTTP, `Authorization` =
+  the caller's own token, the one this process already decoded for claims) →
+  AgentCore Gateway (validates the JWT per request, holds the outbound
+  credential) → the source. Rows → `materialize_rows` → an owner-bound,
+  `data:«…»`-marked `_r_<n>` handle → ordinary SQL JOINs them with the lake
+  tables in-process. The governance matrix's `tool` path proves the JOIN keeps
+  the lake table's rewrite and that another principal's handle is refused.
+- **Why fixed, parameterized Lambda targets and not a free-SQL warehouse
+  tool**: repository-side governance does not extend into the repository. A
+  warehouse tool that accepts arbitrary SQL would be a bypass around the
+  rewrite layer; a parameterized read-only target keeps the query surface
+  reviewable (`infra/lambda/labels_api.py`, `infra/lambda/redshift_source.py`;
+  the warehouse is optional to deploy — `-c withSources=true` — and the eval
+  skips a source case the deployment does not expose, `EVAL_DEPLOYED_SOURCES`).
+- **Degraded identity is labelled, not hidden**: a source reached with a
+  service identity returns what that identity sees; such rows carry
+  `degraded` on the handle and in the audit line (`GATEWAY_DEGRADED_TOOLS`).
+- Tool results are untrusted content exactly like table rows (marked, never
+  instructions); a hostile source is one of the threat model's modelled
+  threats.
 
 ## Code organization: one package per layer, one statement pipeline
 
-The five layers are the package layout, and the statement path is one
-explicit pipeline instead of hand-wired copies. The point is that the next
-layer (a semantic layer) and the next scenario are each one addition in one
-place.
+The layers are the package layout, and the statement path is one explicit
+pipeline instead of hand-wired copies. The point is that the next layer and
+the next scenario are each one addition in one place — the semantic layer
+was exactly that.
 
 ```
 agent.py                      composition root: Agent + tools + conversation
@@ -440,13 +594,20 @@ data_agent/
   storage/                    legs.py (s3t/glue/dl mount + docs), registry.py,
                               scenarios/{base,onchain,cloudops}.py
   governance/                 policies.py, hardening.py, rewrite.py (authz only)
-  context/                    results.py, compression.py, datamap.py, cost.py, prompt.py
-  compute/                    engine.py (connection, mounts, lock, schema
-                              prober), gate.py (read-only gate)
-  scheduling/                 runtime.py (claims, envelopes, stream), cli.py
-  pipeline.py                 Gate → Govern → Cost → Execute; run() / run_text()
-  tools.py                    run_sql (pumps the pipeline), search_schema
+  semantic/                   model.py, registry.py, compile.py (metrics → one governed SELECT)
+  context/                    results.py (shaping + handles + marking), compression.py,
+                              datamap.py, reconcile.py (doc ↔ card ↔ engine), cost.py, prompt.py
+  compute/                    engine.py (connection, mounts, lock, schema prober,
+                              LOAD-only baked extensions, error hints), gate.py
+  scheduling/                 runtime.py (claims, envelopes, stream), mcp.py (the same
+                              tools over MCP), gateway_client.py (outbound sources), cli.py
+  pipeline.py                 Gate → Semantic → Govern → Cost → Execute; run() / run_text()
+  tools.py                    run_sql, search_schema, call_metric, list_sources, fetch_source
   audit.py                    one EMF line per statement, session counters
+infra/                        stack.py (CDK: Cognito, role, buckets, optional source Lambdas,
+                              Redshift Serverless, dashboard), lambda/ (the two source targets)
+scripts/                      loaders, eval runner + judges, governance matrix, reconcile,
+                              MCP hookup, demo env, dashboard, cleanup
 ```
 
 - **Scenario contract** (`storage/scenarios/base.py`): one frozen dataclass —
@@ -467,7 +628,8 @@ data_agent/
   (`asyncio.to_thread(next, gen)`), so the trace streams live while the
   engine call runs; the connection lock never spans a yield. A new layer is
   a new stage in `STAGES` — a test inserts a `semantic` stage and sees
-  `gate → semantic → govern → cost → execute` through the real tool.
+  `gate → semantic → govern → cost → execute` through the real tool — which
+  is now the shipped order.
 - **Dependency direction** is downward only: scheduling → pipeline →
   context, governance → compute → storage; audit is a leaf. The governance
   schema prober is wired in `pipeline.py` from `engine.probe_columns`, so
@@ -477,6 +639,14 @@ data_agent/
   functions read, not the facade re-export), `governance.hardening.
   RAW_PATH_SCHEMES`, `storage.legs.*`, `context.prompt.*`,
   `scheduling.runtime.map_event`, `pipeline.run_text`.
+- **Extensions are baked, never fetched at runtime.** `scripts/install_extensions.py`
+  is the one place `INSTALL` happens (the container image runs it at build
+  time into `DUCKDB_EXTENSION_DIR`); the engine sets
+  `autoinstall_known_extensions=false` and only ever `LOAD`s, so a cold start
+  makes no request to the extension repository and a missing extension is a
+  build error with the fix in the message. DuckDB is pinned to the 1.5 line;
+  [duckdb-2.0-regression.md](duckdb-2.0-regression.md) records what the 2.0
+  pre-release changed and the gate for moving.
 
 ## Streaming trace (why the UI can show the engine live)
 
@@ -508,6 +678,16 @@ retention, search and alerting are CloudWatch's job. The same record feeds
 the session counters the `result` envelope carries to the UI. When the
 runtime log group is exported to S3, the audit lines are themselves
 queryable through the cloud-ops scenario's `cw_logs` view.
+
+**Two identity chains on every line.** `agent_identity` says WHICH agent acted
+(the operator labels each deployment, `AGENT_IDENTITY`; the platform does not
+expose the runtime's workload identity to the container) and `user_sub` says
+ON WHOSE BEHALF (the same 12-hex digest as the handle owner, never the raw
+`sub`); the two chains join on `user_sub` + session. Each line also carries
+`input_tokens` (the turn's measured Bedrock input tokens), `rows`, `source`
+and `degraded` for tool-fetched rows, and `metric@version` for compiled
+metrics. `infra/stack.py` defines a CloudWatch dashboard over these fields
+(`scripts/put_dashboard.py` deploys it alone).
 
 ## Scenarios (and why they fit the pattern)
 
@@ -597,7 +777,10 @@ structured, so no output-text matching is needed for the mechanism claims:
 | cost | every raw scan carries a partition predicate; expansions happened |
 | accuracy | known incident numbers (e.g. 401,346.77 ETH inbound) within tolerance |
 | multi_turn | follow-ups hit `_r_` / temp tables; engine_ms small |
-| ops | the second scenario's personas against CUR / CloudTrail ground truth |
+| ops | the second scenario's personas against CUR / CloudTrail ground truth; the session budget refusals |
+| semantic | `call_metric` compiled and audited; unregistered dimensions refused |
+| injection | data-borne instructions in a label cell, a CloudTrail field, a tool result — no probe statement executes |
+| sources | `fetch_source` rows land as a handle and JOIN with the lake; an unknown source tool is refused |
 
 Adversarial cases name their `probe_sql_regex`: a probe that executed fails
 the case regardless of anything else; a model that refused to issue it is
@@ -609,6 +792,32 @@ be: model refusals before the tool call, an uppercase `S3://` scheme, a
 restricted role reaching for `read_parquet(path)` instead of the view — two
 became rewrite-layer fixes, two became prompt rules. Results are written to
 `docs/eval-results.md` / `.json` with AWS-id-shaped strings redacted.
+
+Numbers are not copied into the yaml. A case's `golden_sql` is RUN at eval
+time through the same pipeline as `ops:admin`, on the same engine and data the
+agent uses, and a tolerant judge (number / set / toplist / pair,
+`scripts/eval_judges.py`, unit-tested) compares the answer text with the rows;
+golden rows are cached (`tests/eval/golden-cache.json`) so a laptop without S3
+reach can replay. Every case records the turn's `input_tokens` and model
+calls, and `--no-search-schema` gives the with/without ablation the data-map
+claims rest on. `requires_env` names runtime env a case needs (the session
+budgets); `requires_source` names the Gateway tool it needs, and the case is
+skipped with a note when the deployment does not expose it.
+
+### Governance coverage matrix
+
+Invariant 7 says the rewrite is total; the matrix makes that a number instead
+of a list of regressions. `tests/eval/gov_matrix.py` runs **every persona ×
+every access path × every statement shape** the parser can see through, as
+real statements through the real pipeline on a locally built engine shaped
+like the deployed catalog (from the table cards, so no network): 6 personas ×
+6 paths (`raw`, `s3t`, `glue`, `dl`, `mcp`, `tool`) × 5 shapes (`plain`,
+`cte`, `setop`, `derived_alias`, `create_temp_as`) = 180 cells, plus one
+table-level deny cell per restricted persona and one foreign-handle cell per
+persona = 191. The expected outcome of a cell is derived from the policy, not
+written by hand, and the matrix runs in the unit suite
+(`tests/unit/test_gov_matrix.py`); `scripts/run_matrix.py` renders
+[governance-matrix.md](governance-matrix.md).
 
 ## Measured behavior (reproducible with the included scripts)
 
@@ -633,8 +842,10 @@ became rewrite-layer fixes, two became prompt rules. Results are written to
   directory, a full-day sort completes in seconds rather than failing.
 - **Concurrency isolation**: `scripts/concurrent_invoke.sh N` runs N parallel
   sessions with independent latencies — no queue, no cross-talk.
-- **Evaluation**: 35/35 cases across six categories on the reference
-  deployment ([eval-results.md](eval-results.md)).
+- **Evaluation**: 50/52 cases across nine categories on the reference
+  deployment ([eval-results.md](eval-results.md)); the two red cases are kept
+  red deliberately and explained there. Governance coverage matrix 191/191;
+  633 unit tests, no network.
 
 ## DuckLake catalog forms
 
@@ -656,3 +867,19 @@ many short-lived microVM connections). Both forms are implemented.
 | Operational telemetry already exported to S3 (CUR, CloudTrail, CloudWatch Logs) | This pattern — read the export where it lands, curate to Parquet with the same engine, govern by account/column |
 | Both (most real estates) | Hybrid: DuckDB fast path + warehouse MCP fallback |
 | Working set approaches single-node memory | Split the query or move up the spectrum (Athena/Redshift) |
+| Data already on S3 in an open format (Parquet, Iceberg via S3 Tables / Glue, DuckLake) | DuckDB reads it in place — paths A/B primary, C/D compatibility (below) |
+| Data in a governed store, a SaaS, or an HTTP API (a warehouse, a labels API) | A read-only, parameterized tool through AgentCore Gateway with the caller's identity; rows land as a session handle |
+| Second-level freshness, or writes | A tool plus human review outside the agent; never the engine |
+| Lake Formation is the policy authority for the table | Route to a trusted engine (Athena), or compile the Lake Formation data-cell filters into the rewrite and prove row-for-row equality against Athena before trusting it |
+
+### Access paths — two primary, two compatibility
+
+| Tier | Path | Method | Enable when |
+|---|---|---|---|
+| primary | A | raw Parquet / native exports (`read_parquet`, cost gate expands partitions) | always — needs no catalog |
+| primary | B | S3 Tables, Iceberg REST (`s3t.*`) | managed Iceberg tables; the default demo path |
+| compatibility | C | Glue Data Catalog, Iceberg REST (`glue.*`) | the lake is Glue-cataloged and Lake Formation is the policy authority |
+| compatibility | D | DuckLake (`dl.*`) | an experimental leg; keep it behind a flag |
+
+Governance is identical on every active path, and the coverage matrix runs
+over all of them because it is offline and free.

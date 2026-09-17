@@ -6,10 +6,10 @@ import duckdb
 
 from data_agent import governance
 from data_agent.compute import engine
-from data_agent.context import cost, prompt
+from data_agent.context import cost, datamap, prompt, results
 from data_agent.pipeline import run_text as run_sql
 from data_agent.storage import legs, registry
-from data_agent.storage.scenarios import cloudops
+from data_agent.storage.scenarios import cloudops, onchain
 from data_agent.storage.scenarios.base import Scenario
 
 PREFIX = "s3://duckdb-agent-ducklake-123456789012/ops"
@@ -93,7 +93,7 @@ def test_unset_account_id_fails_closed_in_the_predicate():
     """Without OPS_ACCOUNT_ID the RLS predicate can never match (unit env)."""
     pred = governance.POLICIES["ops:secops"]["tables"]["cloudtrail_events"]["row_filter"]
     assert pred == "recipient_account_id = 'unset-account'"
-    assert cloudops.account_id("acct-111122223333") == "111122223333"  # digits only
+    assert cloudops.account_id("acct-123456789012") == "123456789012"  # digits only
 
 
 def test_secops_junior_rewrite_hides_ip_and_agent_and_scopes_account(local_conn):
@@ -108,7 +108,7 @@ def test_secops_junior_rewrite_hides_ip_and_agent_and_scopes_account(local_conn)
     assert "EXCLUDE (source_ip_address, user_agent)" in governed
     assert "recipient_account_id = 'unset-account'" in governed
     rows = json.loads(run_sql("SELECT * FROM cloudtrail_events").split("\n")[0])
-    assert rows == [
+    assert [{k: results.unmark(v) for k, v in r.items()} for r in rows] == [
         {"recipient_account_id": "unset-account", "event_name": "AssumeRole", "user_arn": "arn:x"}
     ]
     out = run_sql("SELECT source_ip_address FROM cloudtrail_events")
@@ -130,7 +130,9 @@ def test_finops_cannot_see_resource_ids_but_secops_can_see_ips(local_conn):
             "\n"
         )[0]
     )
-    assert rows == [{"product_servicecode": "AmazonS3", "line_item_unblended_cost": "1.5"}]
+    assert [{k: results.unmark(v) for k, v in r.items()} for r in rows] == [
+        {"product_servicecode": "AmazonS3", "line_item_unblended_cost": "1.5"}
+    ]
 
 
 # -------------------------------------------------------------- catalog doc
@@ -174,3 +176,20 @@ def test_missing_ops_dataset_does_not_break_engine_init(monkeypatch, tmp_path):
         conn.close()
     finally:
         engine.reset()
+
+
+def test_ops_sources_carry_a_probe_partition_that_exists(monkeypatch):
+    """The data map DESCRIBEs a raw source through ONE partition. The
+    on-chain default (2025-02-21) matches nothing in the ops exports, so every
+    ops source names its own probe partition (live reconcile finding:
+    all four ops tables failed to describe and had no columns in the L1 index)."""
+    monkeypatch.setattr(datamap, "PROBE_REMOTE", True)
+    specs = cloudops.build_sources(PREFIX, CUR)
+    assert specs["cur_line_items"]["probe"] == cloudops.OPS_PROBE_MONTH
+    assert specs["cloudtrail_events"]["probe"] == cloudops.OPS_PROBE_DAY
+    probe = datamap._probe_sql("cur_line_items", specs["cur_line_items"])
+    assert f"billing_period={cloudops.OPS_PROBE_MONTH}/*.parquet" in probe
+    assert "2025-02-21" not in probe
+    # a spec without its own probe still falls back to the global knob
+    probe = datamap._probe_sql("eth_traces", onchain.PARTITIONED_SOURCES["eth_traces"])
+    assert f"date={datamap.PROBE_PARTITION}/*.parquet" in probe

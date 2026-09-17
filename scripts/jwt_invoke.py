@@ -29,11 +29,13 @@ import uuid
 
 import boto3
 
-# All values come from your deployment: CDK stack outputs (Cognito) and
-# `agentcore launch` (runtime ARN). No defaults — this script targets YOUR stack.
+# Deployment-specific values come from the environment: no account id, pool or
+# runtime name is hard-coded. The CDK stack outputs all three (CognitoDiscoveryUrl /
+# CognitoAudience / the runtime ARN `agentcore status` prints).
 REGION = os.environ.get("AGENT_REGION", "us-west-2")
-CLIENT_ID = os.environ["COGNITO_CLIENT_ID"]
-RUNTIME_ARN = os.environ["AGENT_RUNTIME_ARN"]
+POOL_ID = os.environ.get("COGNITO_POOL_ID", "")
+CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
+RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")
 
 
 def _secret_hash(username: str, secret: str) -> str:
@@ -82,6 +84,10 @@ def invoke(token: str | None, prompt: str) -> tuple[int, str]:
 
 
 def main() -> None:
+    required = (("AGENT_RUNTIME_ARN", RUNTIME_ARN), ("COGNITO_CLIENT_ID", CLIENT_ID))
+    missing = [n for n, v in required if not v]
+    if missing:
+        sys.exit("set " + ", ".join(missing) + " from your deployment")
     secret = os.environ["COGNITO_CLIENT_SECRET"]
     if sys.argv[1] == "--no-token":
         code, body = invoke(None, sys.argv[2])

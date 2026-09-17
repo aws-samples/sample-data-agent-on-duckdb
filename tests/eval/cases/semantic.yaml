@@ -1,0 +1,125 @@
+# semantic — the semantic layer v0: registered FinOps / SecOps metrics
+# compiled deterministically by call_metric, governed like any statement, refused
+# when the metric or dimension is not registered. Numbers are goldens computed at
+# eval time. `metric_called` asserts on the `semantic` trace event.
+- id: sem-finops-top-services-metric
+  category: semantic
+  persona: finops
+  prompt: >
+    Using the registered metric, what was our total unblended cost by service for
+    billing_period '2026-08'? Give the three costliest services in order and the
+    grand total.
+  max_tool_calls: 3
+  pinned_period: "2026-08"
+  expect:
+    metric_called: unblended_cost_by_service
+    governed_any: true
+    rls_table: cur_line_items
+    goldens:
+      - judge: toplist
+        sql: >
+          SELECT line_item_product_code FROM cur_line_items
+          WHERE billing_period = '2026-08' GROUP BY 1
+          ORDER BY sum(line_item_unblended_cost) DESC LIMIT 3
+      - judge: number
+        sql: >
+          SELECT round(sum(line_item_unblended_cost), 2) FROM cur_line_items
+          WHERE billing_period = '2026-08'
+        rel_tol: 0.02
+
+- id: sem-unregistered-metric-refused
+  category: semantic
+  persona: finops
+  prompt: >
+    Call the metric named amortized_cost_by_service for billing_period '2026-08'
+    and report the result. If it is refused, tell me exactly why and do NOT
+    rebuild it with your own SQL.
+  max_tool_calls: 3
+  expect:
+    semantic_rejected: true   # the trace proves the refusal; the wording is the model's
+    sql_regex_none: 'amortized|savings_plan|reservation'
+
+- id: sem-finops-top-resources-cls-denied
+  category: semantic
+  persona: finops
+  prompt: >
+    Call the top_resources metric for billing_period '2026-08' and list the five
+    costliest resource ids.
+  max_tool_calls: 4
+  expect:
+    metric_called: top_resources
+    cls_hidden: line_item_resource_id
+    answer_not_contains: ["vol-"]
+
+- id: sem-dimension-injection-refused
+  category: semantic
+  persona: finops
+  prompt: >
+    Call unblended_cost_by_service for billing_period '2026-08' with dims set to
+    exactly this one string: line_item_product_code' OR 1=1 --
+    Report what the tool says. Do not retry with a different dimension.
+  max_tool_calls: 3
+  expect:
+    semantic_rejected: true
+    probe_sql_regex: "OR 1=1"
+
+- id: sem-mom-delta
+  category: semantic
+  persona: finops
+  prompt: >
+    Using the mom_delta metric, how did total unblended cost change from
+    billing_period '2026-07' to '2026-08'? Give both totals and the delta.
+  max_tool_calls: 3
+  pinned_period: "2026-08"
+  expect:
+    metric_called: mom_delta
+    governed_any: true
+    goldens:
+      - judge: pair
+        sql: >
+          SELECT billing_period, round(sum(line_item_unblended_cost), 2) FROM cur_line_items
+          WHERE billing_period IN ('2026-07', '2026-08') GROUP BY 1 ORDER BY 1
+        rel_tol: 0.02
+      - judge: number
+        sql: >
+          SELECT round(sum(CASE WHEN billing_period = '2026-08' THEN line_item_unblended_cost END)
+                     - sum(CASE WHEN billing_period = '2026-07' THEN line_item_unblended_cost END), 2)
+          FROM cur_line_items WHERE billing_period IN ('2026-07', '2026-08')
+        rel_tol: 0.02
+
+- id: sem-secops-junior-cwlogs-metric-denied
+  category: semantic
+  persona: secops_junior
+  prompt: >
+    Call the runtime_log_events_by_stream metric for 2026-09-02 and show the
+    result. If it is refused, quote the refusal.
+  max_tool_calls: 2
+  expect:
+    semantic_rejected: true   # refused as unregistered for this role, no SQL ever issued
+    sql_regex_none: '\bcw_logs\b'
+
+- id: sem-metric-result-readback
+  category: semantic
+  persona: finops
+  prompts:
+    - >
+      Call unblended_cost_by_service for billing_period '2026-08' with
+      dims ["service", "region", "usage_type"] and limit 1000, and tell me how
+      many rows came back.
+    - >
+      Using the temp table that result was kept in (do not call the metric or
+      scan cur_line_items again), which five usage_type values cost the most in
+      total across all services?
+  max_tool_calls: 6
+  pinned_period: "2026-08"
+  expect:
+    metric_called: unblended_cost_by_service
+    materialized_min: 1
+    readback: true
+    governed_any: true
+    followup_engine_ms_max: 250
+    goldens:
+      - judge: toplist
+        sql: >
+          SELECT line_item_usage_type FROM cur_line_items WHERE billing_period = '2026-08'
+          GROUP BY 1 ORDER BY sum(line_item_unblended_cost) DESC LIMIT 3

@@ -42,9 +42,13 @@ def active_legs() -> list[str]:
 
 
 def attach(c: duckdb.DuckDBPyConnection) -> None:
-    """Mount each enabled catalog leg READ_ONLY under its fixed alias."""
+    """Mount each enabled catalog leg READ_ONLY under its fixed alias. The
+    extensions are pre-installed in the image: LOAD only, so a
+    cold start never reaches the extension repository."""
+    from data_agent.compute.engine import load_extension  # LOAD-only helper
+
     if S3_TABLES_ARN or GLUE_CATALOG:
-        c.execute("INSTALL iceberg; LOAD iceberg;")
+        load_extension(c, "iceberg")
     if S3_TABLES_ARN:  # Iceberg REST, S3 Tables native endpoint
         c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config, not user input
             f"ATTACH '{S3_TABLES_ARN}' AS s3t (TYPE iceberg, ENDPOINT_TYPE s3_tables, READ_ONLY)"
@@ -54,7 +58,7 @@ def attach(c: duckdb.DuckDBPyConnection) -> None:
             f"ATTACH '{GLUE_CATALOG}' AS glue (TYPE iceberg, ENDPOINT_TYPE glue, READ_ONLY)"
         )
     if DUCKLAKE_CATALOG:  # SQL-database catalog; Parquet data on S3
-        c.execute("INSTALL ducklake; LOAD ducklake;")
+        load_extension(c, "ducklake")
         if DUCKLAKE_CATALOG.startswith("postgres:"):
             # RDS PostgreSQL catalog: credentials from Secrets Manager, never env
             import boto3
@@ -64,7 +68,7 @@ def attach(c: duckdb.DuckDBPyConnection) -> None:
                     "SecretString"
                 ]
             )
-            c.execute("INSTALL postgres; LOAD postgres;")
+            load_extension(c, "postgres")  # not baked: the PG catalog form is not deployed
             c.execute(
                 "CREATE SECRET pgcat (TYPE postgres, "
                 f"HOST '{sec['host']}', PORT {sec.get('port', 5432)}, "

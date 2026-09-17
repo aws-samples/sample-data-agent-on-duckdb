@@ -11,7 +11,7 @@ from collections.abc import Iterable
 
 from . import legs
 from .scenarios import cloudops, onchain
-from .scenarios.base import Scenario
+from .scenarios.base import Scenario, TableCard
 
 SCENARIOS: tuple[Scenario, ...] = (onchain.SCENARIO, cloudops.SCENARIO)
 
@@ -43,6 +43,16 @@ def default_policies(scenarios: Iterable[Scenario] | None = None) -> dict:
     return out
 
 
+def cards(scenarios: Iterable[Scenario] | None = None) -> dict[str, TableCard]:
+    """Every scenario's table cards, mounted or not (a card is looked up by
+    bare table name, so the same card serves the raw view and its catalog-leg
+    copies `s3t.*` / `glue.*` / `dl.*`)."""
+    out: dict[str, TableCard] = {}
+    for s in SCENARIOS if scenarios is None else scenarios:
+        out.update({k.lower(): v for k, v in s.cards.items()})
+    return out
+
+
 def catalog_doc(active_legs: list[str], scenarios: Iterable[Scenario] | None = None) -> str:
     """The data section of the system prompt: each enabled scenario's doc,
     then the active catalog legs (raw views are always present)."""
@@ -54,3 +64,5 @@ def catalog_doc(active_legs: list[str], scenarios: Iterable[Scenario] | None = N
 # The cost gate (`context.cost`) and the data map (`context.datamap`) read this
 # at import: raw partitioned sources of every enabled scenario.
 PARTITIONED_SOURCES: dict[str, dict] = partitioned_sources()
+# The data map reads this at import: table cards of every scenario.
+CARDS: dict[str, TableCard] = cards()

@@ -8,7 +8,8 @@
   expect:
     sql_regex_any: 's3t\.blockchain\.eth_traces'
     no_rejections: true
-    answer_number: {value: 3492205, rel_tol: 0.001}
+    golden_sql: SELECT count(*) FROM s3t.blockchain.eth_traces
+    rel_tol: 0.001
 
 - id: rt-glue-leg-named
   persona: admin
@@ -18,7 +19,8 @@
   max_tool_calls: 4
   expect:
     sql_regex_any: 'glue\.blockchain\.eth_traces'
-    answer_number: {value: 3492205, rel_tol: 0.001}
+    golden_sql: SELECT count(*) FROM glue.blockchain.eth_traces
+    rel_tol: 0.001
 
 - id: rt-raw-view-with-date
   persona: admin
@@ -38,7 +40,8 @@
   max_tool_calls: 4
   expect:
     sql_regex_any: '\bofac_addresses\b'
-    answer_number: {value: 120, rel_tol: 0.05}
+    golden_sql: SELECT count(*) FROM ofac_addresses
+    rel_tol: 0.0
 
 - id: rt-search-schema-discovery
   persona: admin
@@ -51,3 +54,9 @@
     sql_regex_any: '\bofac_addresses\b'
     answer_contains: ["ofac_addresses", "cex_deposit_labels"]
     no_rejections: true
+    goldens:
+      - judge: pair   # each table name with its row count
+        sql: >
+          SELECT 'ofac_addresses' AS t, count(*) FROM ofac_addresses
+          UNION ALL SELECT 'cex_deposit_labels', count(*) FROM cex_deposit_labels
+        rel_tol: 0.0

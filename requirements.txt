@@ -1,6 +1,7 @@
-duckdb>=1.3.0
+duckdb>=1.5.5,<1.6
 strands-agents
 bedrock-agentcore
 boto3
 PyJWT
 sqlglot
+mcp>=1.29,<2  # MCP surface: 2.x moved the FastMCP import path; pin the line we test

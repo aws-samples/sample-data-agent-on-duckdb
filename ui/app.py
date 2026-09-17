@@ -17,9 +17,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import urllib.parse
 import uuid
+from pathlib import Path
 
 import boto3
 import requests
@@ -30,7 +32,25 @@ import streamlit as st
 # at a Bedrock region for other tooling). All values come from your deployment:
 # the CDK stack outputs (Cognito) and `agentcore launch` (runtime ARN).
 REGION = os.environ.get("AGENT_REGION", "us-west-2")
-RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")  # required
+
+
+def _runtime_arn_from_toolkit() -> str:
+    """Fallback: the ARN `agentcore launch` recorded in ../.bedrock_agentcore.yaml.
+
+    A deployment is self-describing, so a developer running the UI from the repo
+    does not have to copy the ARN by hand. Nothing here is account-specific:
+    the file is gitignored and written by the toolkit on the deploying machine.
+    """
+    cfg = Path(__file__).resolve().parent.parent / ".bedrock_agentcore.yaml"
+    if not cfg.exists():
+        return ""
+    match = re.search(r"^\s*agent_arn:\s*(arn:aws:bedrock-agentcore:\S+)", cfg.read_text(), re.M)
+    return match.group(1) if match else ""
+
+
+# deployment-specific: AGENT_RUNTIME_ARN (the CDK stack / `agentcore status` prints it),
+# else the toolkit's own record of the last launch
+RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN") or _runtime_arn_from_toolkit()
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")  # required
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET", "")  # required to log in
 
@@ -324,6 +344,17 @@ def main() -> None:
         "investigations; watch the SQL run in the engine, inside the agent, under "
         "identity-aware row/column governance."
     )
+
+    if not RUNTIME_ARN:
+        st.error(
+            "No agent runtime configured. Set AGENT_RUNTIME_ARN to the runtime's ARN "
+            "(`agentcore status` prints it; the CDK stack and .bedrock_agentcore.yaml carry it), "
+            "then restart streamlit."
+        )
+        st.stop()
+    if not COGNITO_CLIENT_SECRET:
+        st.error("COGNITO_CLIENT_SECRET is not set — the login form cannot mint a token.")
+        st.stop()
 
     if "auth" not in st.session_state:
         st.session_state.auth = None

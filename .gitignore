@@ -26,3 +26,12 @@ infra/.venv/
 # os / editor
 .DS_Store
 nohup.out
+
+# blog drafts — publication workflow docs, never in the repo
+docs/blog-draft*.md
+
+# local presentation/deck builds — publication artefacts stay out of the repo
+docs/deck/
+
+# Claude Code local state (sessions, worktrees) — never part of the sample
+.claude/

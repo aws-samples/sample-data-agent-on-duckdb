@@ -3,7 +3,7 @@
 <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1 L9 5 L1 9" fill="none" stroke="context-stroke" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
 <rect width="1400" height="1000" fill="#FBFCFE"/>
 <text x="40" y="36" text-anchor="start" font-size="20" font-weight="800" fill="#16202E">Context layer — the path of one statement</text>
-<text x="40" y="58" text-anchor="start" font-size="11.5" font-weight="400" fill="#5A6B7B">four mechanisms, in the order they act · solid = the statement and its result · dashed = a pointer into the engine, no data moves</text>
+<text x="40" y="58" text-anchor="start" font-size="11.5" font-weight="400" fill="#5A6B7B">five mechanisms, in the order they act · solid = the statement and its result · dashed = a pointer into the engine, no data moves · Gateway rows land the same way</text>
 <rect x="24" y="95" width="1352" height="95" rx="10" fill="#FFFFFF" stroke="#E6ECF2"/>
 <rect x="24" y="95" width="6" height="95" rx="3" fill="#00A4A6"/>
 <text x="46" y="125" text-anchor="start" font-size="13" font-weight="800" fill="#16202E">Data map</text>
@@ -15,7 +15,7 @@
 <rect x="24" y="480" width="1352" height="390" rx="10" fill="#FFFFFF" stroke="#E6ECF2"/>
 <rect x="24" y="480" width="6" height="390" rx="3" fill="#8C4FFF"/>
 <text x="46" y="510" text-anchor="start" font-size="13" font-weight="800" fill="#16202E">Result shaping</text>
-<text x="46" y="528" text-anchor="start" font-size="10.5" font-weight="400" fill="#5A6B7B">after it runs</text>
+<text x="46" y="528" text-anchor="start" font-size="10.5" font-weight="400" fill="#5A6B7B">after it runs · owner-bound handles</text>
 <rect x="24" y="880" width="1352" height="105" rx="10" fill="#FFFFFF" stroke="#E6ECF2"/>
 <rect x="24" y="880" width="6" height="105" rx="3" fill="#3B4A5A"/>
 <text x="46" y="910" text-anchor="start" font-size="13" font-weight="800" fill="#16202E">History compression</text>
@@ -24,9 +24,12 @@
 <text x="270" y="145" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">question</text>
 <rect x="370.0" y="112.0" width="380" height="56" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
 <text x="560" y="137" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">Data map</text>
-<text x="560" y="154" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">L0 table map in the prompt · search_schema (BM25) · DESCRIBE on demand</text>
+<text x="560" y="154" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">L0 table map + cards in the prompt · search_schema (BM25, cards) · DESCRIBE on demand</text>
 <rect x="785.0" y="116.0" width="190" height="48" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
 <text x="880" y="145" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">Claude writes SQL</text>
+<rect x="410.0" y="190.0" width="300" height="52" rx="10" fill="#F3EDFF" stroke="#8C4FFF" stroke-width="1.4"/>
+<text x="560" y="213" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">call_metric → compiled SQL</text>
+<text x="560" y="230" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">registered KPI · dims / window / filters allow-listed</text>
 <rect x="745.0" y="262.0" width="270" height="56" rx="28.0" fill="#FFF4DC" stroke="#E0A82E" stroke-width="1.4"/>
 <text x="880" y="287" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">Cost gate</text>
 <text x="880" y="304" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">raw partitioned source?</text>
@@ -38,11 +41,15 @@
 <text x="880" y="535" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">DuckDB executes in-process</text>
 <rect x="780.0" y="606.0" width="200" height="48" rx="24.0" fill="#FFF4DC" stroke="#E0A82E" stroke-width="1.4"/>
 <text x="880" y="635" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">result size</text>
-<rect x="390.0" y="708.0" width="220" height="44" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
-<text x="500" y="735" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">rows inline</text>
+<rect x="380.0" y="704.0" width="240" height="52" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
+<text x="500" y="727" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">rows inline</text>
+<text x="500" y="744" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">text cells arrive as data:«…» — evidence, not instructions</text>
 <rect x="970.0" y="702.0" width="320" height="56" rx="10" fill="#F3EDFF" stroke="#8C4FFF" stroke-width="1.4"/>
-<text x="1130" y="727" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">temp table _r_n</text>
-<text x="1130" y="744" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">row count · columns · 3 sample rows · how to read it</text>
+<text x="1130" y="727" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">handle _r_n (temp table)</text>
+<text x="1130" y="744" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">rows · columns · 3 samples · owner · created_at · TTL = this session</text>
+<rect x="980.0" y="559.0" width="300" height="52" rx="10" fill="#F3EDFF" stroke="#8C4FFF" stroke-width="1.4"/>
+<text x="1130" y="582" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">fetch_source (gateway)</text>
+<text x="1130" y="599" text-anchor="middle" font-size="10.5" font-weight="400" fill="#5A6B7B">non-lake rows · caller&#x27;s token · untrusted content</text>
 <rect x="760.0" y="806.0" width="240" height="48" rx="10" fill="#FFFFFF" stroke="#C9D3DF" stroke-width="1.4"/>
 <text x="880" y="835" text-anchor="middle" font-size="13" font-weight="700" fill="#16202E">Claude reads the result</text>
 <rect x="570.0" y="904.0" width="620" height="56" rx="10" fill="#F3EDFF" stroke="#8C4FFF" stroke-width="1.4"/>
@@ -51,6 +58,8 @@
 <path d="M325.0,140.0 L370.0,140.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
 <path d="M750.0,140.0 L785.0,140.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
 <path d="M880.0,164.0 L880.0,262.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M820.0,164.0 L820.0,186.0 Q820.0,200.0 806.0,200.0 L712.0,200.0" fill="none" stroke="#8C4FFF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<path d="M712.0,232.0 L878.0,232.0" fill="none" stroke="#8C4FFF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
 <path d="M745.0,290.0 L514.0,290.0 Q500.0,290.0 500.0,304.0 L500.0,388.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
 <g><rect x="546.2" y="267.0" width="151.5" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="622" y="282.0" text-anchor="middle" font-size="11" fill="#3B4A5A">no partition predicate</text></g>
 <path d="M880.0,318.0 L880.0,388.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
@@ -63,8 +72,10 @@
 <path d="M880.0,554.0 L880.0,606.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
 <path d="M780.0,630.0 L514.0,630.0 Q500.0,630.0 500.0,644.0 L500.0,708.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
 <g><rect x="601.2" y="607.0" width="77.6" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="640" y="622.0" text-anchor="middle" font-size="11" fill="#3B4A5A">≤ 200 rows</text></g>
-<path d="M980.0,630.0 L1116.0,630.0 Q1130.0,630.0 1130.0,644.0 L1130.0,702.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
-<g><rect x="1028.5" y="607.0" width="53.0" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="1055" y="622.0" text-anchor="middle" font-size="11" fill="#3B4A5A">larger</text></g>
+<path d="M980.0,630.0 L1076.0,630.0 Q1090.0,630.0 1090.0,644.0 L1090.0,702.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="1008.5" y="607.0" width="53.0" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="1035" y="622.0" text-anchor="middle" font-size="11" fill="#3B4A5A">larger</text></g>
+<path d="M1170.0,611.0 L1170.0,702.0" fill="none" stroke="#8C4FFF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
+<g><rect x="1192.3" y="645.0" width="145.4" height="22" rx="6" fill="#FFFFFF" stroke="#D9E1EC" stroke-width="1"/><text x="1265" y="660.0" text-anchor="middle" font-size="11" fill="#3B4A5A">lands as a handle too</text></g>
 <path d="M500.0,752.0 L500.0,816.0 Q500.0,830.0 514.0,830.0 L760.0,830.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
 <path d="M1130.0,758.0 L1130.0,816.0 Q1130.0,830.0 1116.0,830.0 L1000.0,830.0" fill="none" stroke="#1F5FBF" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>
 <path d="M1290.0,730.0 L1326.0,730.0 Q1340.0,730.0 1340.0,716.0 L1340.0,154.0 Q1340.0,140.0 1326.0,140.0 L975.0,140.0" fill="none" stroke="#8C4FFF" stroke-width="2.2" stroke-dasharray="6 6" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah)"/>

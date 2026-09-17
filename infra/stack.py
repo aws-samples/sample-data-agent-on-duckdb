@@ -1,12 +1,20 @@
 """The one stack behind the data agent — see app.py for scope rationale."""
 
-from aws_cdk import CfnOutput, RemovalPolicy, Stack
+from pathlib import Path
+
+from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_cognito as cognito
+from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
+from aws_cdk import aws_redshiftserverless as rss
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3tables as s3tables
 from constructs import Construct
+
+LAMBDA_DIR = Path(__file__).resolve().parent / "lambda"
 
 # The public dataset the solution queries (Registry of Open Data, us-east-2).
 PUBLIC_DATASET_ARN = "arn:aws:s3:::aws-public-blockchain"
@@ -158,9 +166,7 @@ class DataAgentStack(Stack):
             read_prefixes = [f"AWSLogs/{ops_account}/CloudTrail/"]
             if cur_prefix:
                 read_prefixes.append(f"{cur_prefix}/")
-            object_arns = [
-                f"arn:aws:s3:::{b}/{p}*" for b in ops_buckets for p in read_prefixes
-            ]
+            object_arns = [f"arn:aws:s3:::{b}/{p}*" for b in ops_buckets for p in read_prefixes]
             exec_role.add_to_policy(
                 iam.PolicyStatement(
                     sid="OpsSourceGet",
@@ -261,6 +267,312 @@ class DataAgentStack(Stack):
             write_attributes=writable,
         )
 
+        # --- The MCP front door -------------------------------
+        # The Gateway is the OUTBOUND front door (Redshift MCP server, a
+        # labels REST API): inbound it validates the user's JWT, outbound it
+        # holds the source credentials so the agent process never does. Its role
+        # may invoke exactly one runtime — measured 2026-09-10, an MCP gateway
+        # cannot forward the caller's JWT to a runtime target, so the INBOUND
+        # MCP path is the runtime's own authorizer, not this hop.
+        gateway_role = iam.Role(
+            self,
+            "GatewayRole",
+            role_name="DataAgentGatewayRole",
+            assumed_by=iam.ServicePrincipal(
+                "bedrock-agentcore.amazonaws.com",
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": self.account},
+                    "ArnLike": {
+                        "aws:SourceArn": (
+                            f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:gateway/*"
+                        )
+                    },
+                },
+            ),
+            description="AgentCore Gateway to data-agent targets (least privilege)",
+        )
+        runtime_arn = self.node.try_get_context("agentRuntimeArn") or ""
+        if runtime_arn:
+            gateway_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="InvokeTheDataAgentRuntimeOnly",
+                    actions=["bedrock-agentcore:InvokeAgentRuntime"],
+                    resources=[runtime_arn, f"{runtime_arn}/*"],
+                )
+            )
+        # --- The two non-lake sources behind the Gateway ----------------
+        # Deployed with `-c withSources=true`. The Lambdas are the Gateway's
+        # targets (fixed, parameterized, read-only tool surfaces — never free SQL
+        # against the warehouse); Redshift Serverless is the warehouse copy of
+        # the CUR month, reachable through the Data API only: no public access,
+        # a security group with no ingress rule at all, AWS-owned KMS key.
+        if self.node.try_get_context("withSources"):
+            labels_role = iam.Role(
+                self,
+                "LabelsApiRole",
+                role_name="DataAgentLabelsApiRole",
+                assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+                managed_policies=[
+                    iam.ManagedPolicy.from_aws_managed_policy_name(
+                        "service-role/AWSLambdaBasicExecutionRole"
+                    )
+                ],
+            )
+            labels_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="ReadLabelJson",
+                    actions=["s3:GetObject"],
+                    resources=[ducklake_bucket.arn_for_objects("labels/*.json")],
+                )
+            )
+            labels_fn = lambda_.Function(
+                self,
+                "LabelsApi",
+                function_name="data-agent-labels-api",
+                runtime=lambda_.Runtime.PYTHON_3_13,
+                handler="labels_api.lambda_handler",
+                code=lambda_.Code.from_asset(str(LAMBDA_DIR)),
+                role=labels_role,
+                timeout=Duration.seconds(20),
+                memory_size=256,
+                environment={
+                    "LABELS_BUCKET": ducklake_bucket.bucket_name,
+                    "LABELS_PREFIX_KEY": "labels",
+                },
+                description="On-chain labels / sanctions REST source for the data agent",
+            )
+
+            redshift_role = iam.Role(
+                self,
+                "RedshiftRole",
+                role_name="DataAgentRedshiftRole",
+                assumed_by=iam.ServicePrincipal("redshift.amazonaws.com"),
+                description="COPY from the solution bucket into Redshift Serverless",
+            )
+            redshift_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="ReadSolutionBucket",
+                    actions=["s3:GetObject", "s3:ListBucket"],
+                    resources=[
+                        ducklake_bucket.bucket_arn,
+                        ducklake_bucket.arn_for_objects("ops/*"),
+                    ],
+                )
+            )
+            vpc = ec2.Vpc.from_lookup(self, "DefaultVpc", is_default=True)
+            no_ingress = ec2.SecurityGroup(
+                self,
+                "RedshiftNoIngress",
+                vpc=vpc,
+                security_group_name="data-agent-redshift-noingress",
+                description="Redshift Serverless for the data agent: no inbound rules, Data API",
+                allow_all_outbound=False,
+            )
+            namespace = rss.CfnNamespace(
+                self,
+                "RedshiftNamespace",
+                namespace_name="data-agent",
+                db_name="dev",
+                admin_username="dataagent",
+                manage_admin_password=True,  # Secrets Manager holds it; nothing in the template
+                iam_roles=[redshift_role.role_arn],
+                default_iam_role_arn=redshift_role.role_arn,
+                log_exports=["userlog", "connectionlog", "useractivitylog"],
+            )
+            workgroup = rss.CfnWorkgroup(
+                self,
+                "RedshiftWorkgroup",
+                workgroup_name="data-agent",
+                namespace_name=namespace.namespace_name,
+                base_capacity=8,
+                publicly_accessible=False,
+                subnet_ids=[sn.subnet_id for sn in vpc.public_subnets][:3],
+                security_group_ids=[no_ingress.security_group_id],
+            )
+            workgroup.add_dependency(namespace)
+
+            redshift_src_role = iam.Role(
+                self,
+                "RedshiftSourceRole",
+                role_name="DataAgentRedshiftSourceRole",
+                assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+                managed_policies=[
+                    iam.ManagedPolicy.from_aws_managed_policy_name(
+                        "service-role/AWSLambdaBasicExecutionRole"
+                    )
+                ],
+            )
+            wg_arn = f"arn:aws:redshift-serverless:{self.region}:{self.account}:workgroup/*"
+            redshift_src_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="DataApiOnThisWorkgroup",
+                    actions=[
+                        "redshift-data:ExecuteStatement",
+                        "redshift-data:DescribeStatement",
+                        "redshift-data:GetStatementResult",
+                        "redshift-serverless:GetCredentials",
+                    ],
+                    resources=[wg_arn],
+                )
+            )
+            redshift_src_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="ResultsAreCallerScoped",
+                    actions=["redshift-data:DescribeStatement", "redshift-data:GetStatementResult"],
+                    resources=["*"],
+                    conditions={
+                        "StringEquals": {
+                            "redshift-data:statement-owner-iam-userid": "${aws:userid}"
+                        }
+                    },
+                )
+            )
+            redshift_fn = lambda_.Function(
+                self,
+                "RedshiftSource",
+                function_name="data-agent-redshift-source",
+                runtime=lambda_.Runtime.PYTHON_3_13,
+                handler="redshift_source.lambda_handler",
+                code=lambda_.Code.from_asset(str(LAMBDA_DIR)),
+                role=redshift_src_role,
+                timeout=Duration.seconds(60),
+                memory_size=256,
+                environment={
+                    "REDSHIFT_WORKGROUP": "data-agent",
+                    "REDSHIFT_DATABASE": "dev",
+                    "REDSHIFT_SCHEMA": "ops",
+                },
+                description="Redshift Serverless warehouse source (read-only, parameterized)",
+            )
+            # the Gateway may invoke exactly these two functions
+            gateway_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="InvokeSourceLambdasOnly",
+                    actions=["lambda:InvokeFunction"],
+                    resources=[labels_fn.function_arn, redshift_fn.function_arn],
+                )
+            )
+            CfnOutput(self, "LabelsApiArn", value=labels_fn.function_arn)
+            CfnOutput(self, "RedshiftSourceArn", value=redshift_fn.function_arn)
+            CfnOutput(
+                self,
+                "RedshiftWorkgroupName",
+                value=workgroup.workgroup_name,
+                description="load with scripts/redshift_load.py (it also grants the source "
+                "Lambda's Redshift user USAGE/SELECT on schema ops)",
+            )
+
+        # The Gateway resource itself is created out of band (the control-plane
+        # API is not a stable CloudFormation resource yet — same reason the
+        # runtime is created by `agentcore launch`). Recorded here so the stack
+        # owns its role and the operator sees the pairing:
+        #   aws bedrock-agentcore-control create-gateway --protocol-type MCP \
+        #     --authorizer-type CUSTOM_JWT --role-arn <GatewayRoleArn> \
+        #     --authorizer-configuration '{"customJWTAuthorizer": {"discoveryUrl": <pool>, \
+        #        "allowedClients": ["<mcp client id>"]}}'
+        # NOTE: a Runtime's customJWTAuthorizer must use allowedAudience for
+        # Cognito ID tokens (allowedClients matches client_id, which ID tokens
+        # do not carry) — verified 2026-09-10.
+
+        # --- One dashboard for the two identity chains ---------------
+        # Every statement emits one EMF line (data_agent/audit.py) carrying
+        # agent_identity, user_sub (digest), the governance/cost decision and
+        # input_tokens. The metrics below come from that line with no PutMetricData
+        # call; the log-insights widgets answer "who, on whose behalf, read what".
+        dashboard = cloudwatch.Dashboard(
+            self,
+            "OpsDashboard",
+            dashboard_name="DataAgentOnDuckDB",
+            default_interval=Duration.days(1),
+        )
+
+        def metric(name: str, stat: str = "Sum", **kw) -> cloudwatch.Metric:
+            return cloudwatch.Metric(
+                namespace="DataAgentOnDuckDB",
+                metric_name=name,
+                statistic=stat,
+                period=Duration.minutes(5),
+                **kw,
+            )
+
+        outcomes = [
+            metric("Statements", dimensions_map={"Outcome": o}, label=o)
+            for o in ("executed", "rejected", "error")
+        ]
+        log_group_name = log_group.log_group_name
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Statements by outcome", left=outcomes, width=12, stacked=True
+            ),
+            cloudwatch.GraphWidget(
+                title="Engine time and rows",
+                left=[metric("EngineMs", "Average", label="engine ms (avg)")],
+                right=[metric("Rows", label="rows")],
+                width=12,
+            ),
+        )
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Cost gate: expanded partition paths",
+                left=[metric("ExpandedPaths", label="paths")],
+                width=8,
+            ),
+            cloudwatch.GraphWidget(
+                title="Materialized results (handles minted)",
+                left=[metric("Materialized", label="handles")],
+                width=8,
+            ),
+            cloudwatch.SingleValueWidget(
+                title="Rejections (24h)",
+                metrics=[metric("Statements", dimensions_map={"Outcome": "rejected"})],
+                width=8,
+            ),
+        )
+        dashboard.add_widgets(
+            cloudwatch.LogQueryWidget(
+                title="Who, on whose behalf, read what (last 50)",
+                log_group_names=[log_group_name],
+                query_lines=[
+                    "fields @timestamp, audit.agent_identity as agent, audit.user_sub as user,"
+                    " audit.principal as role, audit.tool as tool, audit.metric as metric,"
+                    " Outcome as outcome, audit.stage as refused_at,"
+                    " audit.rls.0.table as governed_table, audit.input_tokens as tokens,"
+                    " audit.sql",
+                    "filter ispresent(audit.principal)",
+                    "sort @timestamp desc",
+                    "limit 50",
+                ],
+                width=24,
+                height=9,
+            ),
+        )
+        dashboard.add_widgets(
+            cloudwatch.LogQueryWidget(
+                title="Refusals by stage",
+                log_group_names=[log_group_name],
+                query_lines=[
+                    "fields audit.stage as stage",
+                    "filter Outcome != 'executed'",
+                    "stats count() as refusals by stage",
+                    "sort refusals desc",
+                ],
+                width=12,
+                height=6,
+            ),
+            cloudwatch.LogQueryWidget(
+                title="Input tokens per user (session high-water)",
+                log_group_names=[log_group_name],
+                query_lines=[
+                    "fields audit.user_sub as user, audit.input_tokens as tokens",
+                    "filter ispresent(audit.input_tokens) and audit.input_tokens > 0",
+                    "stats max(tokens) as session_tokens by user",
+                    "sort session_tokens desc",
+                ],
+                width=12,
+                height=6,
+            ),
+        )
+
         # --- Outputs consumed by agentcore configure / env -----------------
         CfnOutput(
             self,
@@ -306,6 +618,18 @@ class DataAgentStack(Stack):
                 f"{user_pool.user_pool_id}/.well-known/openid-configuration"
             ),
             description="customJWTAuthorizer discoveryUrl (for agentcore authorizer config)",
+        )
+        CfnOutput(
+            self,
+            "GatewayRoleArn",
+            value=gateway_role.role_arn,
+            description="create-gateway --role-arn (outbound tool targets)",
+        )
+        CfnOutput(
+            self,
+            "DashboardName",
+            value=dashboard.dashboard_name,
+            description="CloudWatch dashboard with the dual-identity audit widgets",
         )
         CfnOutput(
             self,

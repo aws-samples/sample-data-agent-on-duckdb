@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 import re
 
-from .base import Scenario
+from .base import Scenario, TableCard
 
 S3_BASE = "s3://aws-public-blockchain/v1.0"
 
@@ -144,10 +144,10 @@ Base path: {S3_BASE}/  — hive-partitioned by date=YYYY-MM-DD
 | Table (view) | Path | Notes |
 |---|---|---|
 | eth_blocks | {S3_BASE}/eth/blocks/ | Ethereum blocks since 2015-07-30 |
-| eth_transactions | {S3_BASE}/eth/transactions/ | Top-level txs; `value` wei; from/to_address |
-| eth_token_transfers | {S3_BASE}/eth/token_transfers/ | ERC-20/721: token_address, from/to_address, value |
-| eth_traces | {S3_BASE}/eth/traces/ | INTERNAL calls: from_address, to_address, value, call_type, trace_type, status — a contract-mediated transfer shows up ONLY here, never in eth_transactions |
-| eth_logs | {S3_BASE}/eth/logs/ | Raw event logs: address, topics[], data |
+| eth_transactions | {S3_BASE}/eth/transactions/ | Top-level txs; `value` wei; from_address, to_address |
+| eth_token_transfers | {S3_BASE}/eth/token_transfers/ | ERC-20/721: token_address, from_address, to_address, `value` |
+| eth_traces | {S3_BASE}/eth/traces/ | INTERNAL calls: from_address, to_address, `value`, call_type, trace_type, `status` — a contract-mediated transfer shows up ONLY here, never in eth_transactions |
+| eth_logs | {S3_BASE}/eth/logs/ | Raw event logs: `address`, `topics` (list), `data` |
 """  # noqa: E501 — markdown table rows in the system-prompt doc
 
 LABEL_DOC = """
@@ -163,6 +163,180 @@ overlay attribution the way a commercial intelligence feed would. Join on
 lower(address). `cex_deposit_labels` is synthetic sample data, not real
 attribution.
 """
+
+
+# ---------------------------------------------------------------- cards
+# Table cards: grain, when to use, when not to, caveats, and the
+# reconciled column list. Column names below are the dataset's real schema
+# (DESCRIBE of the 2025-02-21 partition, 2026-09-09); `date` is the hive
+# partition column. tests/unit/test_reconcile.py checks the prompt doc and the
+# policies against these; scripts/reconcile.py checks these against the engine.
+_ETH_OWNER = "onchain scenario (AWS Public Blockchain, eth v1.0)"
+CARDS = {
+    "eth_blocks": TableCard(
+        grain="one row = one Ethereum block",
+        use_when="block metadata: timestamps, miner, gas limits, tx counts per block",
+        avoid_when="tracing value transfers — blocks carry no transfer rows",
+        caveats="`timestamp` is the block time; join transactions on block_number",
+        owner=_ETH_OWNER,
+        columns=(
+            "difficulty",
+            "hash",
+            "miner",
+            "nonce",
+            "number",
+            "size",
+            "timestamp",
+            "total_difficulty",
+            "base_fee_per_gas",
+            "gas_limit",
+            "gas_used",
+            "extra_data",
+            "logs_bloom",
+            "parent_hash",
+            "state_root",
+            "receipts_root",
+            "transactions_root",
+            "sha3_uncles",
+            "transaction_count",
+            "date",
+            "last_modified",
+        ),
+    ),
+    "eth_transactions": TableCard(
+        grain="one row = one top-level (externally signed) transaction",
+        use_when="who signed what: sender, gas paid, receipt status, contract creation",
+        avoid_when=(
+            "following a contract-mediated drain — internal value moves are only in eth_traces"
+        ),
+        caveats=(
+            "`value` is wei (divide by 1e18); `hash` is "
+            "the tx hash (eth_traces calls it transaction_hash)"
+        ),
+        owner=_ETH_OWNER,
+        columns=(
+            "gas",
+            "hash",
+            "input",
+            "nonce",
+            "value",
+            "block_number",
+            "block_hash",
+            "transaction_index",
+            "from_address",
+            "to_address",
+            "gas_price",
+            "receipt_cumulative_gas_used",
+            "receipt_gas_used",
+            "receipt_contract_address",
+            "receipt_status",
+            "receipt_effective_gas_price",
+            "transaction_type",
+            "max_fee_per_gas",
+            "max_priority_fee_per_gas",
+            "block_timestamp",
+            "date",
+            "last_modified",
+        ),
+    ),
+    "eth_token_transfers": TableCard(
+        grain="one row = one ERC-20/721 Transfer event",
+        use_when="token (not ETH) movements: which token, from, to, amount",
+        avoid_when="native ETH flows — those are eth_traces / eth_transactions",
+        caveats=(
+            "`value` is in the token's own decimals, not wei; token_address identifies the contract"
+        ),
+        owner=_ETH_OWNER,
+        columns=(
+            "token_address",
+            "from_address",
+            "to_address",
+            "value",
+            "transaction_hash",
+            "log_index",
+            "block_number",
+            "block_hash",
+            "block_timestamp",
+            "date",
+            "last_modified",
+        ),
+    ),
+    "eth_traces": TableCard(
+        grain="one row = one internal call (EVM trace) inside a transaction",
+        use_when=(
+            "following the money: every ETH value move incl. contract-mediated ones, fan-out, hops"
+        ),
+        avoid_when="counting user-signed transactions — use eth_transactions",
+        caveats=(
+            "filter value > 0 AND status = 1 for successful "
+            "transfers; a day is a few GB, always add an address filter"
+        ),
+        owner=_ETH_OWNER,
+        columns=(
+            "block_number",
+            "transaction_hash",
+            "transaction_index",
+            "error",
+            "status",
+            "trace_id",
+            "subtraces",
+            "trace_address",
+            "block_hash",
+            "trace_type",
+            "gas",
+            "gas_used",
+            "from_address",
+            "value",
+            "reward_type",
+            "input",
+            "output",
+            "call_type",
+            "to_address",
+            "block_timestamp",
+            "date",
+            "last_modified",
+        ),
+    ),
+    "eth_logs": TableCard(
+        grain="one row = one emitted event log",
+        use_when="decoding contract events beyond Transfer: topics[] and data of any log",
+        avoid_when="token transfers — eth_token_transfers is already decoded",
+        caveats="`topics` is a list (topics[1] is the event signature); `data` is hex",
+        owner=_ETH_OWNER,
+        columns=(
+            "address",
+            "topics",
+            "data",
+            "transaction_index",
+            "log_index",
+            "transaction_hash",
+            "block_number",
+            "block_hash",
+            "block_timestamp",
+            "date",
+            "last_modified",
+        ),
+    ),
+    "ofac_addresses": TableCard(
+        grain="one row = one OFAC SDN-listed crypto address",
+        use_when="sanctions screening: join on lower(address)",
+        avoid_when="attributing exchanges or customers — that is cex_deposit_labels",
+        caveats="real public list, ~120 rows; `program` is the sanctions program",
+        owner="onchain scenario (public OFAC SDN crypto list)",
+        columns=("address", "program", "source"),
+    ),
+    "cex_deposit_labels": TableCard(
+        grain="one row = one exchange deposit address with its label",
+        use_when="cash-out points: which recipients are exchange deposit addresses",
+        avoid_when="anything needing real attribution — this table is SYNTHETIC",
+        caveats=(
+            "subject_identity is customer PII linkage "
+            "(column-denied for junior roles); rows are tenant-scoped by exchange"
+        ),
+        owner="onchain scenario (synthetic sample)",
+        columns=("address", "exchange", "label", "subject_identity", "risk_tier"),
+    ),
+}
 
 # ----------------------------------------------------------------- policies
 # Table-level deny-by-default: a restricted persona may reference
@@ -219,6 +393,7 @@ def build(
         sources=dict(PARTITIONED_SOURCES),
         doc=RAW_DOC + (LABEL_DOC if labels else ""),
         policies=POLICIES,
+        cards=CARDS,
     )
 
 

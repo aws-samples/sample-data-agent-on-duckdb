@@ -65,17 +65,24 @@ def test_session_counters_accumulate_and_reset(capsys):
     audit.record(
         principal="p", sql="c", outcome="executed", rows=1, engine_ms=0.5, materialized="_r_1"
     )
+    audit.note_tokens(9000)
+    audit.record(principal="p", sql="d", outcome="executed", rows=0, cost={"expanded_paths": 3})
     c = audit.session_counters(compressed=4)
     assert c == {
-        "statements": 3,
+        "statements": 4,
         "rejected": 1,
         "materialized": 1,
         "engine_ms": 3.0,
         "rows": 11,
+        "expanded_paths": 3,  # The session budget's second dimension
+        "input_tokens": 9000,  # measured, highest projection of the turn
         "compressed": 4,
     }
+    audit.note_tokens(5000)  # a lower measurement never lowers the session total
+    assert audit.session_counters()["input_tokens"] == 9000
     audit.reset_session()
     assert audit.session_counters()["statements"] == 0
+    assert audit.session_counters()["input_tokens"] == 0
 
 
 def test_disabled_audit_counts_but_does_not_print(capsys, monkeypatch):
@@ -128,3 +135,58 @@ def test_search_schema_is_audited_as_its_own_tool(local_conn, capsys):
     lines = _emf_lines(capsys.readouterr().out)
     assert lines and lines[-1]["audit"]["tool"] == "search_schema"
     assert lines[-1]["audit"]["sql"] == "anything"
+
+
+def test_audit_line_never_glues_to_streamed_prose(capsys):
+    """Strands streams the answer without a trailing newline; the next EMF
+    line must still start at column 0 or CloudWatch cannot parse it (an early cloud run
+    lost the call_metric refusal lines that way)."""
+    import sys
+
+    sys.stdout.write("Let me try the object range format")  # prose, no newline
+    audit.record(
+        principal="ops:finops", sql="call_metric('x')", outcome="rejected", stage="semantic"
+    )
+    audit.record(principal="ops:finops", sql="SELECT 1", outcome="executed")
+    out = capsys.readouterr().out
+    lines = out.split("\n")
+    assert lines[0] == "Let me try the object range format"
+    assert json.loads(lines[1])["audit"]["stage"] == "semantic"
+    assert json.loads(lines[2])["audit"]["sql"] == "SELECT 1"
+
+
+def test_audit_line_carries_both_identity_chains_and_the_turn_cost(capsys, monkeypatch):
+    """WHICH agent (agent_identity) acted ON WHOSE BEHALF (user_sub), and
+    what the turn had cost when the statement ran. Both identities are
+    non-secret labels; the user is a digest, never the raw sub."""
+    monkeypatch.setattr(audit, "AGENT_IDENTITY", "duckdb_analyst_mcp")
+    audit.reset_session()
+    audit.note_tokens(12500)
+    rec = audit.record(
+        principal="ops:finops",
+        sql="SELECT 1",
+        outcome="executed",
+        owner="47ee7df6e5bd",
+        user_sub="47ee7df6e5bd",
+    )
+    a = rec["audit"]
+    assert a["agent_identity"] == "duckdb_analyst_mcp" and a["user_sub"] == "47ee7df6e5bd"
+    assert a["input_tokens"] == 12500 and a["owner"] == a["user_sub"]
+    line = json.loads([ln for ln in capsys.readouterr().out.splitlines() if '"audit"' in ln][-1])
+    assert line["audit"]["agent_identity"] == "duckdb_analyst_mcp"
+    # no PII: the record holds digests and service labels only
+    blob = json.dumps(line)
+    assert "sub:" not in blob and "@" not in blob.replace('"metric": null', "")
+
+
+def test_a_pipeline_statement_fills_the_user_chain_from_the_bound_owner(local_conn, capsys):
+    from data_agent import pipeline
+    from data_agent.context import results
+
+    results.STORE.bind("sub:u-42")
+    pipeline.run_text("SELECT 1")
+    a = json.loads([ln for ln in capsys.readouterr().out.splitlines() if '"audit"' in ln][-1])[
+        "audit"
+    ]
+    assert a["user_sub"] == results.owner_id("sub:u-42") == a["owner"]
+    assert a["agent_identity"]  # always set (env, else the surface name)

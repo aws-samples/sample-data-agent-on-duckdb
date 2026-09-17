@@ -22,12 +22,77 @@ import time
 NAMESPACE = os.environ.get("AUDIT_METRIC_NAMESPACE", "DataAgentOnDuckDB")
 ENABLED = os.environ.get("AUDIT_LOG", "1") == "1"
 SQL_MAX = 2000
+# The agent's own identity, next to the user's. AgentCore does not expose
+# the runtime's workload identity to the container as an environment variable
+# (checked on a deployed runtime: neither BEDROCK_AGENTCORE_WORKLOAD_IDENTITY_NAME nor a
+# runtime-id variable is present), so the operator labels the deployment —
+# `--env AGENT_IDENTITY=duckdb_analyst` / `duckdb_analyst_mcp`. Falls back to the
+# surface name, then "local". A non-secret service label either way.
+AGENT_IDENTITY = (
+    os.environ.get("AGENT_IDENTITY")
+    or os.environ.get("BEDROCK_AGENTCORE_WORKLOAD_IDENTITY_NAME")
+    or os.environ.get("AGENT_SURFACE")
+    or "local"
+)
 
-_session = {"statements": 0, "rejected": 0, "materialized": 0, "engine_ms": 0.0, "rows": 0}
+_session = {
+    "statements": 0,
+    "rejected": 0,
+    "materialized": 0,
+    "engine_ms": 0.0,
+    "rows": 0,
+    "expanded_paths": 0,
+    "input_tokens": 0,
+}
+
+
+class _LineTracker:
+    """stdout wrapper that remembers whether the last write ended a line.
+
+    Strands' printing handler streams the model's answer to stdout WITHOUT a
+    trailing newline, so an EMF line written right after it was glued to prose
+    and CloudWatch could not extract its metrics (seen in the cloud twice, the
+    second time for tool-time refusals). Knowing the column lets `record`
+    start a fresh line only when it has to."""
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        # Position unknown until we have written something ourselves: anything
+        # already on the line (streamed prose) happened before we wrapped, so
+        # the first record after wrapping starts a fresh line defensively.
+        self.at_line_start = False
+
+    def write(self, s):
+        if s:
+            self.at_line_start = s.endswith("\n")
+        return self._stream.write(s)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _tracked_stdout() -> _LineTracker:
+    if not isinstance(sys.stdout, _LineTracker):
+        sys.stdout = _LineTracker(sys.stdout)
+    return sys.stdout
 
 
 def reset_session() -> None:
-    _session.update(statements=0, rejected=0, materialized=0, engine_ms=0.0, rows=0)
+    _session.update(
+        statements=0,
+        rejected=0,
+        materialized=0,
+        engine_ms=0.0,
+        rows=0,
+        expanded_paths=0,
+        input_tokens=0,
+    )
+
+
+def note_tokens(input_tokens: int) -> None:
+    """Record the turn's measured input tokens: the audit line and the
+    session budget both need the number the model actually paid for."""
+    _session["input_tokens"] = max(_session["input_tokens"], int(input_tokens or 0))
 
 
 def session_counters(compressed: int = 0) -> dict:
@@ -39,7 +104,7 @@ def record(
     principal: str,
     sql: str,
     outcome: str,  # executed | rejected | error
-    stage: str | None = None,  # gate | governance | cost | engine (for rejected/error)
+    stage: str | None = None,  # gate | handle | semantic | governance | cost | engine | session
     reason: str | None = None,
     governed: bool = False,
     rls: list | None = None,
@@ -50,6 +115,11 @@ def record(
     engine_ms: float | None = None,
     materialized: str | None = None,
     tool: str = "run_sql",
+    metric: str | None = None,
+    owner: str | None = None,
+    user_sub: str | None = None,
+    source: str | None = None,
+    degraded: str | None = None,
 ) -> dict:
     """Build, emit and count one audit record. Never raises."""
     rec = {
@@ -87,7 +157,17 @@ def record(
             "cls": cls or [],
             "cost": cost or None,
             "shape": shape,
+            "rows": int(rows or 0),  # also a metric; here so one Logs Insights row is complete
             "materialized": materialized,
+            "metric": metric,  # "<name>@<version>" when the statement came from call_metric
+            "owner": owner,  # session owner digest the `_r_<n>` handles are bound to
+            # The two identity chains, joinable on user_sub + session:
+            "agent_identity": AGENT_IDENTITY,  # WHICH agent
+            "user_sub": user_sub,  # ON WHOSE BEHALF (digest, never the raw sub)
+            "input_tokens": _session["input_tokens"],  # what the turn has cost so far
+            # Rows that did not come from the lake:
+            "source": source,  # the gateway tool that produced them
+            "degraded": degraded,  # "2lo" when the source saw a service identity, not the user
         },
     }
     _session["statements"] += 1
@@ -97,10 +177,14 @@ def record(
         _session["materialized"] += 1
     _session["engine_ms"] += float(engine_ms or 0.0)
     _session["rows"] += int(rows or 0)
+    _session["expanded_paths"] += int((cost or {}).get("expanded_paths") or 0)
     if ENABLED:
         try:
-            sys.stdout.write(json.dumps(rec, default=str) + "\n")
-            sys.stdout.flush()
+            out = _tracked_stdout()
+            if not out.at_line_start:
+                out.write("\n")  # never glue the EMF JSON to streamed prose
+            out.write(json.dumps(rec, default=str) + "\n")
+            out.flush()
         except Exception:  # noqa: BLE001, S110 — auditing must never break the tool  # nosec B110
             pass
     return rec

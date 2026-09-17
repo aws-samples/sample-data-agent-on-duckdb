@@ -12,7 +12,7 @@ import pytest
 import agent as agent_mod
 from data_agent import governance
 from data_agent.compute import engine
-from data_agent.context import prompt
+from data_agent.context import prompt, results
 from data_agent.governance import policies as gov_policies
 from data_agent.pipeline import run_text as run_sql
 from data_agent.scheduling import runtime
@@ -46,6 +46,7 @@ def _reset_governance():
 def local_conn(monkeypatch):
     """Swap the S3-backed connection for a plain in-memory DuckDB."""
     conn = duckdb.connect()
+    conn.execute("SET home_directory='/tmp'")  # where the pre-installed extensions live
     conn.execute("CREATE TABLE t AS SELECT range AS id, 'x' || range AS name FROM range(500)")
     monkeypatch.setattr(engine, "get_conn", lambda: conn)
     yield conn
@@ -115,7 +116,7 @@ def test_leading_comment_does_not_smuggle_a_write():
 def test_result_is_json_with_column_names(local_conn):
     out = run_sql("SELECT id, name FROM t WHERE id < 3 ORDER BY id")
     rows = json.loads(out.split("\n")[0])  # line 1 = rows, line 2 = metrics
-    assert rows == [
+    assert [{k: results.unmark(v) for k, v in r.items()} for r in rows] == [
         {"id": "0", "name": "x0"},
         {"id": "1", "name": "x1"},
         {"id": "2", "name": "x2"},
@@ -387,7 +388,7 @@ def test_denied_column_explicit_select_is_cleanly_rejected(local_conn):
     assert "customer#1" not in out  # the value never leaks
     # a non-denied column on the same governed table still works
     ok = run_sql("SELECT address FROM cex_deposit_labels")
-    assert '"address": "0xabc"' in ok
+    assert '"address": "data:«0xabc»"' in ok  # text cells arrive as data:«…»
     assert '"governed": true' in ok
 
 
@@ -400,7 +401,7 @@ def test_investigator_may_select_the_identity_column(local_conn):
     )
     governance.set_active_role(INVESTIGATOR)
     out = run_sql("SELECT subject_identity FROM cex_deposit_labels")
-    assert '"subject_identity": "customer#1"' in out
+    assert '"subject_identity": "data:«customer#1»"' in out
     assert '"governed": true' in out
 
 
@@ -455,9 +456,7 @@ def two_scenario_conn(local_conn):
         ("exchange-a:junior", "SELECT message FROM cw_logs WHERE date='2026-09-02'", "audit line"),
     ],
 )
-def test_unlisted_table_is_refused_for_restricted_principals(
-    two_scenario_conn, role, sql, leaked
-):
+def test_unlisted_table_is_refused_for_restricted_principals(two_scenario_conn, role, sql, leaked):
     governance.set_active_role(role)
     out = run_sql(sql)
     assert out.startswith("ERROR: governance:") and "not in the access policy" in out
@@ -469,7 +468,7 @@ def test_admin_still_reads_every_mounted_table_including_cw_logs(two_scenario_co
     to the unrestricted operator role and nobody else."""
     governance.set_active_role("ops:admin")
     out = run_sql("SELECT message FROM cw_logs WHERE date='2026-09-02'")
-    assert '"message": "audit line"' in out
+    assert '"message": "data:«audit line»"' in out
 
 
 def test_unrestricted_readable_table_needs_no_guard(local_conn):
@@ -536,9 +535,7 @@ def test_session_rebind_detects_a_changed_owner():
     assert runtime._bind_session(runtime._owner_key(None, "exchange-a:junior")) is True
 
 
-def test_session_reset_clears_engine_results_history_and_counters(
-    local_conn, monkeypatch, capsys
-):
+def test_session_reset_clears_engine_results_history_and_counters(local_conn, monkeypatch, capsys):
     from data_agent import audit
     from data_agent.context import results
 
@@ -920,6 +917,22 @@ def test_map_event_translates_strands_events_and_accumulates_trace():
     assert runtime.map_event({"init_event_loop": True}, trace) is None
 
 
+def test_map_event_sums_model_call_usage_into_the_turn_accounting():
+    """Each Bedrock stream `metadata.usage` chunk is one model call; the
+    turn's totals ride on the final result envelope for the eval token column."""
+    trace, usage = [], runtime.new_usage()
+    chunk = {"event": {"metadata": {"usage": {"inputTokens": 4100, "outputTokens": 120}}}}
+    assert runtime.map_event(chunk, trace, usage) is None  # accounted, not rendered
+    runtime.map_event(
+        {"event": {"metadata": {"usage": {"inputTokens": 4900, "outputTokens": 80}}}}, trace, usage
+    )
+    assert usage == {"input_tokens": 9000, "output_tokens": 200, "model_calls": 2}
+    assert trace == []
+    # without an accumulator the chunk is simply dropped; other events are untouched
+    assert runtime.map_event(chunk, trace) is None
+    assert runtime.map_event({"data": "x"}, trace, usage) == {"kind": "text", "text": "x"}
+
+
 def test_map_event_does_not_confuse_tool_stream_data_with_text():
     """A tool_stream_event dict must not be mis-read as an assistant text delta."""
     trace = []
@@ -1010,7 +1023,7 @@ def test_temp_table_materialisation_carries_only_governed_rows(labels_conn):
     created = run_sql("CREATE TEMP TABLE ws AS SELECT * FROM cex_deposit_labels")
     assert not created.startswith("ERROR"), created
     rows = json.loads(run_sql("SELECT * FROM ws").split("\n")[0])
-    assert [r["exchange"] for r in rows] == ["exchange-a"]
+    assert [results.unmark(r["exchange"]) for r in rows] == ["exchange-a"]
     assert "subject_identity" not in rows[0]
 
 
@@ -1084,7 +1097,7 @@ def test_pivot_operates_on_governed_rows_not_the_reverse(labels_conn):
     governed = governance.apply_governance(sql)
     assert governed.index("exchange = 'exchange-a'") < governed.index("PIVOT")
     rows = json.loads(run_sql(sql).split("\n")[0])
-    assert len(rows) == 1 and rows[0]["exchange"] == "exchange-a"
+    assert len(rows) == 1 and results.unmark(rows[0]["exchange"]) == "exchange-a"
 
 
 # ---------------- 3. missing identity must land on the deny-all floor -------

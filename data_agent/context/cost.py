@@ -34,6 +34,16 @@ from data_agent.storage.registry import PARTITIONED_SOURCES
 
 MAX_EXPANDED_PARTITIONS = int(os.environ.get("MAX_EXPANDED_PARTITIONS", "366"))
 
+# Session budget. A single statement is bounded by the partition gate and
+# the memory envelope; a SESSION is not — an agent loop can spend a tenant's
+# quota in statements that are each individually cheap (measured elsewhere:
+# agent-driven query volume 10-100x a human's). These caps are per session,
+# enforced in the Cost stage (the layer that already decides what a statement
+# may cost) and refused with a message that says which budget ran out. 0 = off.
+SESSION_MAX_STATEMENTS = int(os.environ.get("SESSION_MAX_STATEMENTS", "0"))
+SESSION_MAX_EXPANDED_PATHS = int(os.environ.get("SESSION_MAX_EXPANDED_PATHS", "0"))
+SESSION_MAX_ENGINE_MS = float(os.environ.get("SESSION_MAX_ENGINE_MS", "0"))
+
 # view name → spec; tests monkeypatch this
 SOURCES: dict[str, dict] = dict(PARTITIONED_SOURCES)
 
@@ -52,6 +62,33 @@ _READER_NAMES = (
 
 class CostRejected(ValueError):
     """Statement refused by the cost policy (message is model-actionable)."""
+
+
+class BudgetExceeded(CostRejected):
+    """The SESSION's budget is spent — no statement will run in this
+    session again, so the message tells the model to stop and report."""
+
+
+def check_budget(counters: dict) -> None:
+    """Raise BudgetExceeded when a session cap is reached. `counters` is
+    `audit.session_counters()` — statements, expanded_paths, engine_ms so far."""
+    caps = (
+        ("statements", SESSION_MAX_STATEMENTS, "SESSION_MAX_STATEMENTS", "statements"),
+        (
+            "expanded_paths",
+            SESSION_MAX_EXPANDED_PATHS,
+            "SESSION_MAX_EXPANDED_PATHS",
+            "expanded partition paths",
+        ),
+        ("engine_ms", SESSION_MAX_ENGINE_MS, "SESSION_MAX_ENGINE_MS", "engine milliseconds"),
+    )
+    for key, cap, knob, label in caps:
+        if cap and counters.get(key, 0) >= cap:
+            raise BudgetExceeded(
+                f"session budget: this session has used {counters[key]:g} {label}, the limit is "
+                f"{cap:g} ({knob}). No further statement will run in this session — summarize "
+                "what you already have and tell the user the budget is exhausted."
+            )
 
 
 def apply(sql: str) -> tuple[str, dict]:

@@ -263,3 +263,44 @@ def test_streaming_tool_emits_a_cost_phase_only_for_partitioned_sources(hive_con
     rejected = asyncio.run(_collect("SELECT count(*) FROM tt"))
     assert [e["phase"] for e in rejected if isinstance(e, dict)] == ["gate", "rewrite", "cost"]
     assert rejected[-1].startswith("ERROR: cost policy")
+
+
+# ------------------------------------------------------- session budget
+def test_session_budget_refuses_every_statement_once_a_cap_is_reached(local_conn, monkeypatch):
+    """A statement is bounded by the partition gate; a SESSION is not. The caps
+    are checked in the Cost stage before the statement's own cost, so a spent
+    session refuses even a cheap query — and says which budget ran out."""
+    from data_agent import audit, pipeline
+
+    monkeypatch.setattr(cost, "SESSION_MAX_STATEMENTS", 2)
+    audit.reset_session()
+    assert not pipeline.run_text("SELECT 1").startswith("ERROR")
+    assert not pipeline.run_text("SELECT 2").startswith("ERROR")
+    items = list(pipeline.run("SELECT 3"))
+    ev = [i for i in items if isinstance(i, dict) and i.get("phase") == "cost"]
+    assert ev and ev[0]["budget"] is True
+    assert "SESSION_MAX_STATEMENTS" in items[-1] and "budget is exhausted" in items[-1]
+    assert audit.session_counters()["statements"] == 3  # the refusal is audited too
+
+
+@pytest.mark.parametrize(
+    "knob, counters, label",
+    [
+        ("SESSION_MAX_STATEMENTS", {"statements": 5}, "statements"),
+        ("SESSION_MAX_EXPANDED_PATHS", {"expanded_paths": 400}, "expanded partition paths"),
+        ("SESSION_MAX_ENGINE_MS", {"engine_ms": 60000.0}, "engine milliseconds"),
+    ],
+)
+def test_each_budget_dimension_is_enforced_and_named(knob, counters, label, monkeypatch):
+    monkeypatch.setattr(cost, knob, list(counters.values())[0])
+    with pytest.raises(cost.BudgetExceeded, match=label):
+        cost.check_budget(counters)
+    monkeypatch.setattr(cost, knob, 0)  # 0 = off
+    cost.check_budget(counters)
+
+
+def test_budgets_are_off_by_default():
+    assert cost.SESSION_MAX_STATEMENTS == 0
+    assert cost.SESSION_MAX_EXPANDED_PATHS == 0
+    assert cost.SESSION_MAX_ENGINE_MS == 0
+    cost.check_budget({"statements": 10**6, "expanded_paths": 10**6, "engine_ms": 10**9})

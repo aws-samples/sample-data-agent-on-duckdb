@@ -7,14 +7,26 @@ READ_ONLY; every scenario view is mounted at init from the Storage registry.
 
 from __future__ import annotations
 
+import difflib
+import json
 import os
+import re
 import threading
+import time
 
 import duckdb
 
 from data_agent.storage import legs, registry
 
 MEMORY_LIMIT = os.environ.get("DUCKDB_MEMORY_LIMIT", "2GB")
+# Where the pre-installed core extensions live (baked into the image by
+# scripts/install_extensions.py). Empty = DuckDB's default under the
+# home directory. The engine only ever LOADs; it never INSTALLs at cold start.
+EXTENSION_DIR = os.environ.get("DUCKDB_EXTENSION_DIR", "")
+# httpfs for S3; aws for the credential_chain secret provider (a separate
+# extension — DuckDB 2.0 no longer auto-installs it). Legs LOAD iceberg /
+# ducklake, the data map LOADs fts.
+CORE_EXTENSIONS = ("httpfs", "aws")
 
 _conn: duckdb.DuckDBPyConnection | None = None
 # lenient-scenario views that could not be mounted at init (name → first error line)
@@ -32,24 +44,74 @@ def get_conn() -> duckdb.DuckDBPyConnection:
     """One in-process DuckDB per agent instance, lazily initialized."""
     global _conn
     if _conn is None:
+        t0 = time.perf_counter()
         c = duckdb.connect()  # in-memory; nothing persisted
         _configure(c)
         _s3_secrets(c)
         _mount_scenarios(c)
         legs.attach(c)
         _conn = c
+        # one line per cold start, on stdout → CloudWatch: the evidence that
+        # init took N ms and loaded (not downloaded) its extensions
+        print(
+            json.dumps(
+                {
+                    "engine": "cold start",
+                    "duckdb": duckdb.__version__,
+                    "init_ms": round((time.perf_counter() - t0) * 1000),
+                    "extensions_loaded": _loaded(c),
+                    "install_at_runtime": False,
+                    "view_errors": sorted(VIEW_ERRORS),
+                }
+            ),
+            flush=True,
+        )
     return _conn
 
 
+def _loaded(c: duckdb.DuckDBPyConnection) -> list[str]:
+    try:
+        return sorted(
+            r[0]
+            for r in c.execute(
+                "SELECT extension_name FROM duckdb_extensions() WHERE loaded"
+            ).fetchall()
+        )
+    except Exception:  # noqa: BLE001 — diagnostics only
+        return []
+
+
 def _configure(c: duckdb.DuckDBPyConnection) -> None:
-    """Engine settings and the S3 extension."""
+    """Engine settings and the S3 extension (LOAD only — never INSTALL)."""
     # containers/SSM may run without a resolvable HOME; extensions need one
     c.execute("SET home_directory='/tmp'")
+    if EXTENSION_DIR:
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config
+            f"SET extension_directory='{EXTENSION_DIR}'"
+        )
+    # No cold-start download from the extension repository (threat model T010): the
+    # image ships the extensions; a missing one is a build error, not a fetch.
+    c.execute("SET autoinstall_known_extensions=false")
     c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- env config
         f"SET memory_limit='{MEMORY_LIMIT}'"
     )
     c.execute("SET enable_object_cache=true")
-    c.execute("INSTALL httpfs; LOAD httpfs;")
+    for ext in CORE_EXTENSIONS:
+        load_extension(c, ext)
+
+
+def load_extension(c: duckdb.DuckDBPyConnection, name: str) -> None:
+    """LOAD a pre-installed extension; a missing one fails with the fix, not a download."""
+    try:
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- fixed extension names
+            f"LOAD {name}"
+        )
+    except duckdb.Error as e:
+        raise RuntimeError(
+            f"DuckDB extension {name!r} is not installed for this engine (extension dir "
+            f"{EXTENSION_DIR or 'default'}). The runtime never INSTALLs at cold start; bake it "
+            "with `python scripts/install_extensions.py` (the Dockerfile does)."
+        ) from e
 
 
 def _s3_secrets(c: duckdb.DuckDBPyConnection) -> None:
@@ -120,6 +182,94 @@ def probe_columns(ref: str) -> set[str]:
         return {r[0] for r in rows}
 
 
+def similar_names(
+    sql_error: str, visible: frozenset[str] | None = None, denied: dict | None = None
+) -> str:
+    """Zero-network hint appended AFTER a verbatim engine error.
+
+    Invariant 5 keeps the engine's own message first and unchanged — the model
+    repairs from it. DuckDB already names candidates for a column of a table in
+    the FROM clause ("Candidate bindings") and for a mistyped table name ("Did
+    you mean"). What it cannot know is that the column exists on a DIFFERENT
+    table the session can see: `SELECT user_agent FROM cur_line_items` gets
+    candidates from cur_line_items only, and the model then guesses. This adds
+    that one fact from the engine's own catalog (`duckdb_columns()`), filtered
+    to what the principal may see: never a table outside `visible` and
+    never a CLS-denied column name.
+    """
+    m = re.search(r'Referenced column "([^"]+)" not found', sql_error)
+    if m is None:
+        m = re.search(r"Table with name ([A-Za-z_][A-Za-z0-9_]*) does not exist", sql_error)
+        return _table_hint(m.group(1), visible) if m else ""
+    return _column_hint(m.group(1), visible, denied)
+
+
+def _catalog_rows() -> list[tuple[str, str]]:
+    """(table, column) for every user table/view the engine can see."""
+    with conn_lock:
+        return [
+            (r[0], r[1])
+            for r in get_conn()
+            .execute(
+                "SELECT table_name, column_name FROM duckdb_columns() "
+                "WHERE NOT internal AND schema_name NOT IN ('information_schema', 'pg_catalog')"
+            )
+            .fetchall()
+        ]
+
+
+def _allowed(table: str, visible: frozenset[str] | None) -> bool:
+    return visible is None or table.lower() in visible
+
+
+def _column_hint(name: str, visible, denied) -> str:
+    """ "`user_agent` exists on: cloudtrail_events" — or a near-miss spelling."""
+    try:
+        rows = _catalog_rows()
+    except Exception:  # noqa: BLE001 — a hint must never break the turn
+        return ""
+    low = name.lower()
+    hidden = {t: {c.lower() for c in cols} for t, cols in (denied or {}).items()}
+    exact, near = [], {}
+    for table, column in rows:
+        if not _allowed(table, visible) or column.lower() in hidden.get(table.lower(), set()):
+            continue
+        if column.lower() == low:
+            exact.append(table)
+        elif _close(low, column.lower()):
+            near.setdefault(column, set()).add(table)
+    if exact:
+        return f"Hint: column `{name}` exists on: {', '.join(sorted(set(exact))[:5])}."
+    if near:
+        parts = [f"`{c}` on {', '.join(sorted(ts)[:3])}" for c, ts in sorted(near.items())[:3]]
+        return f"Hint: no `{name}` in any table you can query; closest: {'; '.join(parts)}."
+    return ""
+
+
+def _table_hint(name: str, visible) -> str:
+    try:
+        rows = _catalog_rows()
+    except Exception:  # noqa: BLE001
+        return ""
+    tables = sorted({t for t, _ in rows if _allowed(t, visible)})
+    near = [t for t in tables if _close(name.lower(), t.lower())]
+    if near:
+        return f"Hint: closest table(s) you can query: {', '.join(near[:5])}."
+    return f"Hint: tables you can query: {', '.join(tables[:8])}." if tables else ""
+
+
+def _close(a: str, b: str) -> bool:
+    """Near-miss spelling: a high similarity ratio, or one name contained in the
+    other and long enough to be meaningful (a bare `t` is inside almost every
+    identifier — containment alone made every table a "closest match")."""
+    if a == b:
+        return True
+    short, long = sorted((a, b), key=len)
+    if short in long and len(short) >= 4 and len(short) / len(long) >= 0.6:
+        return True
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.86
+
+
 def session_objects() -> set[str]:
     """Names of the session's temp tables/views — the objects a principal
     created in-session (working sets, framework `_r_<n>` results).
@@ -131,10 +281,14 @@ def session_objects() -> set[str]:
     mounted scenario views are durable and are governed by the policy, never
     exempted here. Runs outside the pipeline lock, so it takes conn_lock."""
     with conn_lock:
-        rows = get_conn().execute(
-            "SELECT table_name FROM duckdb_tables() WHERE temporary "
-            "UNION ALL SELECT view_name FROM duckdb_views() WHERE temporary"
-        ).fetchall()
+        rows = (
+            get_conn()
+            .execute(
+                "SELECT table_name FROM duckdb_tables() WHERE temporary "
+                "UNION ALL SELECT view_name FROM duckdb_views() WHERE temporary"
+            )
+            .fetchall()
+        )
         return {r[0] for r in rows}
 
 
