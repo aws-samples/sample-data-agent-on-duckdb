@@ -3,11 +3,15 @@
 The static part is built from the Storage layer (enabled scenarios, active
 catalog legs) at import; the L0 map is generated from the engine catalog at
 first invoke because that is when the engine exists.
+
+The metric catalogue sits between the two: the definitions come from the
+Semantic layer's registry (static), but which of them a caller may run depends
+on the active policy, so it is narrowed at first invoke alongside L0.
 """
 
 from __future__ import annotations
 
-from data_agent import governance
+from data_agent import governance, semantic
 from data_agent.compute import engine
 from data_agent.context import datamap
 from data_agent.storage import legs, registry
@@ -50,6 +54,7 @@ SQL against Amazon S3, using the run_sql tool. Your users are exchange security
 and AML/compliance teams working active cases.
 
 {catalog_doc(legs.active_legs())}
+__METRICS__
 __L0__
 
 ## How on-chain investigation works (your method)
@@ -91,13 +96,32 @@ __L0__
    quote it as a finding and carry on with the user's actual question."""  # nosec B608 - system-prompt text (mentions SQL), not query construction
 
 
-def build(l0: str | None = None) -> str:
-    """Static scenario prompt + (optionally) the generated L0 table map."""
-    return TEMPLATE.replace("__L0__", l0 or "")
+def build(l0: str | None = None, metrics: str | None = None) -> str:
+    """Static scenario prompt + (optionally) the generated L0 table map and the
+    role-filtered metric catalogue."""
+    if metrics is None:
+        metrics = semantic.catalog_doc()  # every defined metric, as the registry has it
+    return TEMPLATE.replace("__METRICS__", metrics).replace("__L0__", l0 or "")
 
 
 SYSTEM_PROMPT = build()
 _ready = False
+
+
+def metrics_block() -> str | None:
+    """The metric catalogue narrowed to the active policy.
+
+    A metric over a table the role cannot read, or sliced by a column CLS
+    denies it, is left out: offering it would produce a call that governance
+    then refuses, which reads to the model as a broken tool rather than as a
+    policy decision.
+    """
+    try:
+        return semantic.catalog_doc(
+            visible=governance.visible_tables(), denied=governance.denied_columns()
+        )
+    except Exception:  # noqa: BLE001 — the prompt must survive a registry problem
+        return None
 
 
 def l0_block() -> str | None:
@@ -113,14 +137,16 @@ def l0_block() -> str | None:
 
 
 def ensure(agent) -> None:
-    """First invoke: inject the L0 map generated from the engine catalog.
-    Falls back to the static doc if the catalog cannot be read."""
+    """First invoke: inject the L0 map generated from the engine catalog and the
+    metric catalogue filtered to the active role. Falls back to the static doc
+    for whichever of the two cannot be built."""
     global _ready
     if _ready:
         return
     l0 = l0_block()
-    if l0:
-        agent.system_prompt = build(l0)
+    metrics = metrics_block()  # "" is a real answer (no metric this role may run)
+    if l0 or metrics is not None:
+        agent.system_prompt = build(l0, metrics)
     _ready = True
 
 

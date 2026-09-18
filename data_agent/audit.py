@@ -39,8 +39,9 @@ def record(
     principal: str,
     sql: str,
     outcome: str,  # executed | rejected | error
-    stage: str | None = None,  # gate | governance | cost | engine (for rejected/error)
+    stage: str | None = None,  # gate | semantic | governance | cost | engine
     reason: str | None = None,
+    semantic: list | None = None,  # metrics the statement resolved (name + version)
     governed: bool = False,
     rls: list | None = None,
     cls: list | None = None,
@@ -82,6 +83,10 @@ def record(
             "sql": sql[:SQL_MAX],
             "stage": stage,
             "reason": (reason or "")[:500] or None,
+            # which frozen metric definitions produced the figure: the SQL above
+            # is what was asked for, so without this the line cannot say which
+            # version of a number the answer quoted
+            "semantic": semantic or [],
             "governed": governed,
             "rls": rls or [],
             "cls": cls or [],

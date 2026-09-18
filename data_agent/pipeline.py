@@ -1,12 +1,19 @@
-"""One statement through the layers: gate → govern → cost → execute → shape.
+"""One statement through the layers: gate → resolve → govern → cost → execute → shape.
 
 The pipeline is an ordered list of stages with one interface. A stage reads
 and updates the `Statement`, yields its trace event(s) — the live
-`gate → rewrite → cost → execute` line the UI renders and the eval suite
-asserts on — and raises `Rejected` to stop the statement. The driver audits
-exactly once per statement and turns the outcome into the string the model
-reads. Adding a layer (a semantic layer, say) is adding a stage to STAGES;
-neither the tool nor the UI changes.
+`gate → semantic → rewrite → cost → execute` line the UI renders and the eval
+suite asserts on — and raises `Rejected` to stop the statement. The driver
+audits exactly once per statement and turns the outcome into the string the
+model reads. Adding a layer is adding a stage to STAGES; neither the tool nor
+the UI changes (`ui/app.py` renders an unrecognised phase by name).
+
+Stage order is a property, not a preference: the semantic layer EXPANDS (a
+metric name becomes SQL over base tables) and governance NARROWS (row filter
+injected, denied columns excluded), so semantic runs first and governance sees
+the expanded statement. Semantic and Cost emit no trace event for a statement
+they have nothing to do with, so a plain SQL query still traces as
+`gate → rewrite → execute`.
 
 `run()` is a plain generator so the streaming tool can pump it one item at a
 time off the event loop while a synchronous caller (tests, CLI) just takes
@@ -20,7 +27,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from data_agent import audit, governance
+from data_agent import audit, governance, semantic
 from data_agent.compute import engine, gate
 from data_agent.context import cost, results
 
@@ -38,9 +45,11 @@ governance.set_session_lister(engine.session_objects)
 class Statement:
     """What the stages know about one statement, accumulated in order."""
 
-    sql: str  # as submitted by the model
+    sql: str  # as submitted by the model, then as the semantic layer expanded it
     principal: str
+    submitted: str = ""  # the original text, kept for the audit line
     query_shaped: bool = False  # SELECT/WITH → materialize-and-shape; else direct
+    resolved: list = field(default_factory=list)  # metric definitions this statement used
     governed_sql: str = ""
     governed: bool = False
     applied: dict = field(default_factory=lambda: {"rls": [], "cls": []})
@@ -53,8 +62,8 @@ class Rejected(Exception):
     """A stage refused the statement (or the engine failed it).
 
     `reason` is what the audit line records, `text` the string the model
-    reads, `audit_stage` the audit vocabulary (gate | governance | cost |
-    engine), `outcome` rejected | error.
+    reads, `audit_stage` the audit vocabulary (gate | semantic | governance |
+    cost | engine), `outcome` rejected | error.
     """
 
     def __init__(
@@ -88,6 +97,42 @@ class Gate:
             raise Rejected(err, audit_stage="gate", text=err)
         st.query_shaped = gate.query_shaped(st.sql)
         yield {"phase": "gate", "allowed": True, "sql": st.sql[:400]}
+
+
+class Semantic:
+    """Semantic layer: a `metric(...)` call becomes the SQL its definition
+    fixes, before any other layer sees the statement. Emits a trace event only
+    for statements that call a metric, so ordinary SQL traces unchanged."""
+
+    phase = "semantic"
+
+    def run(self, st: Statement) -> Iterator[dict]:
+        try:
+            expanded, resolved = semantic.expand(st.sql)
+        except semantic.MetricNotCovered as e:
+            # An undefined metric, dimension or window is a refusal that names
+            # what exists, so the model's next attempt is a correct call. The
+            # alternative — expanding something close — answers a question
+            # nobody asked with a number nobody agreed to.
+            yield {"phase": "semantic", "rejected": True, "reason": str(e)}
+            raise Rejected(str(e), audit_stage="semantic") from e
+        if not resolved:
+            return
+        st.sql, st.resolved = expanded, resolved
+        yield {
+            "phase": "semantic",
+            "metrics": [
+                {
+                    "metric": r["metric"],
+                    "version": r["version"],
+                    "unit": r["unit"],
+                    "owner": r["owner"],
+                    "scope": r["scope"],
+                }
+                for r in resolved
+            ],
+            "rewritten_sql": st.sql[:600],
+        }
 
 
 class Govern:
@@ -167,14 +212,17 @@ class Execute:
         }
 
 
-STAGES: list[Stage] = [Gate(), Govern(), Cost(), Execute()]
+STAGES: list[Stage] = [Gate(), Semantic(), Govern(), Cost(), Execute()]
 
 
 def _audit(st: Statement, *, outcome: str, stage: str | None = None, reason: str | None = None):
     res = st.result or {}
     audit.record(
         principal=st.principal,
-        sql=st.sql,
+        # what the caller submitted, not what the semantic layer expanded it
+        # into: an audit line has to show the request that was made
+        sql=st.submitted or st.sql,
+        semantic=[{"metric": r["metric"], "version": r["version"]} for r in st.resolved],
         outcome=outcome,
         stage=stage,
         reason=reason,
@@ -196,7 +244,7 @@ def run(sql: str) -> Iterator[dict | str]:
     exactly one string — the result the model reads. Every statement is
     audited once, whatever the outcome.
     """
-    st = Statement(sql=sql, principal=governance.active_role())
+    st = Statement(sql=sql, principal=governance.active_role(), submitted=sql)
     try:
         for stage in STAGES:
             yield from stage.run(st)
@@ -212,7 +260,13 @@ def run(sql: str) -> Iterator[dict | str]:
         yield f"ERROR: {e}"
         return
     _audit(st, outcome="executed")
-    yield results.format_result(st.result, st.governed)
+    text = results.format_result(st.result, st.governed)
+    if st.resolved:
+        # The definitions travel with the rows. The trace shows them to a human
+        # reader, but the model writes the answer, so a figure quoted without
+        # its scope is exactly the failure this layer exists to prevent.
+        text += "\n" + semantic.source_footer(st.resolved)
+    yield text
 
 
 def run_text(sql: str) -> str:

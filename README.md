@@ -12,6 +12,10 @@ What makes it a data agent rather than a SQL tool:
 - **A context layer between the model and the engine** — a data map generated
   from the engine catalog, a cost gate that refuses unbounded scans, results kept
   whole in the engine instead of truncated, history compressed into pointers.
+- **A semantic layer that fixes what a number means** — a business metric is
+  compiled from a definition frozen in code, not re-derived by the model each
+  turn; a metric, dimension or window nobody defined is refused rather than
+  approximated.
 - **One engine, four ways to reach the same data on S3** — raw Parquet, S3
   Tables, Glue Data Catalog, DuckLake; same agent code, same governance.
 - **Every statement visible** — streamed live to the UI as a trace and audited
@@ -28,16 +32,18 @@ policies. Data domains are plug-in scenarios; two ship with the repo.
 > data**, not real attribution (the OFAC sanctioned-address list is real and
 > cited below).
 
-## Five-layer architecture
+## Six-layer architecture
 
 Each layer has one responsibility and one place to live, listed in the order a
-request flows through them. The layering is additive — a semantic layer is the
-likely next one.
+request flows through them. The layering is additive — the semantic layer
+arrived as one package and one stage in the statement pipeline, with no change
+to the tool, the UI or any other layer, and the next layer arrives the same way.
 
 | Layer | Lives in | Responsibility | Mechanism |
 |---|---|---|---|
 | **Scheduling** | agent platform (AgentCore Runtime; `data_agent/scheduling/`) | session and resource management | one session = one microVM = one engine; identity claims in, streamed envelopes out; no separate scheduler or workload groups |
 | **Context** | agent framework (`data_agent/context/`) | what the model sees and what the engine is asked | data map generated from the engine catalog; partition-filter cost gate; results shaped, never truncated; history compressed into pointers at engine tables |
+| **Semantic** | metric registry + compiler (`data_agent/semantic/`) | what a business number means | `metric('inbound_eth', …)` in the SQL expands to the definition frozen in code — rows in scope, unit, conversions — before governance narrows it; an undefined metric, dimension or window is refused with the available names |
 | **Governance** | SQL-rewrite layer (`data_agent/governance/`) | authorization: who may see what | identity-aware RLS/CLS rewrite before the engine, from verified JWT claims; fail-closed; total by construction |
 | **Compute** | in-process DuckDB (`data_agent/compute/`) | SQL execution | the engine runs inside the agent process and reads S3 in place; working sets and oversized results stay in the engine as session temp tables |
 | **Storage** | Amazon S3 (`data_agent/storage/`) | durable data | Parquet and native exports, Iceberg tables (S3 Tables, Glue Data Catalog), DuckLake — the same data reachable through four access paths |
@@ -52,6 +58,8 @@ Streamlit UI ──▶ AgentCore Runtime (1 session = 1 microVM = 1 DuckDB)
   (Cognito JWT)   ├─ AuthN: inbound JWT authorizer → verified claims {tenant, role}
    SSE stream ◀── ├─ Strands Agent + Bedrock Claude (writes SQL, reads shaped results)
                   ├─ Context layer    — data map · cost gate · result shaping · history stubs
+                  ├─ Semantic layer   — metric(...) → the definition frozen in code,
+                  │                     expanded BEFORE governance narrows it
                   ├─ Governance layer — claims → policy, sqlglot RLS/CLS rewrite + hardening
                   │                     BEFORE the engine
                   └─ DuckDB in-process (httpfs / iceberg / ducklake / fts extensions)
@@ -61,7 +69,7 @@ Streamlit UI ──▶ AgentCore Runtime (1 session = 1 microVM = 1 DuckDB)
                        ├─ Path D: DuckLake      — SQL-database catalog, Parquet on S3
                        └─ _r_<n> result tables · session working sets (temp, die with the session)
 Aux: IAM execution role (least privilege) · CloudWatch Logs (one EMF audit line per statement)
-Every run_sql streams its gate → govern → cost → execute trace back over the same SSE channel.
+Every run_sql streams its gate → semantic → rewrite → cost → execute trace over the same SSE channel.
 ```
 </details>
 
@@ -97,6 +105,35 @@ Every mechanism relies on the engine being in-process: the data map is read
 from the engine catalog, oversized results become engine tables, compressed
 history points at those tables. Defaults come from failure modes measured in
 production data-agent deployments. Design notes: [docs/design.md](docs/design.md).
+
+## Semantic: what a business number means
+
+Ask for "inbound ETH" and a model writes a defensible aggregate every time —
+from `eth_transactions` instead of `eth_traces`, or including reverted traces,
+or counting `delegatecall` rows that carry the parent call's value. Each answer
+is plausible, each is a different number, and the transcript does not say which
+definition produced it. The semantic layer makes the definition code:
+
+```sql
+SELECT * FROM metric('inbound_eth', address => '0x…', time_window => 'last_7d')
+-- expands, before any other layer sees it, to:
+--   SELECT SUM(value) / 1e18 AS inbound_eth FROM eth_traces
+--   WHERE status = 1 AND call_type = 'call' AND lower(to_address) = lower('0x…')
+--     AND date BETWEEN '2025-02-18' AND '2025-02-24'
+```
+
+| Property | How |
+|---|---|
+| **One definition per number** | `data_agent/semantic/metrics.py`: table, measure, rows in scope, allowed dimensions, unit, owner, version, prose definition — the compiler reads this and nothing else |
+| **Not-covered is explicit** | an unknown metric, an unsupported dimension, a window of the wrong granularity or a missing parameter is refused with the available names listed; the model cannot reach a number by a route nobody defined |
+| **It composes** | the call expands to a subquery, so a metric can be joined, wrapped in `CREATE TEMP TABLE`, or aggregated further — which a tool that returns rows cannot do |
+| **Expand before narrow** | the stage runs after the read-only gate and before governance, so RLS and CLS apply to what the metric compiled to |
+| **Cost-compatible by construction** | relative windows resolve to literal dates, so the cost layer expands them into explicit per-partition paths (a subquery anchor would pass the gate and then defeat the expansion) |
+| **The definition travels with the figure** | name, version, unit, owner and rows in scope reach the trace, the model's result, and the audit line |
+
+The prompt catalogue is filtered the way the data map is: a metric whose
+scenario is not mounted or whose table the caller's policy does not name is not
+offered, and a column-denied dimension is not offered as a slice.
 
 ## Governance: who may see what
 
@@ -143,9 +180,9 @@ to files differs. All four returned identical results on the incident slice
 
 A scenario is a data domain plugged into the storage layer: its views over S3,
 the partition columns the cost gate must see, a prompt section, and the personas
-it ships as default policies. Two are included; further ones (a third domain, a
-semantic layer over either) plug in the same way — one module under
-`data_agent/storage/scenarios/` and one registry entry.
+it ships as default policies. Two are included; a third plugs in the same way —
+one module under `data_agent/storage/scenarios/` and one registry entry. Each
+scenario also owns its metric definitions in the semantic registry.
 
 ### Scenario 1 — on-chain fund-flow investigation
 
@@ -362,10 +399,11 @@ All framework knobs are documented in `.env.example`.
 | `agent.py` | Composition root: Strands agent + tools + conversation manager, AgentCore entrypoint, local CLI |
 | `data_agent/scheduling/` | Scheduling layer: AgentCore runtime side (claims, SSE envelopes, session counters), CLI |
 | `data_agent/context/` | Context layer: data map, cost gate, result shaping, history compression, prompt assembly |
+| `data_agent/semantic/` | Semantic layer: the metric registry (one frozen definition per number) and the compiler behind the `metric(...)` call |
 | `data_agent/governance/` | Governance layer (authorization only): policies · hardening for every role · sqlglot RLS/CLS rewrite |
 | `data_agent/compute/` | Compute layer: in-process engine (connection, mounts, lock, schema prober), read-only gate |
 | `data_agent/storage/` | Storage layer: catalog legs (S3 Tables / Glue / DuckLake), scenarios (`onchain`, `cloudops`) as one `Scenario` object each, registry |
-| `data_agent/pipeline.py` · `data_agent/tools.py` | Statement pipeline (gate → govern → cost → execute stages, one audit line each); the `run_sql` / `search_schema` tools |
+| `data_agent/pipeline.py` · `data_agent/tools.py` | Statement pipeline (gate → semantic → rewrite → cost → execute stages, one audit line each); the `run_sql` / `search_schema` tools |
 | `data_agent/audit.py` | One EMF audit line per statement → CloudWatch metrics; session counters |
 | `ui/` | Streamlit chat UI: Cognito login, streamed reasoning, live trace, Trace tab |
 | `infra/` | CDK app: S3 Tables bucket, DuckLake bucket, Cognito pool, least-privilege execution role |
@@ -373,8 +411,8 @@ All framework knobs are documented in `.env.example`.
 | `scripts/load_ops_data.py` | Cloud-ops data load — CUR 2.0 / CloudTrail / CloudWatch Logs exports to partitioned Parquet |
 | `scripts/run_eval.py` + `tests/eval/` | Evaluation suite: yaml cases, trace-event assertions, local or cloud mode |
 | `scripts/jwt_invoke.py` · `scripts/stream_smoke.py` · `scripts/ab_compare.py` | Headless invoke (JWT / SigV4) · in-process vs query-service comparison |
-| `tests/unit/` | 303 unit tests — gate, governance, cost, results, context, data map, audit, ops personas, storage registry, pipeline stages; no network |
-| `docs/design.md` | Design notes: five layers, invariants, context-layer mechanisms, governance rationale, scenarios, decision table |
+| `tests/unit/` | 353 unit tests — gate, governance, cost, results, context, data map, audit, ops personas, storage registry, pipeline stages, semantic layer; no network |
+| `docs/design.md` | Design notes: six layers, invariants, context- and semantic-layer mechanisms, governance rationale, scenarios, decision table |
 | `docs/threat-model/` | Threat model (Threat Composer format + report) |
 
 ## Cost

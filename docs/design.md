@@ -3,24 +3,27 @@
 Design rationale and invariants behind the sample. The README covers what it
 does and how to run it; this document covers why it is built this way.
 
-## Architecture — five layers
+## Architecture — six layers
 
 A traditional database owns everything: storage, catalog, permissions,
 scheduling and execution. This solution keeps only execution in-process and
-externalizes the rest, then adds the one layer an *agent* needs that a
-database does not: a context layer between the model and the engine. Each
-layer has one responsibility and one place to live, listed in the order a
-request flows through them. The layering is additive — a semantic layer is
-the likely next one. Governance and Context are deliberately separate:
+externalizes the rest, then adds the two layers an *agent* needs that a
+database does not: a context layer between the model and the engine, and a
+semantic layer that fixes what a business number means. Each layer has one
+responsibility and one place to live, listed in the order a request flows
+through them. The layering is additive — the semantic layer arrived as one
+stage in the statement pipeline and one registry, and the next layer arrives
+the same way. Governance, Context and Semantic are deliberately separate:
 Governance is authorization and nothing else; Context is what the model sees
-and what the engine is asked to do. Storage is the durable data on S3 and
-nothing else — session working sets and `_r_<n>` result tables are engine
-temp tables and belong to Compute.
+and what the engine is asked to do; Semantic is what a figure means. Storage
+is the durable data on S3 and nothing else — session working sets and
+`_r_<n>` result tables are engine temp tables and belong to Compute.
 
 | Layer | Lives in | Responsibility | Mechanism |
 |---|---|---|---|
 | Scheduling | AgentCore Runtime; `data_agent/scheduling/` is what it calls into | session and resource management | one session = one microVM = one engine; claims in, streamed envelopes out |
 | Context | `data_agent/context/` (datamap · cost · results · compression · prompt) | what the model sees, what the engine is asked | data map from the engine catalog; partition-filter cost gate + path expansion; shape not truncate; measured-pressure history stubs |
+| Semantic | `data_agent/semantic/` (metrics registry · compiler) | what a business number means | `metric(...)` in the SQL expands to the definition frozen in code, before governance; an undefined metric, dimension or window is refused, not approximated |
 | Governance | `data_agent/governance/` (policies · hardening · rewrite, sqlglot) | authorization | RLS/CLS rewrite before the engine, from verified JWT claims; fail closed; total by construction; universal hardening |
 | Compute | in-process DuckDB (`data_agent/compute/`) | SQL execution | engine inside the agent process, S3 read in place; working sets and `_r_<n>` results kept as session temp tables |
 | Storage | Amazon S3 (`data_agent/storage/`: legs + scenarios) | durable data | Parquet / native exports, Iceberg (S3 Tables, Glue), DuckLake — four access paths to the same data |
@@ -33,8 +36,11 @@ User ──▶ Streamlit chat UI ── Cognito login → ID token (JWT)
           ├─ AuthN: managed inbound JWT authorizer — signature + audience
           │         validated BEFORE agent code runs
           ├─ Strands Agent + Bedrock Claude (writes SQL, reads shaped results)
-          │    └─ streaming: typed SSE envelope, per-SQL gate→govern→cost→execute
+          │    └─ streaming: typed SSE envelope, per-SQL
+          │       gate→semantic→rewrite→cost→execute
           ├─ Context layer      — data map · cost gate · result shaping · history stubs
+          ├─ Semantic layer     — metric(...) → the definition frozen in code,
+          │                       expanded BEFORE governance narrows it
           ├─ Governance layer   — verified claims → role policy,
           │                       sqlglot RLS/CLS rewrite + hardening BEFORE the engine
           └─ DuckDB in-process (httpfs/iceberg/ducklake/fts extensions)
@@ -102,6 +108,14 @@ is asked.
    model should not read whole is stored in full and shown in a different
    shape — a schema summary with a retrieval path — never as "the first N
    rows", which reads as complete and misleads the model.
+10. **A defined number is compiled, not described.** A metric in the registry
+   is reached only by compiling its definition; the model chooses which metric
+   and which slice and never contributes the aggregate. A metric, dimension or
+   window the registry does not define is **refused with the available names
+   listed**, never answered with the nearest plausible number. Prompt guidance
+   cannot carry this: guidance is advice the model may drop on any given turn,
+   and a figure computed from a definition nobody agreed to is wrong in a way
+   no reviewer can see from the answer.
 
 ## Authentication (real, not asserted)
 
@@ -245,6 +259,80 @@ regression surface for any new governed table.
   functions regardless of policy, and requires every file path to carry an
   allowed scheme (`RAW_PATH_SCHEMES`, default `s3://`, case-insensitive).
   Each of these was verified executable before the fix.
+
+## The semantic layer: what a business number means
+
+Governance decides who may see a row. The semantic layer decides what a
+figure *is*. Both are policy, both are enforced by rewriting the statement
+before the engine sees it, and neither is left to model judgement.
+
+The failure mode is specific and does not look like a failure. Ask for
+"inbound ETH" and the model writes a defensible aggregate every time: it may
+read `eth_transactions` instead of `eth_traces` (a contract-mediated credit
+never appears in the top-level table), keep reverted traces, count
+`delegatecall` rows that carry the parent call's value, or divide by 1e9. Each
+answer is plausible, each is a different number, and nothing in the transcript
+says which definition produced it. The on-chain eval asserts 401,346.77 ETH —
+that figure depends on all four decisions, so if the definition drifts the
+eval is measuring a different number under the same name.
+
+**Mechanism.** `data_agent/semantic/metrics.py` holds one frozen entry per
+number: table, measure, constant filters, joins, allowed dimensions,
+parameters, partition column and granularity, unit, owner, version, and the
+prose definition. `compile.py` compiles an entry into SQL and expands calls in
+the submitted statement:
+
+```sql
+SELECT * FROM metric('inbound_eth', address => '0x…', time_window => 'last_7d')
+```
+
+Four decisions worth the reasoning:
+
+- **The surface is SQL, not a second tool.** The pipeline's extension point is
+  a stage, and a stage sees a statement. A call that expands to a subquery also
+  *composes*: JOIN a metric to a working set, wrap it in `CREATE TEMP TABLE`,
+  aggregate it further — none of which a tool that returns rows can do.
+- **The stage runs at index 1**, after the read-only gate and before `Govern`,
+  because expansion widens and governance narrows. A consequence: governance
+  never sees the `metric(...)` node, so its table-function allowlist needs no
+  exception. An unexpanded call would be refused there anyway (an anonymous
+  table function is not an allowed source), which makes that the second line of
+  defence rather than the first.
+- **Relative windows resolve to literal dates at compile time.** A subquery
+  anchor (`date <= (SELECT max(date) FROM …)`) satisfies the cost gate's
+  required-filter check and then defeats its path expansion — a whole-prefix S3
+  LIST by another name. Compiling to `BETWEEN 'a' AND 'b'` means the cost layer
+  can expand it, so the two layers agree by construction rather than by luck.
+  Windows are relative to a per-metric anchor or `SEMANTIC_ANCHOR`; with
+  neither, a relative window is refused rather than resolved to today, which on
+  a static sample dataset reads empty and looks like an answer.
+- **Metrics compile against the raw views, not a mart.** The repository ships
+  loaders and views, never data, and the on-chain source is a public dataset
+  nobody here owns — so a pre-aggregated mart table would be a table the sample
+  cannot produce. The frozen definition is the mechanism; where the aggregation
+  happened is not.
+
+**What the model is told and what it is refused.** The prompt carries a metric
+catalogue filtered the way the data map is: a metric whose scenario is not
+mounted, or whose table the active policy does not name, is not offered, and a
+CLS-denied column is not offered as a dimension — otherwise the model calls
+something that is then refused, which reads as a broken tool rather than as a
+policy. An unknown metric, an unsupported dimension, a window of the wrong
+granularity or a missing parameter is refused with the available names listed
+(`MetricNotCovered` → an audited `semantic` rejection), never answered with the
+nearest plausible number.
+
+**The definition travels with the number.** The trace event carries name,
+version, unit, owner and the rows in scope to the UI, and the same lines are
+appended to the tool result — because the model writes the answer, and a figure
+quoted without its scope is the failure this layer exists to prevent. The audit
+line records which metric versions produced each statement, next to the SQL the
+caller actually submitted.
+
+Invariant 8 (the in-process admission test) scopes to the context layer: like
+the governance and cost rewrites, the semantic layer is an engine-neutral
+sqlglot rewrite in front of the engine, and it is deliberately not a mechanism
+that depends on the engine being local.
 
 ## The context layer: what the model sees, what the engine is asked
 
@@ -420,6 +508,7 @@ and are mirrored in `.env.example`.
 | `MAX_CONTEXT_MESSAGES` | 150 | message-count floor (Strands sliding window), secondary to the token lever |
 | `MAX_EXPANDED_PARTITIONS` | 366 | upper bound of explicit paths the cost rewrite will expand a range into |
 | `RAW_PATH_SCHEMES` | `s3://` | file-path schemes any principal may reference (table functions and replacement scans); case-insensitive |
+| `SEMANTIC_ANCHOR` | unset | anchor date for relative metric windows (`last_30d` ends here); per-metric anchors win, and with neither a relative window is refused rather than resolved to today |
 | `DATAMAP_PROBE_PARTITION` | 2025-02-21 | partition used to DESCRIBE raw sources for the L1 index without a whole-prefix LIST |
 | `DATAMAP_DESCRIBE_BUDGET_S` | 20 | time budget for gathering column names at first search |
 | `AUDIT_LOG` / `AUDIT_METRIC_NAMESPACE` | 1 / `DataAgentOnDuckDB` | EMF audit lines on stdout → CloudWatch metrics |
@@ -428,10 +517,11 @@ and are mirrored in `.env.example`.
 
 ## Code organization: one package per layer, one statement pipeline
 
-The five layers are the package layout, and the statement path is one
+The six layers are the package layout, and the statement path is one
 explicit pipeline instead of hand-wired copies. The point is that the next
-layer (a semantic layer) and the next scenario are each one addition in one
-place.
+layer and the next scenario are each one addition in one place — the semantic
+layer is what that claim was tested against: one package, one stage in
+`STAGES`, no change to the tool, the UI or any other layer.
 
 ```
 agent.py                      composition root: Agent + tools + conversation
@@ -440,11 +530,14 @@ data_agent/
   storage/                    legs.py (s3t/glue/dl mount + docs), registry.py,
                               scenarios/{base,onchain,cloudops}.py
   governance/                 policies.py, hardening.py, rewrite.py (authz only)
+  semantic/                   metrics.py (the registry), compile.py (compiler +
+                              the metric(...) surface + prompt catalogue)
   context/                    results.py, compression.py, datamap.py, cost.py, prompt.py
   compute/                    engine.py (connection, mounts, lock, schema
                               prober), gate.py (read-only gate)
   scheduling/                 runtime.py (claims, envelopes, stream), cli.py
-  pipeline.py                 Gate → Govern → Cost → Execute; run() / run_text()
+  pipeline.py                 Gate → Semantic → Govern → Cost → Execute;
+                              run() / run_text()
   tools.py                    run_sql (pumps the pipeline), search_schema
   audit.py                    one EMF line per statement, session counters
 ```
@@ -466,12 +559,21 @@ data_agent/
   streaming tool pumps the generator one item at a time off the event loop
   (`asyncio.to_thread(next, gen)`), so the trace streams live while the
   engine call runs; the connection lock never spans a yield. A new layer is
-  a new stage in `STAGES` — a test inserts a `semantic` stage and sees
-  `gate → semantic → govern → cost → execute` through the real tool.
+  a new stage in `STAGES` — a test inserts an extra stage and sees
+  `gate → <it> → rewrite → execute` through the real tool. **Stage order is
+  a property, not a preference**: Semantic *expands* (a metric name becomes
+  SQL over base tables) and Governance *narrows* (row filter injected, denied
+  columns excluded), so Semantic runs first and governance rewrites what the
+  metric compiled to. A stage that has nothing to do with a statement emits
+  no trace event (Semantic and Cost both), so plain SQL still traces
+  `gate → rewrite → execute`.
 - **Dependency direction** is downward only: scheduling → pipeline →
-  context, governance → compute → storage; audit is a leaf. The governance
-  schema prober is wired in `pipeline.py` from `engine.probe_columns`, so
-  compute never imports governance.
+  context, governance, semantic → compute → storage; audit is a leaf. The
+  governance schema prober is wired in `pipeline.py` from
+  `engine.probe_columns`, so compute never imports governance. The semantic
+  package reads `storage.registry` (which sources are partitioned, which
+  scenarios are mounted) and nothing else; `context.prompt` reads the
+  semantic catalogue, not the reverse.
 - **Test seams** follow the code: `engine.get_conn`,
   `governance.policies.POLICIES` / `DEFAULT_ROLE` (patch the module the
   functions read, not the facade re-export), `governance.hardening.
@@ -484,10 +586,12 @@ The entrypoint is an async generator, so AgentCore serves native SSE. Strands
 events are wrapped in a small typed envelope
 (`start | reasoning | text | tool_start | trace | result`); `run_sql` is an
 async-generator tool that yields one trace event per pipeline stage —
-`gate` (raw SQL), `govern` (principal, injected RLS predicates, hidden
-columns, or a clean rejection), `cost` (sources, partition filter, expanded
-paths, or a rejection), `execute` (engine, `engine_ms`, rows, shape,
-materialized ref) — and the final `result` event carries the consolidated
+`gate` (raw SQL), `semantic` (the metrics a call resolved to — name, version,
+unit, owner, rows in scope — or a clean rejection), `rewrite` (principal,
+injected RLS predicates, hidden columns, or a clean rejection), `cost`
+(sources, partition filter, expanded paths, or a rejection), `execute`
+(engine, `engine_ms`, rows, shape, materialized ref) — and the final
+`result` event carries the consolidated
 trace array plus the session counters (statements, rejected, materialized,
 compressed). The Streamlit UI renders the transcript in true arrival order
 and totals engine time and counters on a Trace tab. One practical note:

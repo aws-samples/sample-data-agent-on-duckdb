@@ -11,9 +11,23 @@ def _phases(items):
     return [i["phase"] for i in items if isinstance(i, dict)]
 
 
-def test_stages_are_ordered_gate_govern_cost_execute():
-    assert [type(s).__name__ for s in pipeline.STAGES] == ["Gate", "Govern", "Cost", "Execute"]
-    assert [s.phase for s in pipeline.STAGES] == ["gate", "rewrite", "cost", "execute"]
+def test_stages_are_ordered_gate_semantic_govern_cost_execute():
+    # semantic EXPANDS and governance NARROWS, so semantic runs first: governance
+    # must see the SQL a metric name became, not the name
+    assert [type(s).__name__ for s in pipeline.STAGES] == [
+        "Gate",
+        "Semantic",
+        "Govern",
+        "Cost",
+        "Execute",
+    ]
+    assert [s.phase for s in pipeline.STAGES] == [
+        "gate",
+        "semantic",
+        "rewrite",
+        "cost",
+        "execute",
+    ]
 
 
 def test_run_yields_trace_events_then_exactly_one_result_string(local_conn):
@@ -57,17 +71,19 @@ def test_engine_errors_are_audited_as_errors_and_returned_verbatim(local_conn):
 
 
 def test_a_new_stage_plugs_in_without_touching_the_tool(local_conn, monkeypatch):
-    """The extension point: a semantic layer would be one more stage here."""
+    """The extension point: the semantic layer arrived this way, and the next
+    layer arrives the same way — a phase name and a run() that mutates the
+    Statement. The tool and the UI are untouched."""
 
-    class Semantic:
-        phase = "semantic"
+    class Lineage:
+        phase = "lineage"
 
         def run(self, st):
             st.sql = st.sql.replace("FROM rows_of_t", "FROM t")  # business name → table
-            yield {"phase": "semantic", "resolved": ["rows_of_t → t"]}
+            yield {"phase": "lineage", "resolved": ["rows_of_t → t"]}
 
     stages = list(pipeline.STAGES)
-    stages.insert(1, Semantic())  # after the gate, before governance
+    stages.insert(1, Lineage())  # after the gate, before the rest
     monkeypatch.setattr(pipeline, "STAGES", stages)
 
     async def _collect():
@@ -76,7 +92,8 @@ def test_a_new_stage_plugs_in_without_touching_the_tool(local_conn, monkeypatch)
         ]
 
     events = asyncio.run(_collect())
-    assert _phases(events) == ["gate", "semantic", "rewrite", "execute"]
+    # the real semantic stage emits nothing for a statement that calls no metric
+    assert _phases(events) == ["gate", "lineage", "rewrite", "execute"]
     assert events[-1].startswith('[{"n": "500"}]')
 
 
