@@ -69,8 +69,8 @@ for w in parsed["widgets"]:  # any residual token placeholder
         props["region"] = args.region
 print("widgets:", [w["properties"].get("title") for w in parsed["widgets"]])
 AWS_CLI = shutil.which("aws") or "aws"  # absolute path when resolvable (bandit B607)
-out = subprocess.run(  # noqa: S603  # nosec B603,B607 - resolved argv, no shell
-    [
+out = subprocess.run(  # noqa: S603  # nosec B603,B607 - resolved argv, no shell  # nosemgrep: dangerous-subprocess-use-audit,dangerous-subprocess-use-tainted-env-args -- argv list, no shell
+    [  # noqa: E501  # nosemgrep: dangerous-subprocess-use-tainted-env-args -- region is a CLI argument
         AWS_CLI,
         "cloudwatch",
         "put-dashboard",

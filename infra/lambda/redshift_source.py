@@ -66,7 +66,7 @@ def _run(sql: str, params: list[dict]) -> dict:
         d = rd.describe_statement(Id=stmt)
         if d["Status"] in ("FINISHED", "FAILED", "ABORTED"):
             break
-        time.sleep(0.4)
+        time.sleep(0.4)  # nosemgrep: arbitrary-sleep -- Data API poll backoff
     else:
         return {"error": f"redshift statement timed out after {TIMEOUT_S}s", "rows": []}
     if d["Status"] != "FINISHED":

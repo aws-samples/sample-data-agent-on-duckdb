@@ -41,7 +41,7 @@ def stage(period: str) -> str:
         f"(TYPE s3, PROVIDER credential_chain, REGION '{REGION}')"
     )
     target = f"s3://{BUCKET}/ops/redshift/cur-{period}.parquet"
-    c.execute(
+    c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- operator env, fixed column list
         f"""COPY (
           SELECT billing_period, line_item_usage_account_id, line_item_product_code,
                  product_region_code, line_item_usage_type, line_item_operation,
@@ -80,7 +80,7 @@ def run(sql):
         d = rd.describe_statement(Id=sid)
         if d["Status"] in ("FINISHED", "FAILED", "ABORTED"):
             break
-        time.sleep(2)
+        time.sleep(2)  # nosemgrep: arbitrary-sleep -- Data API poll backoff
     if d["Status"] != "FINISHED":
         if "already exists" in str(d.get("Error", "")):
             print("OK (exists):", sql[:60])

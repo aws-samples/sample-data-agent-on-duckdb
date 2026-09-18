@@ -388,9 +388,9 @@ def materialize_rows(conn, rows: list[dict], source: str, lock) -> dict:
                 for r in rows
             ],
         )
-        total = conn.execute(f"SELECT count(*) FROM {ref}").fetchone()[0]  # nosec B608
+        total = conn.execute(f"SELECT count(*) FROM {ref}").fetchone()[0]  # nosec B608 # nosemgrep: sqlalchemy-execute-raw-query -- framework-minted identifier
         if total <= MAX_RESULT_ROWS:
-            cur = conn.execute(f"SELECT * FROM {ref}")  # nosec B608
+            cur = conn.execute(f"SELECT * FROM {ref}")  # nosec B608 # nosemgrep: sqlalchemy-execute-raw-query -- framework-minted identifier
             names = [d[0] for d in cur.description]
             out = [dict(zip(names, (mark(v) for v in r), strict=False)) for r in cur.fetchall()]
             rows_json = json.dumps(out, ensure_ascii=False, default=str)
@@ -412,9 +412,9 @@ def materialize_rows(conn, rows: list[dict], source: str, lock) -> dict:
                     "capped": False,
                     "source": source,
                 }
-        desc = conn.execute(f"DESCRIBE {ref}").fetchall()  # nosec B608
+        desc = conn.execute(f"DESCRIBE {ref}").fetchall()  # nosec B608 # nosemgrep: sqlalchemy-execute-raw-query -- framework-minted identifier
         columns = [{"name": d[0], "type": d[1]} for d in desc]
-        cur = conn.execute(f"SELECT * FROM {ref} LIMIT {SAMPLE_ROWS}")  # nosec B608
+        cur = conn.execute(f"SELECT * FROM {ref} LIMIT {SAMPLE_ROWS}")  # nosec B608 # nosemgrep: sqlalchemy-execute-raw-query -- framework-minted identifier
         names = [d[0] for d in cur.description]
         sample = [dict(zip(names, (_shorten(v) for v in r), strict=False)) for r in cur.fetchall()]
         evicted = STORE.register(ref, conn, int(total))

@@ -258,13 +258,13 @@ def build_server():
             return DENIED
         return await asyncio.to_thread(agent_tools.fetch_source._tool_func, tool, args or {})
 
-    @mcp.resource("data-agent://context")
+    @mcp.resource("data-agent://context")  # noqa: E501  # nosemgrep: useless-inner-function -- registered by the decorator
     def context() -> str:
         """Tables, table cards and registered metrics visible to the caller."""
         _role, denied = bind_identity(_headers())
         return DENIED if denied else context_block()
 
-    @mcp.resource("data-agent://session")
+    @mcp.resource("data-agent://session")  # noqa: E501  # nosemgrep: useless-inner-function -- registered by the decorator
     def session() -> str:
         """This session's principal, working-set handles and audit counters."""
         bind_identity(_headers())
