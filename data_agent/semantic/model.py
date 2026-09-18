@@ -30,6 +30,12 @@ class Metric:
     filters:      columns a caller may filter on (values become bound
                   literals, never interpolated); `fixed_filters` are applied
                   always (e.g. `event_name = 'AssumeRole'`).
+    case_insensitive_filters:
+                  a subset of `filters` compared through `lower()` on BOTH
+                  sides. For an identifier the caller pastes from elsewhere —
+                  an EIP-55 checksummed `0xAbC…` address against a ledger
+                  stored lower-case — an exact match returns zero rows, and an
+                  empty result reads like an answer.
     kind:         `aggregate` (group by dims) or `period_delta` (per-period
                   totals plus the change against the previous period).
     """
@@ -47,6 +53,7 @@ class Metric:
     default_dimensions: tuple[str, ...] = ()
     filters: tuple[str, ...] = ()
     fixed_filters: tuple[str, ...] = ()
+    case_insensitive_filters: tuple[str, ...] = ()
     kind: str = "aggregate"
 
     @property
@@ -96,6 +103,9 @@ def validate(m: Metric) -> None:
     for col in m.filters:
         if not _IDENT_RE.match(col):
             raise MetricError(f"{where}: filter column {col!r} must be a bare identifier")
+    for col in m.case_insensitive_filters:
+        if col not in m.filters:
+            raise MetricError(f"{where}: case-insensitive filter {col!r} is not a filter column")
     for pred in m.fixed_filters:
         probe = sqlglot.parse_one(f"SELECT * FROM t WHERE {pred}", read="duckdb")  # nosec B608 - validation-only parse
         if not isinstance(probe, exp.Select) or probe.args.get("where") is None:
