@@ -15,14 +15,17 @@ from data_agent import audit, governance, pipeline, semantic
 from data_agent.compute import engine
 from data_agent.context import cost, prompt, results
 from data_agent.semantic import model
-from data_agent.storage.scenarios import cloudops
+from data_agent.storage.scenarios import cloudops, onchain
 
 # the default policies pin RLS to OPS_ACCOUNT_ID; unset in the unit suite → 'unset-account'
 # (fail closed), so the seeded rows carry exactly that value to be visible
 ACCT = cloudops.account_id()
 M = cloudops.METRICS
+CHAIN = onchain.METRICS
 COST = M["unblended_cost_by_service"]
 ASSUME = M["assume_role_events_by_principal"]
+IN_ETH = CHAIN["inbound_eth"]
+OUT_ETH = CHAIN["outbound_eth"]
 
 
 def _semantic_ops_engine(local_conn, monkeypatch):
@@ -71,7 +74,7 @@ def _call(**kw):
 # ------------------------------------------------------------------ registry
 def test_registry_loads_every_scenario_metric_and_validates_it():
     ms = semantic.metrics()
-    assert set(ms) == set(M) and all(isinstance(m, model.Metric) for m in ms.values())
+    assert set(ms) == set(M) | set(CHAIN) and all(isinstance(m, model.Metric) for m in ms.values())
     assert semantic.get("mom_delta").kind == "period_delta"
     assert semantic.get("nope") is None
 
@@ -96,7 +99,7 @@ def test_malformed_metric_definitions_fail_stop(bad, msg):
 
 
 def test_visible_metrics_follow_the_persona_table_visibility():
-    assert {m.name for m in semantic.visible_metrics()} == set(M)  # admin: all
+    assert {m.name for m in semantic.visible_metrics()} == set(M) | set(CHAIN)  # admin: all
     governance.set_active_role("ops:finops")
     names = {m.name for m in semantic.visible_metrics()}
     assert "unblended_cost_by_service" in names and "top_resources" in names
@@ -104,8 +107,11 @@ def test_visible_metrics_follow_the_persona_table_visibility():
     assert "runtime_log_events_by_stream" not in names  # cw_logs is admin-only
     governance.set_active_role("ops:secops")
     assert {m.name for m in semantic.visible_metrics()} == {"assume_role_events_by_principal"}
+    # the exchange personas read eth_traces, so they see the ledger metrics and
+    # none of the cloud-ops ones (the cross-scenario isolation, on the catalog)
     governance.set_active_role("exchange-a:junior")
-    assert semantic.visible_metrics() == [] and semantic.catalog_doc() == ""
+    assert {m.name for m in semantic.visible_metrics()} == set(CHAIN)
+    assert "inbound_eth" in semantic.catalog_doc() and "unblended" not in semantic.catalog_doc()
 
 
 def test_catalog_doc_lists_only_visible_metrics_and_rides_in_the_l0_block(local_conn):
@@ -124,7 +130,7 @@ def test_metric_columns_reconcile_with_the_table_cards():
 
     from data_agent.storage.registry import CARDS
 
-    for m in M.values():
+    for m in semantic.metrics().values():
         cols = {c.lower() for c in CARDS[m.table].columns}
         used = set()
         for expr in [m.measure_sql, *m.dimensions.values(), *m.fixed_filters]:
@@ -363,3 +369,164 @@ def test_json_encoded_arguments_are_accepted(window):
     assert semantic.compile(COST, '["service", "region"]', '"2026-08"'.strip('"'))
     with pytest.raises(semantic.SemanticError):  # still not a licence to send junk
         semantic.compile(COST, None, "{not json}")
+
+
+# ------------------------------------------------------ on-chain row scope
+# "How much ETH did this address receive" is a row-scope decision, and the two
+# obvious scopes are wrong in OPPOSITE directions (see onchain._MOVED_ETH).
+# Every case below runs the compiled SQL against a trace fixture and compares
+# it with the naive scope as a control arm — the metric is only worth having
+# if the two disagree on rows a real ledger contains.
+EXPLOITER = "0x47666fab8bd0ac7003bce3f5c3585383f09486e2"
+VICTIM = "0x1111111111111111111111111111111111111111"
+BENEFICIARY = "0x2222222222222222222222222222222222222222"
+
+# (from, to, value_wei, status, call_type, trace_type)   1e18 wei = 1 ETH
+TRACES = [
+    (VICTIM, EXPLOITER, 5 * 10**18, 1, "call", "call"),  # real: drained
+    # a delegatecall frame inherits the parent's value (EIP-7): the trace
+    # reports 5 ETH again while no ether moves. `value > 0 AND status = 1`
+    # counts it a second time.
+    (VICTIM, EXPLOITER, 5 * 10**18, 1, "delegatecall", "call"),
+    (VICTIM, EXPLOITER, 5 * 10**18, 1, "staticcall", "call"),  # same, read-only frame
+    (VICTIM, EXPLOITER, 9 * 10**18, 0, "call", "call"),  # reverted: no ether moved
+    # real movements with a NULL call_type — `call_type = 'call'` drops them
+    (EXPLOITER, BENEFICIARY, 2 * 10**18, 1, None, "create"),  # contract endowment
+    (EXPLOITER, BENEFICIARY, 1 * 10**18, 1, None, "suicide"),  # selfdestruct payout
+    # a block reward: no sender, real ETH received. In scope by design — the
+    # `trace_type` dimension is what separates mining income from transfers.
+    (None, EXPLOITER, 3 * 10**18, 1, None, "reward"),
+]
+
+
+def _traces_engine(local_conn, monkeypatch, rows=TRACES, date="2025-02-21", extra=()):
+    """A local stand-in for `eth_traces` (columns from the card), cost sources
+    cleared so nothing expands to S3. `rows` all land on `date`; `extra` rows
+    carry their own date as a 7th field (for the governance window)."""
+    monkeypatch.setattr(cost, "SOURCES", {})
+    values = ", ".join(
+        "("
+        + ", ".join(
+            [
+                "NULL" if f is None else f"'{f}'",
+                f"'{t}'",
+                str(v),
+                str(status),
+                "NULL" if call_type is None else f"'{call_type}'",
+                f"'{trace_type}'",
+                f"'{row_date}'",
+            ]
+        )
+        + ")"
+        for f, t, v, status, call_type, trace_type, row_date in (
+            [(*r, date) for r in rows] + list(extra)
+        )
+    )
+    local_conn.execute(
+        f"CREATE OR REPLACE VIEW eth_traces AS SELECT * FROM (VALUES {values}) "  # nosec B608 - test fixture
+        "t(from_address, to_address, value, status, call_type, trace_type, date)"
+    )
+    governance.set_schema_prober(engine.probe_columns)
+
+
+def _scalar(conn, sql, column):
+    rows = conn.execute(sql).fetchall()
+    cols = [d[0] for d in conn.description]
+    return [dict(zip(cols, r, strict=True))[column] for r in rows]
+
+
+def test_onchain_metrics_compile_the_reviewed_row_scope():
+    for m in CHAIN.values():
+        sql = semantic.compile(m, None, "2025-02-21", {"to_address": EXPLOITER})
+        assert "status = 1" in sql and "value > 0" in sql
+        assert "call_type IS NULL OR call_type = 'call'" in sql
+        assert "date = '2025-02-21'" in sql  # window required → cost gate satisfied
+
+
+def test_delegatecall_frames_are_not_double_counted(local_conn, monkeypatch):
+    """Control arm: the naive scope reports 15 ETH transferred in, the metric 5."""
+    _traces_engine(local_conn, monkeypatch)
+    scope = {"to_address": EXPLOITER, "trace_type": "call"}
+    sql = semantic.compile(IN_ETH, ["recipient"], "2025-02-21", scope)
+    assert _scalar(local_conn, sql, "eth_in") == [5.0]
+    naive = (
+        "SELECT round(sum(value) / 1e18, 6) AS eth_in FROM eth_traces "
+        f"WHERE date = '2025-02-21' AND to_address = '{EXPLOITER}' AND trace_type = 'call' "
+        "AND value > 0 AND status = 1"
+    )  # nosec B608 - control arm, literals are test constants
+    assert _scalar(local_conn, naive, "eth_in") == [15.0]  # 3× the same 5 ETH
+    # and the reward is still there when the trace_type filter is dropped
+    everything = semantic.compile(IN_ETH, ["recipient"], "2025-02-21", {"to_address": EXPLOITER})
+    assert _scalar(local_conn, everything, "eth_in") == [8.0]  # 5 transferred + 3 mined
+
+
+def test_create_suicide_and_reward_rows_are_not_dropped(local_conn, monkeypatch):
+    """The other direction: `call_type = 'call'` would see none of these."""
+    _traces_engine(local_conn, monkeypatch)
+    sql = semantic.compile(OUT_ETH, ["counterparty"], "2025-02-21", {"from_address": EXPLOITER})
+    assert _scalar(local_conn, sql, "eth_out") == [3.0]  # create 2 + suicide 1
+    by_type = semantic.compile(OUT_ETH, ["trace_type"], "2025-02-21", {"from_address": EXPLOITER})
+    assert sorted(_scalar(local_conn, by_type, "trace_type")) == ["create", "suicide"]
+    dropped = (
+        "SELECT count(*) AS n FROM eth_traces WHERE date = '2025-02-21' "
+        f"AND from_address = '{EXPLOITER}' AND value > 0 AND status = 1 AND call_type = 'call'"
+    )  # nosec B608 - control arm, literals are test constants
+    assert _scalar(local_conn, dropped, "n") == [0]  # every real outflow lost
+
+
+def test_a_checksummed_address_still_matches_the_lower_case_ledger(local_conn, monkeypatch):
+    """An address pasted in EIP-55 form must not silently return zero rows —
+    an empty result reads like an answer."""
+    _traces_engine(local_conn, monkeypatch)
+    mixed = "0x47666FaB8bd0Ac7003bcE3f5C3585383F09486E2"
+    sql = semantic.compile(IN_ETH, ["recipient"], "2025-02-21", {"to_address": mixed})
+    assert f"LOWER(to_address) = LOWER('{mixed}')" in sql  # value still a bound literal
+    assert _scalar(local_conn, sql, "eth_in") == [8.0]
+    exact = sql.replace(f"LOWER(to_address) = LOWER('{mixed}')", f"to_address = '{mixed}'")
+    assert local_conn.execute(exact).fetchall() == []  # control arm: the silent zero
+    lst = semantic.compile(IN_ETH, None, "2025-02-21", {"to_address": [mixed, VICTIM]})
+    assert "LOWER(to_address) IN (LOWER(" in lst
+
+
+def test_case_insensitive_filters_must_be_declared_filters():
+    with pytest.raises(model.MetricError, match="not a filter column"):
+        model.validate(dataclasses.replace(IN_ETH, case_insensitive_filters=("block_hash",)))
+
+
+def test_fanout_and_drain_curve_shapes(local_conn, monkeypatch):
+    _traces_engine(local_conn, monkeypatch)
+    fanout = semantic.compile(
+        CHAIN["counterparty_fanout"], None, "2025-02-21", {"from_address": EXPLOITER}
+    )
+    assert "COUNT(DISTINCT to_address) AS recipients" in fanout
+    assert _scalar(local_conn, fanout, "recipients") == [1]  # BENEFICIARY, counted once
+    curve = semantic.compile(
+        CHAIN["eth_outflow_daily"], None, {"from": "2025-02-21", "to": "2025-02-23"}
+    )
+    assert "LAG(eth_out) OVER (ORDER BY date)" in curve and "AS pct_change" in curve
+
+
+def test_the_ledger_metric_is_governed_by_the_investigator_row_filter(local_conn, monkeypatch):
+    """The compiled metric is not privileged: the persona's RLS (`eth_traces`
+    from 2025-02-21 on) still bounds it — a wider window does not widen it."""
+    # the extra row is the day BEFORE the persona's cutoff, inside the window
+    before = (VICTIM, EXPLOITER, 100 * 10**18, 1, "call", "call", "2025-02-20")
+    _traces_engine(local_conn, monkeypatch, extra=[before])
+    window = {"from": "2025-02-20", "to": "2025-02-21"}
+    kw = dict(metric="inbound_eth", dims=["recipient"], filters={"to_address": EXPLOITER})
+    _, text = _call(**kw, time_window=window)  # admin sees both days
+    assert [results.unmark(r["eth_in"]) for r in json.loads(text.split("\n")[0])] == ["108.0"]
+    governance.set_active_role("exchange-a:investigator")
+    events, text = _call(**kw, time_window=window)
+    rewrite = next(e for e in events if e["phase"] == "rewrite")
+    assert rewrite["governed"] and rewrite["rls"][0]["table"] == "eth_traces"
+    rows = json.loads(text.split("\n")[0])
+    assert [results.unmark(r["eth_in"]) for r in rows] == ["8.0"]  # the 2025-02-20 row is out
+
+
+def test_the_eth_traces_card_states_both_wrong_scopes(local_conn):
+    """The card is what a run_sql user reads; the metric's scope must not be the
+    only place the finding lives (the L0 map carries the card's caveats)."""
+    card = onchain.CARDS["eth_traces"]
+    assert "DOUBLE-COUNTS" in card.caveats and "UNDER-COUNTS" in card.caveats
+    assert "delegatecall" in card.caveats and "call_type IS NULL" in card.caveats

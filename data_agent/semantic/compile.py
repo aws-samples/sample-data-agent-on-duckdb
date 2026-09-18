@@ -15,7 +15,9 @@ interpolates a parameter as text:
   * `filters` may name only the metric's `filters` columns; every value
     becomes a bound `exp.Literal` in the AST (a string literal stays a string
     literal — `' OR 1=1` cannot leave the quotes because there are none to
-    leave);
+    leave). A `case_insensitive_filters` column is compared as
+    `lower(col) = lower('value')`: the literal is still bound, `lower()` is
+    applied by the engine on both sides rather than by us to the value;
   * `time_window` values must match the grain's literal shape (YYYY-MM /
     YYYY-MM-DD) and are attached as literals on the metric's `time_column`;
     the window is REQUIRED, so the cost gate's partition requirement is met
@@ -138,13 +140,15 @@ def _filters(metric: Metric, filters) -> list[exp.Expression]:
             raise SemanticError(
                 f"metric {metric.name!r}: filter column not registered — allowed: {allowed}"
             )
-        c = exp.column(col)
+        fold = col in metric.case_insensitive_filters
+        c = exp.Lower(this=exp.column(col)) if fold else exp.column(col)
+        wrap = (lambda lit: exp.Lower(this=lit)) if fold else (lambda lit: lit)
         if isinstance(value, list | tuple):
             if not value:
                 raise SemanticError(f"metric {metric.name!r}: filter {col!r} has no values")
-            preds.append(exp.In(this=c, expressions=[_literal(v) for v in value]))
+            preds.append(exp.In(this=c, expressions=[wrap(_literal(v)) for v in value]))
         else:
-            preds.append(exp.EQ(this=c, expression=_literal(value)))
+            preds.append(exp.EQ(this=c, expression=wrap(_literal(value))))
     return preds
 
 

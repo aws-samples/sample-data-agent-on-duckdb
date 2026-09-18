@@ -28,6 +28,8 @@ from __future__ import annotations
 import os
 import re
 
+from data_agent.semantic.model import Metric
+
 from .base import Scenario, TableCard
 
 S3_BASE = "s3://aws-public-blockchain/v1.0"
@@ -268,8 +270,13 @@ CARDS = {
         ),
         avoid_when="counting user-signed transactions — use eth_transactions",
         caveats=(
-            "filter value > 0 AND status = 1 for successful "
-            "transfers; a day is a few GB, always add an address filter"
+            "for ETH that actually MOVED: status = 1 AND value > 0 AND (call_type IS NULL OR "
+            "call_type = 'call'). `value > 0 AND status = 1` alone DOUBLE-COUNTS: a delegatecall "
+            "/ staticcall inherits the parent frame's value (EIP-7) and shows an amount while no "
+            "ether moves; `call_type = 'call'` alone UNDER-COUNTS: create (endowment), suicide "
+            "(selfdestruct beneficiary), reward and genesis rows carry a NULL call_type. Add "
+            "trace_type <> 'reward' to exclude mining income. A day is a few GB, always add an "
+            "address filter"
         ),
         owner=_ETH_OWNER,
         columns=(
@@ -338,6 +345,112 @@ CARDS = {
     ),
 }
 
+
+# ---------------------------------------------------------------- metrics
+# Semantic layer v0 for the ledger: "how much ETH did this address receive"
+# is a row-scope decision, not a SUM. Left to the model it is re-derived per
+# question, and the two obvious scopes are wrong in OPPOSITE directions:
+#
+#   value > 0 AND status = 1        double-counts — a delegatecall / staticcall
+#                                   frame inherits the parent's value (EIP-7)
+#                                   and reports an amount while no ether moves
+#   ... AND call_type = 'call'      under-counts — create (endowment), suicide
+#                                   (selfdestruct beneficiary), reward and
+#                                   genesis rows have a NULL call_type
+#
+# Neither is visible in the eval suite: every case filters one EOA, where the
+# two scopes agree. Register the scope once, here, and every call compiles it.
+# Rewards ARE included (they are real ETH received); `trace_type` is a
+# dimension and a filter so the split is one call away.
+_MOVED_ETH = (
+    "status = 1",
+    "value > 0",
+    "(call_type IS NULL OR call_type = 'call')",
+)
+_ETH = "round(sum(value) / 1e18, 6)"
+_METRIC_OWNER = "onchain scenario (AWS Public Blockchain, eth v1.0)"
+_ADDRESS_FILTERS = ("from_address", "to_address")
+METRICS = {
+    "inbound_eth": Metric(
+        name="inbound_eth",
+        version="1.0",
+        owner=_METRIC_OWNER,
+        description="ETH received (whole ether) through internal calls that actually moved value, "
+        "by counterparty — filter to_address to trace one address's inflow",
+        table="eth_traces",
+        measure_sql=_ETH,
+        measure_alias="eth_in",
+        time_column="date",
+        grain="day",
+        dimensions={
+            "counterparty": "from_address",
+            "recipient": "to_address",
+            "date": "date",
+            "trace_type": "trace_type",
+        },
+        default_dimensions=("counterparty",),
+        filters=(*_ADDRESS_FILTERS, "trace_type"),
+        fixed_filters=_MOVED_ETH,
+        case_insensitive_filters=_ADDRESS_FILTERS,
+    ),
+    "outbound_eth": Metric(
+        name="outbound_eth",
+        version="1.0",
+        owner=_METRIC_OWNER,
+        description="ETH sent (whole ether) through internal calls that actually moved value, by "
+        "counterparty — filter from_address to trace one address's outflow / fan-out",
+        table="eth_traces",
+        measure_sql=_ETH,
+        measure_alias="eth_out",
+        time_column="date",
+        grain="day",
+        dimensions={
+            "counterparty": "to_address",
+            "sender": "from_address",
+            "date": "date",
+            "trace_type": "trace_type",
+        },
+        default_dimensions=("counterparty",),
+        filters=(*_ADDRESS_FILTERS, "trace_type"),
+        fixed_filters=_MOVED_ETH,
+        case_insensitive_filters=_ADDRESS_FILTERS,
+    ),
+    "eth_outflow_daily": Metric(
+        name="eth_outflow_daily",
+        version="1.0",
+        owner=_METRIC_OWNER,
+        description="ETH sent per day and the change against the previous day (drain curve) — "
+        "filter from_address to the address under investigation",
+        table="eth_traces",
+        measure_sql=_ETH,
+        measure_alias="eth_out",
+        time_column="date",
+        grain="day",
+        filters=(*_ADDRESS_FILTERS, "trace_type"),
+        fixed_filters=_MOVED_ETH,
+        case_insensitive_filters=_ADDRESS_FILTERS,
+        kind="period_delta",
+    ),
+    "counterparty_fanout": Metric(
+        name="counterparty_fanout",
+        version="1.0",
+        owner=_METRIC_OWNER,
+        description="How many distinct recipients an address paid, per day — fan-out width of a "
+        "drain; filter from_address to the address under investigation",
+        table="eth_traces",
+        measure_sql="count(DISTINCT to_address)",
+        measure_alias="recipients",
+        time_column="date",
+        grain="day",
+        dimensions={"date": "date", "sender": "from_address"},
+        default_dimensions=("date",),
+        filters=(*_ADDRESS_FILTERS, "trace_type"),
+        fixed_filters=_MOVED_ETH,
+        case_insensitive_filters=_ADDRESS_FILTERS,
+    ),
+}
+
+
 # ----------------------------------------------------------------- policies
 # Table-level deny-by-default: a restricted persona may reference
 # ONLY the tables its policy names (plus session temp objects it creates).
@@ -394,6 +507,7 @@ def build(
         doc=RAW_DOC + (LABEL_DOC if labels else ""),
         policies=POLICIES,
         cards=CARDS,
+        metrics=METRICS,
     )
 
 
