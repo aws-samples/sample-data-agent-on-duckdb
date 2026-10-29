@@ -14,5 +14,5 @@ regexes = [
 # digests of golden SQL), not credentials. The file was removed in the next
 # commit; this pins the exception to that commit only.
 commits = [
-    "20e07328ddaf9f911fd67353dd222ab11cb240cd",
+    "20e07328ddaf9f911fd67353dd222ab11cb240cd",  # pragma: allowlist secret - a commit id
 ]
