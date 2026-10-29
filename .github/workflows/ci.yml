@@ -90,4 +90,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install --quiet detect-secrets==1.5.0
-      - run: detect-secrets scan --baseline .secrets.baseline
+      # No baseline file: any finding fails the job. golden-cache.json is keyed by
+      # hex digests of golden SQL, which the entropy plugin reads as secrets.
+      - run: |
+          detect-secrets scan --exclude-files 'tests/eval/golden-cache\.json$' > /tmp/secrets.json
+          python -c "import json,sys; r=json.load(open('/tmp/secrets.json'))['results']; print(json.dumps(r, indent=1)); sys.exit(1 if r else 0)"
