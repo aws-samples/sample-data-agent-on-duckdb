@@ -9,3 +9,10 @@ description = "Public on-chain constants (Ethereum addresses in demo label data 
 regexes = [
     '''0x[0-9a-fA-F]{40}\b''',  # EVM account addresses — public chain data, cannot be a key
 ]
+# One historical commit briefly carried a detect-secrets baseline; its
+# "hashed_secret" values are SHA-1 digests of the golden-cache keys (hex
+# digests of golden SQL), not credentials. The file was removed in the next
+# commit; this pins the exception to that commit only.
+commits = [
+    "20e07328ddaf9f911fd67353dd222ab11cb240cd",
+]
