@@ -1,8 +1,8 @@
 """The agent as an MCP server.
 
 The same read-only tools a coding agent should be able to call — `run_sql`,
-`search_schema`, `call_metric`, and the outbound pair `list_sources` /
-`fetch_source` — exposed over the Model Context Protocol on an AgentCore
+`search_schema`, `call_metric`, `call_verified`, and the outbound pair
+`list_sources` / `fetch_source` — exposed over the Model Context Protocol on an AgentCore
 Runtime whose `serverProtocol` is MCP, behind the Runtime's own
 `customJWTAuthorizer`. So:
 
@@ -41,7 +41,7 @@ import os
 from data_agent import audit, governance, pipeline, semantic
 from data_agent.compute import engine
 from data_agent.context import datamap, prompt, results
-from data_agent.scheduling import gateway_client
+from data_agent.scheduling import claims, gateway_client
 
 try:  # the HTTP runtime image does not need the MCP dependency to import this
     from mcp.server.fastmcp import Context, FastMCP
@@ -77,11 +77,8 @@ def _claims_from_headers(headers) -> dict | None:
         decoded = jwt.decode(auth[7:], options=claims_only)  # nosemgrep: unverified-jwt-decode
     except Exception:  # noqa: BLE001 — an unreadable token is no identity at all
         return None
-    return {
-        "tenant": decoded.get("custom:tenant") or decoded.get("tenant", ""),
-        "role": decoded.get("custom:role") or decoded.get("role", ""),
-        "sub": decoded.get("sub", ""),
-    }
+    # one claim-shape mapping for both inbound surfaces
+    return claims.normalize(decoded)
 
 
 def _owner_key(claims: dict | None, role: str) -> str:
@@ -100,6 +97,18 @@ def bind_identity(headers) -> tuple[str, bool]:
     claims = _claims_from_headers(headers)
     role = governance.resolve_role(claims)
     governance.set_active_role(role)
+    # Install the Lake Formation session policy for this persona before
+    # any tool reads the policy (cached per role; failures are table denies)
+    lf_notes = governance.bind_lf_policy(role)
+    if lf_notes:
+        audit.record(
+            principal=role,
+            sql="(lake formation policy bind)",
+            outcome="rejected" if any("DENIED" in n for n in lf_notes) else "executed",
+            stage="lf_policy",
+            reason="; ".join(lf_notes)[:400],
+            tool="mcp",
+        )
     owner = _owner_key(claims, role)
     prev = _session["owner"]
     _session["owner"] = owner
@@ -132,14 +141,13 @@ DENIED = (
 
 def context_block() -> str:
     """What a coding agent needs before its first query: the role, the tables
-    it may read (L0 + cards) and the metrics it may call. The equivalent of the
-    system prompt's generated block on the HTTP path, as an MCP resource."""
+    it may read (L0 + cards) and the metrics and verified queries it may call.
+    The equivalent of the system prompt's generated block on the HTTP path, as
+    an MCP resource — `l0_block()` already carries the semantic-layer catalogs,
+    so this only frames it (appending them again listed each metric twice)."""
     role = governance.active_role()
     l0 = prompt.l0_block() or ""
-    metrics = semantic.catalog_doc()
-    return (
-        f"# Data agent context\n\nPrincipal: `{role}`\n\n{l0}\n\n{metrics}\n\n{prompt.QUERY_RULES}"
-    )
+    return f"# Data agent context\n\nPrincipal: `{role}`\n\n{l0}\n\n{prompt.QUERY_RULES}"
 
 
 def build_server():
@@ -231,6 +239,28 @@ def build_server():
             async for item in agent_tools.call_metric._tool_func(
                 metric=metric, dims=dims, time_window=time_window, filters=filters, limit=limit
             ):
+                if isinstance(item, str):
+                    last = item
+            return last
+
+        return await _drive()
+
+    @mcp.tool()
+    async def call_verified(
+        name: str, params: dict | str | None = None, ctx: Context | None = None
+    ) -> str:
+        """Run a VERIFIED QUERY — a reviewed question→SQL template, executed exactly as
+        written with parameters bound as literals, governed like any statement. All declared
+        parameters are required. An unregistered name or a bad parameter is refused — report
+        it, do not rebuild the query with run_sql. List what you may call in the
+        `data-agent://context` resource."""
+        role, denied = bind_identity(_headers(ctx))
+        if denied:
+            return DENIED
+
+        async def _drive() -> str:
+            last = ""
+            async for item in agent_tools.call_verified._tool_func(name=name, params=params):
                 if isinstance(item, str):
                     last = item
             return last

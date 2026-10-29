@@ -15,6 +15,12 @@ allow_raw_paths: False → read_parquet()/read_csv() etc. are rejected,
   otherwise path access would bypass table-level policy entirely.
 deny_all: True → every statement is rejected (the floor for principals
   that carry no usable identity; see DENY_ALL_ROLE).
+sources: outbound source allowlist (persona level) — the
+  Gateway target names this role may call through `fetch_source`
+  ("labels-api" matches "labels-api___screen_addresses"). Deny-by-default,
+  like tables: a restricted role without the field reaches no source. This
+  is the agent-side half of the dual allowlist; the Cedar policy on the
+  Gateway is the other half, and either one missing means refusal.
 """
 
 from __future__ import annotations
@@ -43,7 +49,8 @@ _DENY_ALL_POLICY = {"allow_raw_paths": False, "deny_all": True, "tables": {}}
 
 _ROLE_KEY_RE = re.compile(r"^[^:\s]+:[^:\s]+$")  # "<tenant>:<role>", no whitespace
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # bare SQL identifier
-_POLICY_KEYS = {"allow_raw_paths", "tables", "deny_all"}
+_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")  # gateway target name
+_POLICY_KEYS = {"allow_raw_paths", "tables", "deny_all", "sources"}
 _RULE_KEYS = {"row_filter", "deny_columns"}
 
 
@@ -70,6 +77,12 @@ def _validate_policies(policies: dict) -> None:
         for flag in ("allow_raw_paths", "deny_all"):
             if flag in policy and not isinstance(policy[flag], bool):
                 raise ValueError(f"governance: {where}: {flag} must be a boolean")
+        sources = policy.get("sources")
+        if sources is not None and (
+            not isinstance(sources, list)
+            or not all(isinstance(s, str) and _SOURCE_RE.match(s) for s in sources)
+        ):
+            raise ValueError(f"governance: {where}: sources must be a list of gateway target names")
         tables = policy.get("tables", {})
         if not isinstance(tables, dict):
             raise ValueError(f"governance: {where}: tables must be an object")
@@ -133,7 +146,12 @@ if DEFAULT_ROLE not in POLICIES:  # fail-stop: a typo here must not become "no p
 # session per microVM, but a threading.local would lose the value across the
 # entrypoint→tool-thread boundary (Strands runs tools on worker threads), so
 # a module-level slot guarded by a lock is the correct scope here.
-_active = {"role": DEFAULT_ROLE}
+# `override` is the SESSION policy: the Lake Formation rules fetched at
+# session bind, merged with this role's static policy — everything that reads
+# the active policy (rewrite, visible_tables, denied_columns, is_denied_all)
+# sees the merged view through active_policy(). Cleared on every role change,
+# so a stale overlay can never outlive the principal it was fetched for.
+_active = {"role": DEFAULT_ROLE, "override": None}
 _active_lock = threading.Lock()
 
 
@@ -190,6 +208,18 @@ def resolve_role(claims: dict | None) -> str:
 def set_active_role(role: str) -> None:
     with _active_lock:
         _active["role"] = role if role in POLICIES else DEFAULT_ROLE
+        _active["override"] = None  # a session overlay never survives a role change
+
+
+def set_session_policy(policy: dict | None) -> None:
+    """Install the merged session policy for the CURRENT role (the Lake
+    Formation rules fetched at session bind, already merged with the static
+    policy by the caller). None clears it. Validated like any policy table —
+    a malformed merge must fail here, not serve a query."""
+    if policy is not None:
+        _validate_policies({active_role(): policy, DENY_ALL_ROLE: _DENY_ALL_POLICY})
+    with _active_lock:
+        _active["override"] = policy
 
 
 def active_role() -> str:
@@ -198,6 +228,9 @@ def active_role() -> str:
 
 
 def active_policy() -> dict:
+    with _active_lock:
+        if _active["override"] is not None:
+            return _active["override"]
     return POLICIES[active_role()]
 
 
@@ -221,6 +254,35 @@ def visible_tables() -> frozenset[str] | None:
     if policy.get("allow_raw_paths", False) and not policy.get("tables"):
         return None
     return frozenset(policy.get("tables", {}))
+
+
+def visible_sources() -> frozenset[str] | None:
+    """Outbound source target names the active policy allows.
+
+    None means "unrestricted — every source": the unrestricted role with no
+    explicit `sources` field. A policy that DOES carry the field gets exactly
+    that list, whatever the role (an operator may clamp admin's sources). A
+    restricted role without the field reaches no source — the same
+    deny-by-default the table policy applies, so a new Gateway target is
+    invisible until a persona names it."""
+    policy = active_policy()
+    if policy.get("deny_all", False):
+        return frozenset()
+    sources = policy.get("sources")
+    if sources is None:
+        unrestricted = policy.get("allow_raw_paths", False) and not policy.get("tables")
+        return None if unrestricted else frozenset()
+    return frozenset(sources)
+
+
+def source_allowed(tool: str) -> bool:
+    """May the active role call this gateway tool? Tool names are
+    `<target>___<operation>`; the policy lists targets, so "labels-api"
+    covers every operation that target exposes."""
+    allowed = visible_sources()
+    if allowed is None:
+        return True
+    return any(tool == s or tool.startswith(f"{s}___") for s in allowed)
 
 
 def denied_columns() -> dict[str, frozenset[str]]:

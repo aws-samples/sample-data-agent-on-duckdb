@@ -5,6 +5,7 @@ import asyncio
 
 import agent as agent_mod
 from data_agent import audit, governance, pipeline
+from data_agent.governance import policies
 
 
 def _phases(items):
@@ -99,3 +100,58 @@ def test_statement_records_what_each_stage_decided(local_conn):
         "expanded_paths": 0,
     }
     assert st.result["shape"] == "rows" and st.result["total_rows"] == 1
+
+
+def test_provenance_marks_free_sql_and_metric_statements(local_conn, capsys):
+    """The execute trace event and the audit line say where the numbers
+    came from — a model-written statement is free_sql, a compiled metric is
+    metric; the online eval buckets accuracy by this marker."""
+    import json
+
+    audit.reset_session()
+    items = list(pipeline.run("SELECT count(*) AS n FROM t"))
+    ex = next(i for i in items if isinstance(i, dict) and i.get("phase") == "execute")
+    assert ex["provenance"] == "free_sql"
+    meta = {"name": "m", "version": 1, "owner": "o", "table": "t"}
+    items = list(pipeline.run("SELECT count(*) AS n FROM t", metric=meta))
+    ex = next(i for i in items if isinstance(i, dict) and i.get("phase") == "execute")
+    assert ex["provenance"] == "metric"
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if '"audit"' in ln]
+    assert [json.loads(ln)["audit"]["provenance"] for ln in lines] == ["free_sql", "metric"]
+
+
+def test_an_empty_result_under_a_row_filter_says_none_you_may_see(local_conn, monkeypatch):
+    """Measured live 2026-10-19: a persona whose row filter excluded the day it
+    asked about got 0 rows and told the user the data was missing, then offered
+    another access path. The result string now carries the distinction."""
+    monkeypatch.setitem(
+        policies.POLICIES,
+        "t:scoped",
+        {"tables": {"t": {"row_filter": "id < 0"}}},
+    )
+    governance.set_active_role("t:scoped")
+    out = list(pipeline.run("SELECT id FROM t"))[-1]
+    assert out.startswith("[]")  # no rows survive the filter
+    assert "nothing YOU may see" in out and " t for your role" in out
+    assert "not the same as no such data" in out
+    assert "every path carries the same policy" in out
+    # the shape that actually occurred live: an aggregate returns ONE row
+    # containing 0, not zero rows — it must carry the note too
+    agg = list(pipeline.run("SELECT count(*) AS n FROM t"))[-1]
+    assert agg.startswith('[{"n": "0"}]')  # ONE row whose value is 0
+    assert "nothing YOU may see" in agg
+
+
+def test_a_nonempty_or_ungoverned_result_carries_no_such_note(local_conn, monkeypatch):
+    monkeypatch.setitem(
+        policies.POLICIES,
+        "t:scoped",
+        {"tables": {"t": {"row_filter": "id < 3"}}},
+    )
+    governance.set_active_role("t:scoped")
+    assert "YOU may see" not in list(pipeline.run("SELECT id FROM t"))[-1]  # rows survive
+    # a non-zero aggregate under the same filter is data: no note
+    assert "YOU may see" not in list(pipeline.run("SELECT count(*) AS n FROM t"))[-1]
+    governance.set_active_role("ops:admin")
+    # admin: zero rows, but no row filter applied → no note (nothing was hidden)
+    assert "YOU may see" not in list(pipeline.run("SELECT id FROM t WHERE id < 0"))[-1]

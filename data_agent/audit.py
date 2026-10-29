@@ -104,7 +104,8 @@ def record(
     principal: str,
     sql: str,
     outcome: str,  # executed | rejected | error
-    stage: str | None = None,  # gate | handle | semantic | governance | cost | engine | session
+    stage: str
+    | None = None,  # gate|handle|semantic|governance|cost|budget|upgrade|engine|session|source
     reason: str | None = None,
     governed: bool = False,
     rls: list | None = None,
@@ -120,6 +121,9 @@ def record(
     user_sub: str | None = None,
     source: str | None = None,
     degraded: str | None = None,
+    bytes_scanned: int | None = None,
+    s3_requests: int | None = None,
+    provenance: str | None = None,
 ) -> dict:
     """Build, emit and count one audit record. Never raises."""
     rec = {
@@ -135,6 +139,8 @@ def record(
                         {"Name": "Rows", "Unit": "Count"},
                         {"Name": "Materialized", "Unit": "Count"},
                         {"Name": "ExpandedPaths", "Unit": "Count"},
+                        {"Name": "BytesScanned", "Unit": "Bytes"},
+                        {"Name": "S3Requests", "Unit": "Count"},
                     ],
                 }
             ],
@@ -145,6 +151,8 @@ def record(
         "Rows": int(rows or 0),
         "Materialized": 1 if materialized else 0,
         "ExpandedPaths": int((cost or {}).get("expanded_paths") or 0),
+        "BytesScanned": int(bytes_scanned or 0),
+        "S3Requests": int(s3_requests or 0),
         "audit": {
             "tool": tool,
             "principal": principal,
@@ -168,6 +176,14 @@ def record(
             # Rows that did not come from the lake:
             "source": source,  # the gateway tool that produced them
             "degraded": degraded,  # "2lo" when the source saw a service identity, not the user
+            # What the statement cost at the storage layer (None when the
+            # engine build lacks the instrumentation, 0 for a local-table read):
+            "bytes_scanned": bytes_scanned,
+            "s3_requests": s3_requests,
+            # Where the statement's numbers come from (metric | verified |
+            # free_sql; None for non-statement tools). The online eval buckets
+            # accuracy by this marker.
+            "provenance": provenance,
         },
     }
     _session["statements"] += 1

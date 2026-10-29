@@ -22,7 +22,14 @@ from strands import Agent
 
 from data_agent.context import compression, prompt
 from data_agent.scheduling import cli, runtime
-from data_agent.tools import call_metric, fetch_source, list_sources, run_sql, search_schema
+from data_agent.tools import (
+    call_metric,
+    call_verified,
+    fetch_source,
+    list_sources,
+    run_sql,
+    search_schema,
+)
 
 MODEL_ID = os.environ.get("MODEL_ID", "global.anthropic.claude-sonnet-4-6")
 
@@ -31,7 +38,7 @@ MODEL_ID = os.environ.get("MODEL_ID", "global.anthropic.claude-sonnet-4-6")
 conversation_manager = compression.ResultStubConversationManager()
 agent = Agent(
     model=MODEL_ID,
-    tools=[run_sql, search_schema, call_metric, list_sources, fetch_source],
+    tools=[run_sql, search_schema, call_metric, call_verified, list_sources, fetch_source],
     system_prompt=prompt.SYSTEM_PROMPT,
     conversation_manager=conversation_manager,
 )

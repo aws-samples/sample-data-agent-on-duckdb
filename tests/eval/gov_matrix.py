@@ -19,6 +19,10 @@ Expected outcome per cell is DERIVED from the policy, never hand-written:
                `cw_logs`): refused before the engine, table-level deny
   foreign_handle  (tool path only) the statement reads a `_r_<n>` another
                principal minted: refused before the gate, `stage=handle`
+  source_denied  (tool path only) the persona calls a gateway source
+               its policy's `sources` allowlist does not name: refused by the
+               agent-side half of the dual allowlist BEFORE any outbound
+               call, audited `stage=source`
 A cell passes when the `rewrite` trace event and the outcome agree with that.
 
 The `tool` path is the sixth path: rows
@@ -66,6 +70,8 @@ TOOL_PATH = "tool"
 EVERY_PATH = (*ALL_PATHS, MCP_PATH, TOOL_PATH)
 SHAPES = ("plain", "cte", "setop", "derived_alias", "create_temp_as")
 TOOL_SOURCE = "labels-api___screen_addresses"  # the source the rows are attributed to
+# a concrete tool name per known gateway target, for the source-denied cells
+SOURCE_ATTEMPTS = {"labels-api": TOOL_SOURCE, "redshift": "redshift___cost_total"}
 HANDLE = "__HANDLE__"  # placeholder in a tool cell's SQL, replaced by the minted `_r_<n>`
 # what the source returns: column names prefixed so they collide with no lake column;
 # the third row carries instruction-shaped text — it must land as quoted evidence
@@ -155,6 +161,23 @@ def home_table(role: str) -> str:
         return (bool(rule.get("row_filter")) + len(rule.get("deny_columns") or []), name)
 
     return max(tables.items(), key=weight)[0]
+
+
+def deny_source(role: str) -> str | None:
+    """A gateway source target the persona's policy does NOT allow —
+    derived from the policies like everything else: the union of every
+    persona's `sources` plus the known targets, minus this role's own list.
+    None for a role whose sources are unrestricted (no `sources` field on the
+    unrestricted policy)."""
+    pol = policy_of(role)
+    if pol.get("sources") is None and pol.get("allow_raw_paths") and not pol.get("tables"):
+        return None
+    allowed = set(pol.get("sources") or ())
+    universe = {s for p in governance.policies.POLICIES.values() for s in p.get("sources") or ()}
+    universe |= set(SOURCE_ATTEMPTS)
+    for target in sorted(universe - allowed):
+        return target
+    return None
 
 
 def deny_table(role: str, all_tables: list[str]) -> str | None:
@@ -254,6 +277,27 @@ def cells(paths: tuple[str, ...] = ALL_PATHS, shapes: tuple[str, ...] = SHAPES) 
                     False,
                 )
             )
+            # one source-denied cell per restricted persona: calling a
+            # gateway source outside the policy's `sources` allowlist is refused
+            # by the agent side BEFORE any outbound call. No SQL runs.
+            denied_src = deny_source(role)
+            if denied_src:
+                n += 1
+                attempt = SOURCE_ATTEMPTS.get(denied_src, f"{denied_src}___probe")
+                out.append(
+                    Cell(
+                        persona,
+                        role,
+                        TOOL_PATH,
+                        "deny",
+                        f"(source {denied_src})",
+                        attempt,
+                        f"fetch_source({attempt!r})",
+                        "source_denied",
+                        False,
+                        False,
+                    )
+                )
         # one table-level deny cell per restricted persona (raw path, plain shape)
         deny = deny_table(role, all_tables)
         if deny:
@@ -389,10 +433,51 @@ def _landing_problems(ref: str, text: str, owner: str) -> list[str]:
     return out
 
 
+def _run_source_denied(cell: Cell) -> dict:
+    """The persona calls `fetch_source` on a source its policy does not
+    allow — the agent-side allowlist must refuse before any outbound call and
+    land nothing. The real tool body runs (zero network: the refusal comes
+    first)."""
+    from data_agent import tools as agent_tools
+    from data_agent.context import results
+
+    prev = governance.active_role()
+    governance.set_active_role(cell.role)
+    problems = []
+    try:
+        results.STORE.bind(_owner_of(cell.role))
+        before = set(results.STORE.refs())
+        out = agent_tools.fetch_source._tool_func(tool=cell.ref, args={})
+        if not out.startswith("OUT_OF_SCOPE") or "not available to your role" not in out:
+            problems.append(f"unauthorized source was not refused: {out[:120]}")
+        if set(results.STORE.refs()) != before:
+            problems.append("a handle was landed for a refused source")
+    finally:
+        governance.set_active_role(prev)
+    return {
+        "id": cell.id,
+        "persona": cell.persona,
+        "path": cell.path,
+        "shape": cell.shape,
+        "table": cell.table,
+        "handle": None,
+        "expected": cell.expected,
+        "rejected": not problems,
+        "governed": False,
+        "rls": 0,
+        "cls": 0,
+        "executed": False,
+        "ok": not problems,
+        "problems": problems,
+    }
+
+
 def run_cell(cell: Cell) -> dict:
     """Run one cell through the pipeline as its role; return the verdict."""
     from data_agent.context import results
 
+    if cell.expected == "source_denied":
+        return _run_source_denied(cell)
     prev = governance.active_role()
     governance.set_active_role(cell.role)
     sql, problems, handle = cell.sql, [], None
@@ -509,9 +594,8 @@ def render(rows: list[dict], paths: tuple[str, ...]) -> str:
             cells_.append(f"{sum(r['ok'] for r in rs)}/{len(rs)}" if rs else "—")
         for d in deny_cols:
             deny = [r for r in by.get((p, d), []) if r["shape"] == "deny"]
-            cells_.append(
-                f"{sum(r['ok'] for r in deny)}/{len(deny)} ({deny[0]['table']})" if deny else "—"
-            )
+            label = ", ".join(sorted({r["table"] for r in deny}))
+            cells_.append(f"{sum(r['ok'] for r in deny)}/{len(deny)} ({label})" if deny else "—")
         lines.append(f"| {p} | " + " | ".join(cells_) + " |")
     total, ok = len(rows), sum(r["ok"] for r in rows)
     lines += ["", f"**{ok}/{total} cells pass** ({ok / total:.0%})."]

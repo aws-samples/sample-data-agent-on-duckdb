@@ -304,3 +304,59 @@ def test_budgets_are_off_by_default():
     assert cost.SESSION_MAX_EXPANDED_PATHS == 0
     assert cost.SESSION_MAX_ENGINE_MS == 0
     cost.check_budget({"statements": 10**6, "expanded_paths": 10**6, "engine_ms": 10**9})
+
+
+# ------------------------------------------------------- upgrade advice
+def test_past_the_envelope_is_a_route_not_an_execution(monkeypatch):
+    monkeypatch.setattr(cost, "UPGRADE_ADVICE_PATHS", 2)
+    sql = f"SELECT count(*) FROM eth_traces WHERE date BETWEEN '{D1}' AND '{D3}'"  # 3 paths
+    with pytest.raises(cost.UpgradeAdvised) as e:
+        cost.apply(sql)
+    advice = e.value.advice
+    assert advice["expanded_paths"] == 3 and advice["limit"] == 2
+    assert advice["equivalent_sql"] == sql  # the governed SQL, not the path-expanded one
+    assert "Amazon Athena" in advice["routes"][0]
+    assert "NOT executed" in str(e.value) and "Do not retry" in str(e.value)
+
+
+def test_the_envelope_sums_across_tables(monkeypatch):
+    monkeypatch.setattr(cost, "UPGRADE_ADVICE_PATHS", 4)
+    sql = (
+        f"SELECT count(*) FROM eth_traces WHERE date BETWEEN '{D1}' AND '{D3}' "
+        f"UNION ALL SELECT count(*) FROM eth_transactions WHERE date BETWEEN '{D1}' AND '{D3}'"
+    )
+    with pytest.raises(cost.UpgradeAdvised) as e:
+        cost.apply(sql)
+    assert e.value.advice["expanded_paths"] == 6
+
+
+def test_zero_disables_the_envelope(monkeypatch):
+    monkeypatch.setattr(cost, "UPGRADE_ADVICE_PATHS", 0)
+    out, info = cost.apply(f"SELECT * FROM eth_traces WHERE date BETWEEN '{D1}' AND '{D3}'")
+    assert info["expanded_paths"] == 3
+
+
+def test_within_the_envelope_executes_unchanged(monkeypatch):
+    monkeypatch.setattr(cost, "UPGRADE_ADVICE_PATHS", 3)
+    out, info = cost.apply(f"SELECT * FROM eth_traces WHERE date BETWEEN '{D1}' AND '{D3}'")
+    assert info["expanded_paths"] == 3  # at the limit, not past it
+
+
+def test_the_pipeline_surfaces_the_advice_in_trace_and_audit(local_conn, monkeypatch, capsys):
+    import json as _json
+
+    from data_agent import audit as audit_mod
+    from data_agent import pipeline
+
+    monkeypatch.setattr(cost, "UPGRADE_ADVICE_PATHS", 2)
+    monkeypatch.setitem(cost.SOURCES, "tt", dict(cost.SOURCES["eth_traces"]))
+    local_conn.execute("CREATE TABLE tt AS SELECT '2025-02-21' AS date, 1 AS v")
+    audit_mod.reset_session()
+    items = list(pipeline.run(f"SELECT count(*) FROM tt WHERE date BETWEEN '{D1}' AND '{D3}'"))
+    ev = next(i for i in items if isinstance(i, dict) and i.get("phase") == "cost")
+    assert ev["rejected"] and ev["upgrade"]["expanded_paths"] == 3
+    assert isinstance(items[-1], str) and "Amazon Athena" in items[-1]
+    line = _json.loads(
+        [ln for ln in capsys.readouterr().out.splitlines() if '"audit"' in ln][-1]
+    )
+    assert line["audit"]["stage"] == "upgrade" and line["Outcome"] == "rejected"

@@ -21,11 +21,11 @@ temp tables and belong to Compute.
 | Layer | Lives in | Responsibility | Mechanism |
 |---|---|---|---|
 | Scheduling | AgentCore Runtime; `data_agent/scheduling/` is what it calls into (HTTP entrypoint, MCP surface, outbound Gateway client) | session and resource management | one session = one microVM = one engine; verified claims in, streamed envelopes out; the same pipeline behind the HTTP and the MCP protocol |
-| Semantic | `data_agent/semantic/` (model · registry · compile) | stable KPIs as reviewed definitions | registered metrics compiled deterministically to one governed SELECT (`call_metric`); an unregistered metric, dimension or filter column is refused, never improvised |
+| Semantic | `data_agent/semantic/` (model · assets · registry · compile · vq) | stable KPIs and reviewed questions as definitions in Git | registered metrics (`semantic/*.yaml`) compiled deterministically to one governed SELECT (`call_metric`); verified queries (`verified_queries/*.yaml`) bound as AST literals (`call_verified`); anything unregistered is refused, never improvised |
 | Context | `data_agent/context/` (datamap · cost · results · compression · prompt) | what the model sees, what the engine is asked | data map from the engine catalog; partition-filter cost gate + path expansion; shape not truncate; measured-pressure history stubs |
 | Governance | `data_agent/governance/` (policies · hardening · rewrite, sqlglot) | authorization | RLS/CLS rewrite before the engine, from verified JWT claims; fail closed; total by construction; universal hardening |
 | Compute | in-process DuckDB (`data_agent/compute/`) | SQL execution | engine inside the agent process, S3 read in place; working sets and `_r_<n>` results kept as session temp tables |
-| Storage | Amazon S3 (`data_agent/storage/`: legs + scenarios) | durable data | Parquet / native exports, Iceberg (S3 Tables, Glue), DuckLake — four access paths to the same data |
+| Storage | Amazon S3 (`data_agent/storage/`: legs + scenarios) | durable data | ONE recommended leg — S3 Tables managed Iceberg over the Iceberg REST endpoint, with Lake Formation as the policy authority; three compatibility legs (raw Parquet / native exports, Glue Iceberg REST, DuckLake) stay in the code and the matrix governs all of them |
 
 ```
 UI / CLI ──▶ AgentCore Runtime (HTTP, 1 session = 1 microVM)  ┐ same image, same pipeline
@@ -151,6 +151,17 @@ Implementation notes that save the next person a day:
   `/invocations` endpoint with the Bearer header and a session-id header
   (`ui/app.py`, `scripts/jwt_invoke.py` and `scripts/run_eval.py` all carry
   this pattern).
+- **Any IdP's claim shape, one mapping.** Both inbound surfaces share
+  `scheduling/claims.py`: Cognito's `custom:tenant` / `custom:role` by
+  default, any other IdP's shape via `CLAIM_TENANT_PATH` / `CLAIM_ROLE_PATH`
+  / `CLAIM_SUB_PATH`, no code edit. A path is tried as a LITERAL claim name
+  first (URL-style claims such as `https://idp.example/tenant` keep their
+  dots), then as a dot-separated traversal through nested objects and list
+  indexes (`realm_access.roles.0`, the Entra / Keycloak shapes). A configured
+  path is authoritative: a token without that claim yields no identity value,
+  never a fallback — an unknown tenant lands on the deny-all floor, an empty
+  role in a known tenant on that tenant's most restricted policy. The
+  reference deployment exercises only the Cognito shape end to end.
 - The SigV4 fallback identity paths (runtime user-id header, payload
   identity) remain for local/CLI use; they trust the IAM-authenticated
   caller to assert its user's identity — a documented trust assumption.
@@ -273,6 +284,84 @@ regression surface for any new governed table.
   functions regardless of policy, and requires every file path to carry an
   allowed scheme (`RAW_PATH_SCHEMES`, default `s3://`, case-insensitive).
   Each of these was verified executable before the fix.
+
+### Lake Formation as the policy authority
+
+Row/column authorization can never be "pushed down to storage": S3 vends
+objects, and one Parquet / Iceberg file mixes every tenant's rows and every
+column — a credential can scope WHICH objects a caller may GET, never which
+rows inside them. Some compute must enforce, and the only question is which
+compute is trusted. When Lake Formation is present, this solution takes Lake
+Formation's own distributed-enforcement shape: Lake Formation is where policy
+is AUTHORED (one policy, shared with Athena / Redshift / EMR), and the rewrite
+layer is the in-process ENFORCEMENT point, fail-closed
+(`data_agent/governance/lakeformation.py`, configured by one env var,
+`LF_GOVERNANCE`):
+
+```
+caller JWT ──▶ claims → persona data access role
+  ├─ sts:AssumeRole + sts:TagSession (LakeFormationAuthorizedCaller=<tag>)
+  │    — the standard external-engine handshake (account-level opt-in)
+  ├─ glue:GetUnfilteredTableMetadata AS that principal, per governed table
+  │    → AuthorizedColumns + CellFilters[].RowFilterExpression (PartiQL)
+  └─ compiled into the session policy the sqlglot rewrite already enforces
+```
+
+- **The policy is evaluated for the CALLER.** The per-persona read-back is
+  `glue:GetUnfilteredTableMetadata` under the assumed persona principal;
+  the admin-side `ListDataCellsFilter` / `GetDataCellsFilter` list a table's
+  filters without evaluating who may use them, so they are the wrong call.
+- **Installed at session bind, on both inbound surfaces**, behind
+  `active_policy()` — every reader (the rewrite, the L0 map, `search_schema`,
+  metric and verified-query visibility) sees the merged view. Cached per role
+  (`LF_POLICY_TTL_S`, default 900 s; 60 s after a failure) and audited
+  `stage=lf_policy`.
+- **`GOVERNANCE_POLICIES` is demoted, not removed**: it is the sole authority
+  for deployments without Lake Formation, the LOWER BOUND merged with the Lake
+  Formation view (row filters AND-ed, denied columns unioned — the stricter
+  always wins), and the test seam. Invariant 7 stays whole: Lake Formation
+  supplies WHAT to filter; the completeness rules above still decide WHERE it
+  applies, and the coverage matrix keeps gating every build.
+- **Fail-closed, table by table**: a failed assume, a failed metadata call, a
+  cell filter the rewrite cannot express as one predicate, or a PartiQL
+  expression sqlglot cannot parse REMOVES that table from the session policy
+  — the existing table-level deny. A fetch failure never falls back to the
+  env rule alone: naming a Lake Formation role for a persona declares Lake
+  Formation authoritative for it. A persona not named is env-governed (the
+  cloud-ops tables are not in a Glue catalog; both tiers coexist by design).
+- **The data path does not move.** The engine keeps reading S3 Tables through
+  the execution role; what changes is where policy lives. One Lake Formation
+  rule to remember: a governed table must have its `IAM_ALLOWED_PRINCIPALS`
+  pass-through grant revoked, or Lake Formation evaluates the union and the
+  filter is moot.
+- **Idempotence is measured, not assumed.** `scripts/lf_idempotence.py` asks
+  ten questions per persona twice, as the same Lake Formation principal: once
+  through this engine with the filters compiled into the statement, once
+  through Athena with Lake Formation enforcing natively, and compares row for
+  row (20/20 on the reference deployment; exit 1 on any mismatch, and an
+  unrunnable case is a failure, never a skip). Two lessons made it a test
+  rather than a tautology: a filter that excludes nothing (a window starting
+  on the slice's first day) agrees with or without the compilation, so the
+  shipped filters must actually discriminate; and a **negative control** —
+  the overlay disabled on the agent side only — must go red (it does, by 1.2
+  million rows on the restricted persona).
+- **Deployment tiers**: no Lake Formation → the env policy is the sole
+  authority; Lake Formation present → Lake Formation authority + in-process
+  enforcement; a regulator requires a trusted engine → that table never
+  enters the DuckDB path (route it to Athena). Short-lived, table-scoped
+  credential vending (`GetTemporaryGlueTableCredentials`) is the far-term
+  half; this implementation changes the policy source only.
+
+**An empty result under a row filter says so.** Measured: a persona whose
+window excluded the day it asked about counted 0 and told the user the slice
+had no data for that date, suggesting another access path — which carries the
+same policy. The trace and the audit line knew; the result string the model
+reads did not. A result that SHOWS NOTHING (no rows, or one row whose every
+cell is null or zero — an aggregate over filtered-away rows returns one row
+containing 0) now carries a note when a row-level policy applied to a table
+the statement named: nothing you may see, not nothing that exists; do not
+report it as missing; do not try another path. The note names tables only,
+never a value or a count.
 
 ## The context layer: what the model sees, what the engine is asked
 
@@ -473,6 +562,18 @@ what"), engine-neutral like the first.
   refuses everything with a distinct `budget` refusal in the trace and the
   audit line, and the message names the knob and tells the model to
   summarize and stop.
+- **The single-node envelope answers with a route.** After path expansion, a
+  statement whose `expanded_paths` exceed `UPGRADE_ADVICE_PATHS` (default
+  120, deliberately below `MAX_EXPANDED_PARTITIONS`; per-partition volume is
+  not estimated because that would need network; 0 disables) is refused with
+  `UpgradeAdvised`, a structured payload: the expanded paths, the limit, the
+  routes (Amazon Athena / Amazon Redshift) and the **equivalent governed SQL**
+  — the pre-expansion statement over logical table names with the row/column
+  policy already compiled in, runnable as-is on a warehouse-scale engine over
+  the same lake. Routing stays outside the agent: the message tells the model
+  to report the route and not retry the range, and the agent never calls
+  Athena itself. The cost trace event carries `upgrade: {…}` and the audit
+  line records `stage=upgrade`, distinct from `cost` and `budget`.
 
 Measured in the cloud: `SELECT count(*) FROM eth_traces` rejected before the
 engine, the model added `date = '2025-02-21'`, one explicit path, ~0.6 s;
@@ -514,6 +615,10 @@ and are mirrored in `.env.example`.
 | `AUDIT_LOG` / `AUDIT_METRIC_NAMESPACE` | 1 / `DataAgentOnDuckDB` | EMF audit lines on stdout → CloudWatch metrics |
 | `OPS_PREFIX`, `OPS_CUR_SRC`, `OPS_CLOUDTRAIL_SRC`, `OPS_ACCOUNT_ID` | unset | cloud-ops scenario mounts and the account the RLS predicates pin to |
 | `DUCKDB_MEMORY_LIMIT` | 2GB | engine envelope |
+| `UPGRADE_ADVICE_PATHS` | 120 | declared single-node envelope in expanded partition paths; past it the statement is refused with a route (0 = off) |
+| `LF_GOVERNANCE`, `LF_POLICY_TTL_S` | unset / 900 | Lake Formation as the policy authority (persona → data access role, governed tables); unset = env policy only |
+| `CLAIM_TENANT_PATH`, `CLAIM_ROLE_PATH`, `CLAIM_SUB_PATH` | Cognito shape | where an IdP's token carries tenant / role / subject |
+| `SEMANTIC_ASSETS_DIR`, `VERIFIED_QUERIES_DIR` | `semantic/`, `verified_queries/` | where the Git assets of the semantic layer are loaded from |
 | `SESSION_MAX_STATEMENTS`, `SESSION_MAX_EXPANDED_PATHS`, `SESSION_MAX_ENGINE_MS` | 0 (off) | session budget, enforced in the Cost stage as a distinct `budget` refusal |
 | `RESULT_MARK_STRINGS` | 1 | wrap text cells the model reads as `data:«…»` |
 | `DATAMAP_PROBE_REMOTE` | 1 | 0 skips the bounded remote DESCRIBE of raw sources (offline runs) |
@@ -529,7 +634,8 @@ thing on every call. The semantic layer is the first layer added since the
 context layer, admitted under invariant 8's clarification.
 
 - **Registry** (`semantic/model.py`, `registry.py`): a `Metric` is operator
-  configuration delivered by the scenario (`Scenario.metrics`) — name,
+  configuration delivered by the scenario (`Scenario.metrics`), authored as a
+  Git asset (below) — name,
   version, owner, description, table, `measure_sql`, `time_column`, grain
   (month | day), `dimensions` (name → SQL expression), allowed `filters`,
   `fixed_filters`, kind (`aggregate` | `period_delta`). Validated at import
@@ -550,6 +656,44 @@ context layer, admitted under invariant 8's clarification.
 - **Catalog in the prompt**: the metrics the active role may call ride along
   with the L0 table map, filtered the same way, so the model never sees a KPI
   the rewrite would refuse.
+- **A top-N is not a total.** A grouped `call_metric` returns the top `limit`
+  groups; measured, the model summed those rows and reported the sum as the
+  day's total — plausible and wrong, the tail of small groups missing. A
+  grouped aggregate that fills its limit now says so in the result the model
+  reads (top-N only; `dims=[]` for the total; raise `limit` for more groups),
+  read off the compiled SQL so it cannot drift from the compiler's defaults.
+  Invariant 9 applies to every tool that limits rows, not just `run_sql`.
+
+**Definitions are Git assets.** The reviewed metrics live in
+`semantic/<scenario>.yaml` at the repository root — an open-format file whose
+change is a reviewable diff, owned by whoever owns the deployment
+(`semantic/assets.py` loads it into the `Metric` dataclass, which stays the
+internal representation; `SEMANTIC_ASSETS_DIR` overrides the directory).
+Loading is fail-closed like a policy: a missing file, an unparseable document,
+an unknown or misspelt field, a duplicate name, or a definition that fails
+validation raises at import, so a bad asset never serves a question. The asset
+regression tests (`tests/unit/test_assets.py`, with the semantic, reconcile
+and governance-matrix suites) are the gate a change to an asset must pass.
+
+**Verified queries** (`semantic/vq.py`, `verified_queries/<scenario>.yaml`)
+are the second asset kind: a natural-language `question`, reviewed `sql` with
+DuckDB's own `$name` placeholders, typed `params` (`date` / `month` /
+`address` / `string` / `int`), an `owner`, and the `tables` the SQL reads —
+validated against the parsed AST, so the catalog cannot misstate them. Loading
+is fail-closed the same way (unknown field, placeholder / params mismatch,
+undeclared table, positional placeholder, duplicate name); a missing directory
+is just an empty catalog. `call_verified(name, params)` binds by replacing the
+placeholder nodes with typed literals in the AST — never string interpolation,
+so `' OR '1'='1` stays one literal — and the bound statement runs the full
+pipeline: governance rewrites it for the caller exactly as for free SQL, and
+the cost gate prices it. A template grants no privilege, and it is listed
+(prompt, refusal text, MCP context resource) only when the persona may read
+every table it names.
+
+**Provenance on every statement.** The `execute` trace event and the audit
+line carry where a statement's numbers come from: `metric` (compiled by
+`call_metric`), `verified` (bound by `call_verified`), or `free_sql` (the
+model wrote it). Accuracy can then be bucketed by tier.
 
 ## Outbound sources through AgentCore Gateway
 
@@ -579,6 +723,29 @@ ATTACHed into the engine and the agent process holds no source credential.
 - Tool results are untrusted content exactly like table rows (marked, never
   instructions); a hostile source is one of the threat model's modelled
   threats.
+
+The outbound permission model has three levels, and the principle is the
+lake path's: the system of record authorizes the real user, enforcement stays
+in-process.
+
+| Level | Question it answers | Mechanism |
+|---|---|---|
+| agent | which sources can this deployment reach at all | the Gateway's target list + one least-privilege credential per target; fixed at deploy time |
+| persona | may this role use this source tool | a dual allowlist: Cedar policy on the Gateway (the platform-owned enforcement point, per-caller quota) AND a `sources` field per persona in `GOVERNANCE_POLICIES` — either layer missing means refusal |
+| user | which rows may this person see at the source | decided by the target's credential type: on-behalf-of / 3LO / IAM Identity Center trusted identity propagation for sources that know users; a service identity (2LO) is an explicit, audited degradation (`degraded=2lo`), never the default |
+
+The agent half of the persona level ships here; the Cedar policy is platform
+configuration, and the agent side stays fail-closed without it.
+`sources: ["<gateway-target>", …]` names Gateway targets (`labels-api` covers
+every operation that target exposes) with the table policy's semantics:
+deny-by-default for a restricted persona without the field, exactly the list
+when the field is present (an operator may clamp even the unrestricted role),
+validated at load. `list_sources` hides a source outside the list — invisible
+to the model, like a denied column — and `fetch_source` refuses BEFORE any
+outbound call with the same do-not-reveal shape as an unregistered metric,
+audited `stage=source`. A 2LO source is not re-filtered on `_r_<n>`, so it
+must serve only data every eligible role may see (the labels feed is the
+public OFAC list plus synthetic labels).
 
 ## Code organization: one package per layer, one statement pipeline
 
@@ -669,9 +836,16 @@ by `tool_use_id`.
 `data_agent/audit.py` emits one structured JSON line per `run_sql` on stdout
 in CloudWatch **Embedded Metric Format**: principal, SQL hash and text, what
 governance and the cost policy did, shape, rows, engine time, materialized
-ref, rejection reason and stage. The runtime's log group keeps the full
+ref, rejection reason and stage, provenance tier, and what the statement
+cost at the storage layer: `bytes_scanned` (DuckDB JSON profiling,
+`TOTAL_BYTES_READ`) and `s3_requests` (one `duckdb_logs` row per httpfs
+request), both from the engine's own instrumentation with zero network and
+fail-soft to `null` on a build without either facility. The two hooks run
+under the same lock hold as the statement, so the counts belong to it. The
+runtime's log group keeps the full
 record and CloudWatch extracts the numeric fields as metrics (`Statements`,
-`EngineMs`, `Rows`, `Materialized`, `ExpandedPaths`, dimensioned by
+`EngineMs`, `Rows`, `Materialized`, `ExpandedPaths`, `BytesScanned`,
+`S3Requests`, dimensioned by
 `Outcome` = executed / rejected / error) without a `PutMetricData` call or
 any extra IAM permission. This is an audit *log*, not an audit store —
 retention, search and alerting are CloudWatch's job. The same record feeds
@@ -688,6 +862,18 @@ ON WHOSE BEHALF (the same 12-hex digest as the handle owner, never the raw
 and `degraded` for tool-fetched rows, and `metric@version` for compiled
 metrics. `infra/stack.py` defines a CloudWatch dashboard over these fields
 (`scripts/put_dashboard.py` deploys it alone).
+
+What the storage numbers showed on the S3 Tables leg: the catalog names the
+exact data files (no prefix LIST), the engine requests only the byte ranges
+of the columns a statement uses, and some aggregates are answered from Iceberg
+metadata alone (`count(*)` over the whole table moved zero data bytes).
+Column projection is the dominant lever — one narrow column ≈ 18 MB, two wide
+string columns added ≈ 123 MB for the same rows — while predicate evaluation,
+governance filters included, always happens in the engine: a highly selective
+equality still pulled its whole column back. A CLS-denied column is simply
+never requested. Do not read this as predicate pushdown to S3 Tables. A
+working-set read-back reports `s3_requests=0`, so "the marginal cost is S3
+GETs" is auditable per statement.
 
 ## Scenarios (and why they fit the pattern)
 
@@ -774,13 +960,13 @@ structured, so no output-text matching is needed for the mechanism claims:
 |---|---|
 | routing | the right view/leg/table appears in executed SQL |
 | governance-adversarial | the proven bypass shapes → `rejected`; RLS predicate present; CLS column absent |
-| cost | every raw scan carries a partition predicate; expansions happened |
+| cost | every raw scan carries a partition predicate; expansions happened; past the envelope, a route instead of an execution |
 | accuracy | known incident numbers (e.g. 401,346.77 ETH inbound) within tolerance |
 | multi_turn | follow-ups hit `_r_` / temp tables; engine_ms small |
 | ops | the second scenario's personas against CUR / CloudTrail ground truth; the session budget refusals |
 | semantic | `call_metric` compiled and audited; unregistered dimensions refused |
 | injection | data-borne instructions in a label cell, a CloudTrail field, a tool result — no probe statement executes |
-| sources | `fetch_source` rows land as a handle and JOIN with the lake; an unknown source tool is refused |
+| sources | `fetch_source` rows land as a handle and JOIN with the lake; an unknown source tool, or one outside the persona's allowlist, is refused |
 
 Adversarial cases name their `probe_sql_regex`: a probe that executed fails
 the case regardless of anything else; a model that refused to issue it is
@@ -804,6 +990,21 @@ claims rest on. `requires_env` names runtime env a case needs (the session
 budgets); `requires_source` names the Gateway tool it needs, and the case is
 skipped with a note when the deployment does not expose it.
 
+**A bandwidth gate turns comparison into a verdict.** Accuracy decays
+silently; every non-ablation run compares its per-category pass rates with a
+LOCKED baseline (`tests/eval/baseline.json`) and exits 2 on a downward breach
+(exit 1 stays "not all passed"). Bands depend on category size — ±2 pp (≥ 50
+cases), ±5 pp (≥ 10), ±10 pp below — each narrower than one case flipping,
+so any single regression breaches; an improvement is a reason to refresh, not
+a failure. The baseline moves only through `--update-baseline` (pair it with
+`--golden compute` after a data or view change); a category whose case count
+differs is a stale note, never a breach and never an automatic refresh. A
+sharded run gates only the categories it ran. On its first live run the gate
+fired on harness artifacts (a stale cached golden, goldens that need in-region
+compute), and the baseline was deliberately NOT refreshed until the goldens
+were recomputed — re-anchoring on artifacts is the failure it exists to
+prevent.
+
 ### Governance coverage matrix
 
 Invariant 7 says the rewrite is total; the matrix makes that a number instead
@@ -813,8 +1014,10 @@ real statements through the real pipeline on a locally built engine shaped
 like the deployed catalog (from the table cards, so no network): 6 personas ×
 6 paths (`raw`, `s3t`, `glue`, `dl`, `mcp`, `tool`) × 5 shapes (`plain`,
 `cte`, `setop`, `derived_alias`, `create_temp_as`) = 180 cells, plus one
-table-level deny cell per restricted persona and one foreign-handle cell per
-persona = 191. The expected outcome of a cell is derived from the policy, not
+table-level deny cell per restricted persona, one foreign-handle cell per
+persona and one source-denied cell per restricted persona (a Gateway source
+derived from the policies as one the persona does not hold, refused with
+nothing landed) = 196. The expected outcome of a cell is derived from the policy, not
 written by hand, and the matrix runs in the unit suite
 (`tests/unit/test_gov_matrix.py`); `scripts/run_matrix.py` renders
 [governance-matrix.md](governance-matrix.md).
@@ -842,10 +1045,11 @@ written by hand, and the matrix runs in the unit suite
   directory, a full-day sort completes in seconds rather than failing.
 - **Concurrency isolation**: `scripts/concurrent_invoke.sh N` runs N parallel
   sessions with independent latencies — no queue, no cross-talk.
-- **Evaluation**: 50/52 cases across nine categories on the reference
-  deployment ([eval-results.md](eval-results.md)); the two red cases are kept
-  red deliberately and explained there. Governance coverage matrix 191/191;
-  633 unit tests, no network.
+- **Evaluation**: 55/55 cases across nine categories on the reference
+  deployment ([eval-results-2026-10-19.md](eval-results-2026-10-19.md); the
+  earlier 50/52 run with per-case traces is [eval-results.md](eval-results.md)).
+  Lake Formation idempotence 20/20 with a negative control. Governance
+  coverage matrix 196/196; 718 unit tests, no network.
 
 ## DuckLake catalog forms
 
@@ -863,21 +1067,21 @@ many short-lived microVM connections). Both forms are implemented.
 |---|---|
 | Data in a governed warehouse, few heavy queries | Warehouse MCP direct, skip DuckDB |
 | Data on S3, agent iterates heavily, unpredictable concurrency | This pattern |
-| Row/column-level access control per tenant | This pattern — built-in rewrite layer (LF data filters only work inside trusted engines) |
+| Row/column-level access control per tenant | This pattern — Lake Formation as the policy authority when present, compiled into the built-in rewrite layer; the env policy table otherwise |
 | Operational telemetry already exported to S3 (CUR, CloudTrail, CloudWatch Logs) | This pattern — read the export where it lands, curate to Parquet with the same engine, govern by account/column |
 | Both (most real estates) | Hybrid: DuckDB fast path + warehouse MCP fallback |
-| Working set approaches single-node memory | Split the query or move up the spectrum (Athena/Redshift) |
-| Data already on S3 in an open format (Parquet, Iceberg via S3 Tables / Glue, DuckLake) | DuckDB reads it in place — paths A/B primary, C/D compatibility (below) |
+| Working set approaches single-node memory | Split the query or move up the spectrum (Athena/Redshift) — past the declared envelope the agent refuses with that route and the equivalent governed SQL |
+| Data already on S3 in an open format (Parquet, Iceberg via S3 Tables / Glue, DuckLake) | DuckDB reads it in place — path B recommended, A/C/D compatibility (below) |
 | Data in a governed store, a SaaS, or an HTTP API (a warehouse, a labels API) | A read-only, parameterized tool through AgentCore Gateway with the caller's identity; rows land as a session handle |
 | Second-level freshness, or writes | A tool plus human review outside the agent; never the engine |
-| Lake Formation is the policy authority for the table | Route to a trusted engine (Athena), or compile the Lake Formation data-cell filters into the rewrite and prove row-for-row equality against Athena before trusting it |
+| Lake Formation is the policy authority for the table | Compile the Lake Formation filters into the rewrite (`LF_GOVERNANCE`) and keep the row-for-row idempotence check against Athena as a regression; route to a trusted engine for tables whose filters fall outside the compilable subset, or where a regulator requires one |
 
-### Access paths — two primary, two compatibility
+### Access paths — one recommended leg, three compatibility legs
 
 | Tier | Path | Method | Enable when |
 |---|---|---|---|
-| primary | A | raw Parquet / native exports (`read_parquet`, cost gate expands partitions) | always — needs no catalog |
-| primary | B | S3 Tables, Iceberg REST (`s3t.*`) | managed Iceberg tables; the default demo path |
+| recommended | B | S3 Tables, Iceberg REST (`s3t.*`) | managed Iceberg tables with Lake Formation as the policy authority; the default |
+| compatibility | A | raw Parquet / native exports (`read_parquet`, cost gate expands partitions) | always on — the fallback for a lake with no catalog |
 | compatibility | C | Glue Data Catalog, Iceberg REST (`glue.*`) | the lake is Glue-cataloged and Lake Formation is the policy authority |
 | compatibility | D | DuckLake (`dl.*`) | an experimental leg; keep it behind a flag |
 

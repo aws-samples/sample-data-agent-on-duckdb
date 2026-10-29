@@ -107,6 +107,94 @@ async def call_metric(
         return
     meta = {"name": m.name, "version": m.version, "owner": m.owner, "table": m.table}
     gen = pipeline.run(sql, metric=meta)
+    # read the grouping off the compiled statement, not off the caller's dims:
+    # the compiler owns the defaults (and `dims=[]` means "no grouping")
+    grouped = "GROUP BY" in sql.upper()
+    rows = None
+    while True:
+        item = await asyncio.to_thread(next, gen, _DONE)
+        if item is _DONE:
+            return
+        if isinstance(item, dict) and item.get("phase") == "execute":
+            rows = item.get("rows")
+        elif isinstance(item, str):
+            item += _topn_note(m, limit, rows, grouped)
+        yield item
+
+
+def _topn_note(metric, limit: int, rows, grouped: bool) -> str:
+    """A grouped metric answers with a top-N; the Nth row is not the last group.
+
+    The context layer's rule is that a truncated result must never look like a
+    complete one (invariant: oversized results are shaped, not cut). A grouped
+    `call_metric` reintroduces exactly that risk through its own LIMIT, and a
+    model that sums the returned rows reports a total that is short by the
+    tail — measured on 2026-10-19 (an eval case summed a top-20 and answered
+    13,511 for a day whose real AssumeRole count was 13,858). So when the
+    result fills the limit, say so in the result the model reads."""
+    if not grouped or metric.kind != "aggregate" or rows is None or rows < limit:
+        return ""
+    return (
+        f"\nnote: TOP-{limit} GROUPS ONLY (the limit was reached) — more groups exist beyond "
+        f"these rows. Do NOT sum `{metric.measure_alias}` over them and report it as a total: "
+        "that total is short by the tail. For a total, call the metric without dimensions "
+        "(dims=[]); for more groups, raise `limit`."
+    )
+
+
+@tool
+async def call_verified(name: str, params: dict | str | None = None):
+    """Run a VERIFIED QUERY — a reviewed question→SQL template — instead of
+    writing the SQL yourself. Use it when the user's question matches one in
+    "Verified queries" in your context: the SQL executes exactly as written
+    (parameters are bound as literals), is governed like any statement, and
+    results arrive exactly like run_sql. An unregistered name, a missing or
+    badly-typed parameter is REFUSED (OUT_OF_SCOPE) — report that, do not
+    rebuild the query with run_sql.
+
+    Args:
+        name: verified query name (see "Verified queries" in your context).
+        params: that query's parameters, e.g. {"address": "0x...",
+            "from_date": "2025-02-21", "to_date": "2025-02-23"} — all declared
+            parameters are required.
+    """
+    v = semantic.get_vq(name)
+    if v is None or v not in semantic.visible_vqs():
+        # unregistered, or over a table this persona may not read: the same
+        # answer either way (do not reveal what exists for other roles)
+        names = ", ".join(x.name for x in semantic.visible_vqs()) or "(none)"
+        text = (
+            f"OUT_OF_SCOPE: verified query {name!r} is not registered for your role — "
+            f"registered verified queries: {names}. Do not improvise it; tell the user."
+        )
+        audit.record(
+            principal=governance.active_role(),
+            sql=f"call_verified({name!r})",
+            outcome="rejected",
+            stage="semantic",
+            reason="verified query not registered for role",
+            tool="call_verified",
+        )
+        yield {"phase": "semantic", "rejected": True, "reason": "verified query not registered"}
+        yield text
+        return
+    try:
+        sql = semantic.bind_vq(v, params)
+    except semantic.VQError as e:
+        audit.record(
+            principal=governance.active_role(),
+            sql=f"call_verified({name!r})",
+            outcome="rejected",
+            stage="semantic",
+            reason=str(e)[:200],
+            tool="call_verified",
+            metric=v.ref,
+        )
+        yield {"phase": "semantic", "rejected": True, "verified": v.name, "reason": str(e)[:300]}
+        yield f"OUT_OF_SCOPE: {e}"
+        return
+    meta = {"name": v.name, "version": v.version, "owner": v.owner, "table": ",".join(v.tables)}
+    gen = pipeline.run(sql, metric=meta, provenance="verified")
     while True:
         item = await asyncio.to_thread(next, gen, _DONE)
         if item is _DONE:
@@ -128,6 +216,8 @@ def list_sources() -> str:
         return json.dumps({"sources": [], "unavailable": str(e)})
     except Exception as e:  # noqa: BLE001 — never let discovery kill the turn
         return json.dumps({"sources": [], "error": str(e)[:300]})
+    # A source the role may not call is invisible, like a denied column
+    tools = [t for t in tools if governance.source_allowed(t.get("tool", ""))]
     return json.dumps({"sources": tools}, ensure_ascii=False)
 
 
@@ -149,6 +239,25 @@ def fetch_source(tool: str, args: dict | None = None) -> str:
     principal = governance.active_role()
     if governance.is_denied_all():
         return "ERROR: no access policy is assigned to this identity."
+    if not governance.source_allowed(tool):
+        # Persona-level allowlist, checked BEFORE any outbound call: the
+        # agent-side half of the dual allowlist stays fail-closed even when the
+        # Gateway's Cedar policy is missing. Same shape as an unregistered
+        # metric — do not reveal what exists for other roles.
+        audit.record(
+            principal=principal,
+            sql=f"fetch_source({tool!r})",
+            outcome="rejected",
+            stage="source",
+            reason="source not in role sources allowlist",
+            tool="fetch_source",
+            owner=results.STORE.owner_id,
+            user_sub=results.STORE.owner_id,
+        )
+        return (
+            f"OUT_OF_SCOPE: source {tool!r} is not available to your role — "
+            "call list_sources for the sources you may use; tell the user."
+        )
     try:
         rows = gateway_client.call_tool(tool, args or {})
     except gateway_client.SourceError as e:

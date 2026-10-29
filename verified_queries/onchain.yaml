@@ -1,0 +1,64 @@
+# Verified queries — the onchain scenario's hero flow, as reviewed
+# question→SQL templates. Open format, owned in the customer's Git, changed
+# through review + the asset regression gate (CI reruns the loading tests on
+# any change here). Placeholders use DuckDB's own `$name` syntax and are bound
+# as typed literals by the semantic layer, never interpolated as text; the
+# compiled statement still runs the full pipeline (governance rewrite, cost
+# gate), so a template grants no privilege its caller does not have.
+verified_queries:
+  - name: vq_largest_inbound
+    version: "1.0"
+    owner: investigations
+    question: >-
+      Anchor a case: the single largest incoming ETH transfer (internal calls
+      included) to one address in a date window.
+    tables: [eth_traces]
+    params: {address: address, from_date: date, to_date: date}
+    sql: |
+      SELECT date, transaction_hash, from_address, to_address,
+             round(value / 1e18, 6) AS eth_value
+      FROM eth_traces
+      WHERE to_address = $address
+        AND date BETWEEN $from_date AND $to_date
+        AND value > 0 AND status = 1
+      ORDER BY value DESC
+      LIMIT 1
+
+  - name: vq_fanout_recipients
+    version: "1.0"
+    owner: investigations
+    question: >-
+      Follow the money one hop out: where did funds leaving one address go in
+      a date window — top recipients with transfer counts and totals.
+    tables: [eth_traces]
+    params: {address: address, from_date: date, to_date: date}
+    sql: |
+      SELECT to_address, count(*) AS transfers,
+             round(sum(value) / 1e18, 6) AS total_eth
+      FROM eth_traces
+      WHERE from_address = $address
+        AND date BETWEEN $from_date AND $to_date
+        AND value > 0 AND status = 1
+      GROUP BY to_address
+      ORDER BY sum(value) DESC
+      LIMIT 20
+
+  - name: vq_cashout_to_cex
+    version: "1.0"
+    owner: investigations
+    question: >-
+      Find the cash-out: transfers from one address that landed on a KNOWN
+      exchange deposit address (labels joined) in a date window.
+    tables: [eth_traces, cex_deposit_labels]
+    params: {address: address, from_date: date, to_date: date}
+    sql: |
+      SELECT t.date, t.transaction_hash, l.exchange,
+             l.address AS deposit_address,
+             round(t.value / 1e18, 6) AS eth_value
+      FROM eth_traces AS t
+      JOIN cex_deposit_labels AS l ON lower(t.to_address) = lower(l.address)
+      WHERE t.from_address = $address
+        AND t.date BETWEEN $from_date AND $to_date
+        AND t.value > 0 AND t.status = 1
+      ORDER BY t.value DESC
+      LIMIT 50

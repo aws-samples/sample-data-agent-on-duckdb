@@ -1,0 +1,42 @@
+{
+ "as_of": "2026-10-19 04:46Z",
+ "mode": "cloud",
+ "categories": {
+  "accuracy": {
+   "passed": 6,
+   "total": 6
+  },
+  "cost": {
+   "passed": 7,
+   "total": 7
+  },
+  "governance-adversarial": {
+   "passed": 8,
+   "total": 8
+  },
+  "injection": {
+   "passed": 3,
+   "total": 3
+  },
+  "multi_turn": {
+   "passed": 2,
+   "total": 2
+  },
+  "ops": {
+   "passed": 13,
+   "total": 13
+  },
+  "routing": {
+   "passed": 5,
+   "total": 5
+  },
+  "semantic": {
+   "passed": 7,
+   "total": 7
+  },
+  "sources": {
+   "passed": 4,
+   "total": 4
+  }
+ }
+}

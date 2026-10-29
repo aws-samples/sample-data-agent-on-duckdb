@@ -297,6 +297,31 @@ def test_secops_assume_role_metric_runs_governed_and_returns_rows(local_conn, mo
     ]
 
 
+def test_a_grouped_metric_that_fills_the_limit_says_it_is_a_top_n(local_conn, monkeypatch):
+    """A truncated grouping must not look like a complete one: summing a
+    top-N and reporting it as the total was a measured failure (2026-10-19,
+    13,511 vs the real 13,858)."""
+    _semantic_ops_engine(local_conn, monkeypatch)
+    _, text = _call(
+        metric="unblended_cost_by_service", dims=["service"], time_window="2026-08", limit=1
+    )  # 2 services in the fixture for that period, limit 1 → the limit is reached
+    assert "TOP-1 GROUPS ONLY" in text and "Do NOT sum" in text and "dims=[]" in text
+    # ...and the rows themselves are untouched by the note
+    assert json.loads(text.split("\n")[0])[0]["service"]
+
+
+def test_a_metric_result_short_of_the_limit_or_ungrouped_carries_no_note(local_conn, monkeypatch):
+    _semantic_ops_engine(local_conn, monkeypatch)
+    _, text = _call(
+        metric="unblended_cost_by_service", dims=["service"], time_window="2026-08", limit=20
+    )
+    assert "TOP-" not in text  # 2 groups < limit: nothing was cut
+    _, total = _call(
+        metric="unblended_cost_by_service", dims=[], time_window="2026-08", limit=1
+    )
+    assert "TOP-" not in total  # one ungrouped total row is the whole answer
+
+
 def test_unregistered_metric_is_refused_and_audited(local_conn, monkeypatch, capsys):
     _semantic_ops_engine(local_conn, monkeypatch)
     governance.set_active_role("ops:finops")
@@ -326,6 +351,7 @@ def test_call_metric_is_registered_on_the_agent_and_documented_in_the_prompt():
         "run_sql",
         "search_schema",
         "call_metric",
+        "call_verified",
         "list_sources",
         "fetch_source",
     }

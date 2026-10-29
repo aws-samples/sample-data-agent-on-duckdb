@@ -6,7 +6,7 @@ import asyncio
 
 from data_agent import audit, governance
 from data_agent.context import prompt
-from data_agent.scheduling import gateway_client
+from data_agent.scheduling import claims, gateway_client
 
 
 def resolve_claims(payload, context) -> dict | None:
@@ -41,18 +41,10 @@ def resolve_claims(payload, context) -> dict | None:
             # this line trusts the caller completely — see threats T004/M006.
             claims_only = {"verify_signature": False}  # nosemgrep: unverified-jwt-decode
             decoded = jwt.decode(auth[7:], options=claims_only)  # nosemgrep: unverified-jwt-decode
-            # normalize IdP claim names → {tenant, role}. Cognito custom
-            # attributes arrive as custom:tenant / custom:role; other IdPs may
-            # send bare tenant/role. resolve_role() reads {tenant, role}.
-            return {
-                "tenant": decoded.get("custom:tenant") or decoded.get("tenant", ""),
-                "role": decoded.get("custom:role") or decoded.get("role", ""),
-                # `sub` is the IdP's stable per-user id — carried only to bind
-                # the session to an owner (resolve_role ignores it). Two users
-                # who share a role still get distinct owners, so a reused
-                # session id between them still triggers a state reset.
-                "sub": decoded.get("sub", ""),
-            }
+            # normalize IdP claim names → {tenant, role, sub}: Cognito's
+            # custom:tenant / custom:role by default, any other IdP's shape via
+            # the CLAIM_*_PATH envs — shared with the MCP surface.
+            return claims.normalize(decoded)
         except Exception:  # noqa: BLE001,S110 — fall through to weaker sources  # nosec B110
             pass
     user_id = headers.get("X-Amzn-Bedrock-AgentCore-Runtime-User-Id")
@@ -92,7 +84,7 @@ def _bind_session(owner: str) -> bool:
 
     prev = _session["owner"]
     _session["owner"] = owner
-    results.STORE.bind(owner)  # Handles minted from now on belong to this owner
+    results.STORE.bind(owner)  # handles minted from now on belong to this owner
     return prev is not None and prev != owner
 
 
@@ -151,7 +143,7 @@ def map_event(ev: dict, trace: list, usage: dict | None = None) -> dict | None:
         usage["input_tokens"] += int(u.get("inputTokens") or 0)
         usage["output_tokens"] += int(u.get("outputTokens") or 0)
         usage["model_calls"] += 1
-        audit.note_tokens(usage["input_tokens"])  # On the audit line too
+        audit.note_tokens(usage["input_tokens"])  # on the audit line too
         return None
     if "reasoningText" in ev:
         return envelope("reasoning", text=ev["reasoningText"])
@@ -185,6 +177,19 @@ async def stream(agent, conversation_manager, payload, context=None):
     claims = resolve_claims(payload, context)
     role = governance.resolve_role(claims)
     governance.set_active_role(role)
+    # When Lake Formation is the policy authority for this persona,
+    # fetch its filtered view and install the merged session policy BEFORE
+    # anything reads visible_tables (the L0 map, the rewrite). Cached per
+    # role; a fetch failure is already a table-level deny inside the policy.
+    lf_notes = await asyncio.to_thread(governance.bind_lf_policy, role)
+    if lf_notes:
+        audit.record(
+            principal=role,
+            sql="(lake formation policy bind)",
+            outcome="rejected" if any("DENIED" in n for n in lf_notes) else "executed",
+            stage="lf_policy",
+            reason="; ".join(lf_notes)[:400],
+        )
     # Bind the session to its owner; if a different identity reused this
     # session id, drop all state retained under the previous principal before
     # doing anything else (T003).
@@ -230,5 +235,5 @@ async def stream(agent, conversation_manager, payload, context=None):
         principal=governance.active_role(),
         trace=trace,
         session=audit.session_counters(compressed=conversation_manager.stubbed),
-        usage=usage,  # The eval suite's per-case input-token column
+        usage=usage,  # the eval suite's per-case input-token column
     )

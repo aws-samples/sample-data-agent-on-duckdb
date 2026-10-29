@@ -53,8 +53,19 @@ def test_matrix_shape_is_six_personas_by_six_paths_by_five_shapes_plus_deny_cell
     tool = [c for c in CELLS if c.path == gm.TOOL_PATH and c.shape != "deny"]
     assert len(tool) == 6 * 5 and all(gm.HANDLE in c.sql and " JOIN " in c.sql for c in tool)
     assert all(c.expected == "governed" for c in tool if c.persona != "admin")
-    foreign = [c for c in CELLS if c.path == gm.TOOL_PATH and c.shape == "deny"]
-    assert len(foreign) == 6 and {c.expected for c in foreign} == {"foreign_handle"}
+    foreign = [c for c in CELLS if c.expected == "foreign_handle"]
+    assert len(foreign) == 6 and all(c.path == gm.TOOL_PATH for c in foreign)
+    # Every restricted persona gets one source-denied cell — a gateway
+    # source outside its `sources` allowlist is refused before any outbound call
+    src = [c for c in CELLS if c.expected == "source_denied"]
+    assert len(src) == 5 and all(c.path == gm.TOOL_PATH and c.shape == "deny" for c in src)
+    assert {c.persona for c in src} == set(gm.personas()) - {"admin"}
+    # the denied source is derived from the policy: never one the role holds
+    for c in src:
+        assert not any(
+            c.ref == s or c.ref.startswith(f"{s}___")
+            for s in gm.policy_of(c.role).get("sources") or ()
+        )
     # expectations are derived from the policies: the ops personas may not
     # reach the on-chain slice through any catalog leg, the exchange personas may
     legs = ("s3t", "glue", "dl")

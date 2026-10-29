@@ -125,6 +125,61 @@ def test_the_deny_all_floor_cannot_reach_a_source(local_conn):
     )
 
 
+# -------------------------------------------- persona source allowlist
+def test_an_unauthorized_source_is_refused_before_any_outbound_call(
+    local_conn, capsys, monkeypatch
+):
+    # secops' policy has no `sources` field: deny-by-default, and the refusal
+    # must come from the agent side BEFORE gateway_client is touched
+    governance.set_active_role("ops:secops")
+    results.STORE.bind("sub:u-5")
+    audit.reset_session()
+    monkeypatch.setattr(
+        gateway_client, "call_tool", lambda *a, **k: pytest.fail("outbound call happened")
+    )
+    out = agent_mod.fetch_source._tool_func(tool="labels-api___screen_addresses")
+    assert out.startswith("OUT_OF_SCOPE") and "not available to your role" in out
+    line = json.loads([ln for ln in capsys.readouterr().out.splitlines() if '"audit"' in ln][-1])
+    rec = line["audit"]
+    assert line["Outcome"] == "rejected" and rec["stage"] == "source"
+    assert rec["reason"] == "source not in role sources allowlist"
+
+
+def test_an_authorized_persona_passes_the_allowlist(local_conn):
+    governance.set_active_role("exchange-a:investigator")
+    results.STORE.bind("sub:u-6")
+    out = _fetch()  # labels-api is in the investigator's sources
+    assert "data:«0xa»" in out
+
+
+def test_a_sources_list_clamps_even_the_unrestricted_role(monkeypatch):
+    pol = {
+        **governance.policies.POLICIES,
+        "ops:admin": {"allow_raw_paths": True, "tables": {}, "sources": ["labels-api"]},
+    }
+    monkeypatch.setattr(governance.policies, "POLICIES", pol)
+    governance.set_active_role("ops:admin")
+    assert governance.source_allowed("labels-api___screen_addresses")
+    assert not governance.source_allowed("redshift___cost_total")
+
+
+def test_list_sources_hides_sources_outside_the_role_allowlist(monkeypatch):
+    monkeypatch.setattr(
+        gateway_client,
+        "list_tools",
+        lambda: [
+            {"tool": "labels-api___screen_addresses", "description": "x"},
+            {"tool": "redshift___cost_total", "description": "y"},
+        ],
+    )
+    governance.set_active_role("exchange-a:junior")
+    out = json.loads(agent_mod.list_sources._tool_func())
+    assert [t["tool"] for t in out["sources"]] == ["labels-api___screen_addresses"]
+    governance.set_active_role("ops:admin")  # unrestricted, no sources field → all
+    out = json.loads(agent_mod.list_sources._tool_func())
+    assert len(out["sources"]) == 2
+
+
 # ------------------------------------------------------- client-side checks
 def test_no_gateway_configured_is_a_clear_refusal(monkeypatch):
     monkeypatch.setattr(gateway_client, "GATEWAY_MCP_URL", "")

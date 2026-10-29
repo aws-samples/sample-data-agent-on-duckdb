@@ -16,6 +16,7 @@ result string whether or not the UI streams.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -32,6 +33,10 @@ governance.set_schema_prober(engine.probe_columns)
 # session created, so a principal can read its own working sets while a
 # mounted-but-unlisted table stays refused. Same wiring point, same reason.
 governance.set_session_lister(engine.session_objects)
+# Per-statement evidence (bytes read, HTTP request count) comes from the
+# engine's own instrumentation; results.py takes the connection as an argument,
+# so the hooks are wired here like the prober above.
+results.set_stats_hooks(engine.begin_statement_stats, engine.collect_statement_stats)
 
 
 @dataclass
@@ -48,6 +53,12 @@ class Statement:
     cost: dict | None = None
     result: dict | None = None
     metric: dict | None = None  # {"name", "version", "owner", "table"} when compiled by call_metric
+    # Provenance tier: where the statement's numbers come from —
+    # "metric" (compiled from a registered definition), "verified" (reserved
+    # for verified queries), "free_sql" (the model wrote it). Carried on
+    # the execute trace event and the audit line; the online eval buckets
+    # accuracy by this marker.
+    provenance: str = "free_sql"
 
 
 class Rejected(Exception):
@@ -164,6 +175,12 @@ class Cost:
         except cost.BudgetExceeded as e:
             yield {"phase": "cost", "rejected": True, "budget": True, "reason": str(e)}
             raise Rejected(str(e), audit_stage="budget") from e
+        except cost.UpgradeAdvised as e:
+            # Past the declared single-node envelope — refused WITH a
+            # route (the structured advice carries the equivalent governed SQL
+            # for a warehouse-scale engine); routing stays outside the agent
+            yield {"phase": "cost", "rejected": True, "upgrade": e.advice, "reason": str(e)[:300]}
+            raise Rejected(str(e), audit_stage="upgrade") from e
         except cost.CostRejected as e:
             yield {"phase": "cost", "rejected": True, "reason": str(e)}
             raise Rejected(str(e), audit_stage="cost") from e
@@ -212,6 +229,11 @@ class Execute:
             "shape": st.result["shape"],  # rows (inline) | summary (materialized)
             "materialized": st.result["ref"],
             "evicted": st.result["evicted"],
+            # Evidence: what the statement actually cost at the storage
+            # layer — bytes the engine read, HTTP requests httpfs made
+            "bytes_scanned": st.result.get("bytes_scanned"),
+            "s3_requests": st.result.get("s3_requests"),
+            "provenance": st.provenance,  # metric | verified | free_sql
         }
 
 
@@ -236,19 +258,31 @@ def _audit(st: Statement, *, outcome: str, stage: str | None = None, reason: str
         materialized=res.get("ref"),
         metric=f"{st.metric['name']}@{st.metric['version']}" if st.metric else None,
         owner=results.STORE.owner_id,
-        user_sub=results.STORE.owner_id,  # The user chain, same digest
+        user_sub=results.STORE.owner_id,  # the user chain, same digest
+        bytes_scanned=res.get("bytes_scanned"),  # evidence chain
+        s3_requests=res.get("s3_requests"),
+        provenance=st.provenance,  # provenance tier
     )
 
 
-def run(sql: str, metric: dict | None = None) -> Iterator[dict | str]:
+def run(
+    sql: str, metric: dict | None = None, provenance: str | None = None
+) -> Iterator[dict | str]:
     """Drive one statement through STAGES.
 
     Yields each stage's trace events (dicts with a "phase" key) and then
     exactly one string — the result the model reads. Every statement is
     audited once, whatever the outcome. `metric` is set by `call_metric` for
-    a statement the semantic layer compiled (audited as `<name>@<version>`).
+    a statement the semantic layer compiled (audited as `<name>@<version>`);
+    `call_verified` passes the same shape with provenance="verified" —
+    the audit still carries `<name>@<version>`, the tier tells them apart.
     """
-    st = Statement(sql=sql, principal=governance.active_role(), metric=metric)
+    st = Statement(
+        sql=sql,
+        principal=governance.active_role(),
+        metric=metric,
+        provenance=provenance or ("metric" if metric else "free_sql"),
+    )
     try:
         for stage in STAGES:
             yield from stage.run(st)
@@ -264,7 +298,63 @@ def run(sql: str, metric: dict | None = None) -> Iterator[dict | str]:
         yield f"ERROR: {e}"
         return
     _audit(st, outcome="executed")
-    yield results.format_result(st.result, st.governed)
+    yield results.format_result(st.result, st.governed) + _empty_under_rls_note(st)
+
+
+def _shows_no_data(res: dict) -> bool:
+    """True when the result shows nothing: no rows, OR one row whose every
+    cell is null or zero — which is what an aggregate over filtered-away rows
+    looks like (`count(*)` returns ONE row containing 0, not zero rows; the
+    first version of this check missed exactly that and the live probe still
+    reported "no such data")."""
+    if res.get("shape") != "rows":
+        return False  # a materialized summary always has rows behind it
+    if not res.get("total_rows"):
+        return True
+    if res.get("total_rows") != 1:
+        return False
+    try:
+        row = json.loads(res.get("rows_json") or "[]")[0]
+    except (json.JSONDecodeError, IndexError, TypeError):
+        return False
+    for value in row.values():
+        raw = results.unmark(value)
+        if raw is None or str(raw).strip().lower() in ("", "none", "null"):
+            continue
+        try:
+            if float(raw) == 0:
+                continue
+        except (TypeError, ValueError):
+            return False  # a non-numeric cell is data
+        return False
+    return True
+
+
+def _empty_under_rls_note(st: Statement) -> str:
+    """A result that shows nothing, under a row filter, means "none YOU may see".
+
+    Measured live 2026-10-19: a persona whose Lake Formation window excluded
+    the day it asked about counted 0 and told the user "the slice does not
+    include data for that date" — then offered to re-run it on the raw view.
+    The rows exist; the caller may not see them, and the rewrite trace says so
+    while the result string did not. Say it in the result the model reads: the
+    note names the filtered tables (the trace, the audit line and the prompt
+    already do) and never a value or a count, so it reveals nothing the
+    caller's own policy does not."""
+    res = st.result or {}
+    rls = st.applied.get("rls") or []
+    if not rls or not _shows_no_data(res):
+        return ""
+    tables = sorted({str(r.get("table")) for r in rls if r.get("table")})
+    if not tables:
+        return ""
+    return (
+        f"\nnote: this result shows nothing AND a row-level policy applies to "
+        f"{', '.join(tables)} for your role — it means nothing YOU may see, which is not the "
+        "same as no such data. Do not report it as missing or absent data, and do not try "
+        "another access path for the same table: every path carries the same policy. Say the "
+        "result is empty within your access."
+    )
 
 
 def run_text(sql: str) -> str:

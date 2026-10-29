@@ -52,19 +52,27 @@ def main() -> None:
     stamp = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%MZ")
     core = [r for r in rows if r["shape"] != "deny"]
     deny = [r for r in rows if r["shape"] == "deny" and r["path"] == "raw"]
-    foreign = [r for r in rows if r["shape"] == "deny" and r["path"] == gm.TOOL_PATH]
+    foreign = [r for r in rows if r["expected"] == "foreign_handle"]
+    srcdeny = [r for r in rows if r["expected"] == "source_denied"]
     extra = (
         f", plus {len(foreign)} foreign-handle cells (a `_r_<n>` minted by another principal, "
         "one per persona)"
         if foreign
         else ""
     )
+    if srcdeny:
+        extra += (
+            f", plus {len(srcdeny)} source-denied cells (a gateway source outside "
+            "the persona's `sources` allowlist, one per restricted persona)"
+        )
     tool_legend = (
         " On the `tool` path the persona's governed table is JOINed with a handle the "
         "framework landed from a Gateway tool result: the handle must land bound to the "
         "persona with every text cell marked `data:«…»`, the table beside it must get "
         "exactly the rewrite the direct path gives, and a handle another principal minted "
-        "is refused before the gate (`stage=handle`)."
+        "is refused before the gate (`stage=handle`). A `fetch_source` call on a source "
+        "the persona's `sources` allowlist does not name is refused by the agent side "
+        "before any outbound call, audited `stage=source`."
         if gm.TOOL_PATH in paths
         else ""
     )

@@ -1,0 +1,114 @@
+# Semantic-layer metric definitions for the cloudops scenario.
+#
+# This file is the SINGLE SOURCE OF TRUTH for the scenario's registered KPIs —
+# the customer-owned, open-format half of the semantic layer: it lives in Git,
+# a change here is a reviewable diff, and the asset regression gate (CI) runs
+# the semantic + reconcile tests on every change. Loaded at cold start by
+# `data_agent/semantic/assets.py`; a malformed field REFUSES to load
+# (fail-closed, exactly like a malformed governance policy) — a bad definition
+# never serves a question.
+#
+# Field names follow the Apache Ossie v0.1 subset the Metric dataclass uses
+# (name, version, owner, description, table, measure_sql/measure_alias,
+# time_column, grain, dimensions, default_dimensions, filters, fixed_filters,
+# kind). Column names are reconciled against the table cards in CI.
+
+metrics:
+  - name: unblended_cost_by_service
+    version: "1.0"
+    owner: FinOps (cloudops scenario)
+    description: >-
+      Unblended cost (USD) per billing period, grouped by service and
+      optionally region / usage type
+    table: cur_line_items
+    measure_sql: round(sum(line_item_unblended_cost), 2)
+    measure_alias: unblended_cost_usd
+    time_column: billing_period
+    grain: month
+    dimensions:
+      service: line_item_product_code
+      region: product_region_code
+      usage_type: line_item_usage_type
+      line_item_type: line_item_line_item_type
+    default_dimensions: [service]
+    filters: [line_item_product_code, product_region_code, line_item_line_item_type]
+
+  - name: unblended_cost_by_billing_period
+    version: "1.0"
+    owner: FinOps (cloudops scenario)
+    description: Total unblended cost (USD) per billing period
+    table: cur_line_items
+    measure_sql: round(sum(line_item_unblended_cost), 2)
+    measure_alias: unblended_cost_usd
+    time_column: billing_period
+    grain: month
+    dimensions:
+      billing_period: billing_period
+    default_dimensions: [billing_period]
+    filters: [line_item_product_code, line_item_line_item_type]
+
+  - name: top_resources
+    version: "1.0"
+    owner: FinOps (cloudops scenario)
+    description: >-
+      Costliest resources (line_item_resource_id) per billing period —
+      resource-level detail, denied to the finops persona by column policy
+    table: cur_line_items
+    measure_sql: round(sum(line_item_unblended_cost), 2)
+    measure_alias: unblended_cost_usd
+    time_column: billing_period
+    grain: month
+    dimensions:
+      resource: line_item_resource_id
+      service: line_item_product_code
+    default_dimensions: [resource]
+    filters: [line_item_product_code]
+    fixed_filters: ["line_item_resource_id <> ''"]
+
+  - name: mom_delta
+    version: "1.0"
+    owner: FinOps (cloudops scenario)
+    description: >-
+      Month-over-month change of total unblended cost: per-period total,
+      delta and % change against the previous period in the window
+    table: cur_line_items
+    measure_sql: round(sum(line_item_unblended_cost), 2)
+    measure_alias: unblended_cost_usd
+    time_column: billing_period
+    grain: month
+    filters: [line_item_product_code, line_item_line_item_type]
+    kind: period_delta
+
+  - name: assume_role_events_by_principal
+    version: "1.0"
+    owner: SecOps (cloudops scenario)
+    description: >-
+      AssumeRole events per day, grouped by the assuming principal
+      (session issuer, else user ARN, else invoking service)
+    table: cloudtrail_events
+    measure_sql: count(*)
+    measure_alias: events
+    time_column: date
+    grain: day
+    dimensions:
+      principal: coalesce(session_issuer_arn, user_arn, invoked_by)
+      region: aws_region
+      error_code: error_code
+    default_dimensions: [principal]
+    filters: [aws_region, error_code, user_type]
+    fixed_filters: ["event_name = 'AssumeRole'"]
+
+  - name: runtime_log_events_by_stream
+    version: "1.0"
+    owner: platform operators (cloudops scenario)
+    description: >-
+      Log events of the agent runtime's own log group per day, by log stream
+      — operator-only (cw_logs is admin-only by omission)
+    table: cw_logs
+    measure_sql: count(*)
+    measure_alias: events
+    time_column: date
+    grain: day
+    dimensions:
+      log_stream: log_stream
+    default_dimensions: [log_stream]

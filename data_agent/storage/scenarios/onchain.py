@@ -366,6 +366,9 @@ POLICIES = {
             # attribution: this tenant sees only its own exchange's labels
             "cex_deposit_labels": {"row_filter": "exchange = 'exchange-a'"},
         },
+        # outbound: screening the labels/sanctions API is this
+        # persona's job; any other gateway target is deny-by-default
+        "sources": ["labels-api"],
     },
     "exchange-a:junior": {
         "allow_raw_paths": False,
@@ -377,6 +380,7 @@ POLICIES = {
                 "deny_columns": ["subject_identity"],
             },
         },
+        "sources": ["labels-api"],
     },
 }
 

@@ -128,7 +128,8 @@ def l0_block() -> str | None:
             entries, visible=governance.visible_tables(), denied=governance.denied_columns()
         )
         metrics = semantic.catalog_doc()
-        return f"{l0}\n\n{metrics}" if metrics else l0
+        vqs = semantic.vq_catalog_doc()  # the role's verified queries ride along
+        return "\n\n".join(b for b in (l0, metrics, vqs) if b)
     except Exception:  # noqa: BLE001 — fall back to the static catalog doc
         return None
 

@@ -232,6 +232,24 @@ class ResultStore:
 
 STORE = ResultStore()
 
+# The compute layer's per-statement evidence (bytes the engine
+# read, HTTP requests httpfs made), wired by pipeline.py — this module keeps
+# taking the connection as an argument instead of importing the engine.
+_STATS_HOOKS: dict = {"begin": None, "collect": None}
+
+
+def set_stats_hooks(begin, collect) -> None:
+    _STATS_HOOKS["begin"], _STATS_HOOKS["collect"] = begin, collect
+
+
+def _stats_begin(conn) -> None:
+    if _STATS_HOOKS["begin"]:
+        _STATS_HOOKS["begin"](conn)
+
+
+def _stats_collect(conn) -> dict:
+    return _STATS_HOOKS["collect"](conn) if _STATS_HOOKS["collect"] else {}
+
 
 def mark(v):
     """The cell as the model reads it: strings become data:«…» (the guillemets
@@ -267,6 +285,7 @@ def execute(conn, governed_sql: str, query_shaped: bool, lock) -> dict:
     """
     t0 = time.perf_counter()
     with lock:
+        _stats_begin(conn)
         if not query_shaped:
             return _direct(conn, governed_sql, t0)
         ref = STORE.next_ref()
@@ -282,6 +301,9 @@ def execute(conn, governed_sql: str, query_shaped: bool, lock) -> dict:
                 conn.execute(wrapped)  # nosemgrep: sqlalchemy-execute-raw-query -- gate-checked SQL
             else:
                 raise
+        # evidence for THIS statement, read before any framework statement below
+        # can overwrite the profile
+        stats = _stats_collect(conn)
         total = conn.execute(f"SELECT count(*) FROM {ref}").fetchone()[0]  # nosec B608  # nosemgrep: sqlalchemy-execute-raw-query -- framework-generated identifier
         exact = total <= cap
         # inline only when the result is COMPLETE and small; a capped result must
@@ -306,6 +328,7 @@ def execute(conn, governed_sql: str, query_shaped: bool, lock) -> dict:
                     "engine_ms": _ms(t0),
                     "evicted": [],
                     "capped": False,
+                    **stats,
                 }
         # keep it: summary shape
         desc = conn.execute(f"DESCRIBE {ref}").fetchall()  # nosec B608  # nosemgrep: sqlalchemy-execute-raw-query -- framework-generated identifier
@@ -326,6 +349,7 @@ def execute(conn, governed_sql: str, query_shaped: bool, lock) -> dict:
             "engine_ms": _ms(t0),
             "evicted": evicted,
             "capped": False,
+            **stats,
         }
 
 
@@ -438,6 +462,7 @@ def _direct(conn, sql: str, t0: float) -> dict:
     cur = conn.execute(sql)  # nosemgrep: sqlalchemy-execute-raw-query -- governed SQL, gate-checked
     cols = [d[0] for d in cur.description] if cur.description else []
     rows = cur.fetchmany(MAX_RESULT_ROWS + 1) if cols else []
+    stats = _stats_collect(conn)
     capped_flag = len(rows) > MAX_RESULT_ROWS
     rows = rows[:MAX_RESULT_ROWS]
     out = [dict(zip(cols, (mark(v) for v in r), strict=False)) for r in rows]
@@ -453,6 +478,7 @@ def _direct(conn, sql: str, t0: float) -> dict:
         "engine_ms": _ms(t0),
         "evicted": [],
         "capped": capped_flag,
+        **stats,
     }
 
 

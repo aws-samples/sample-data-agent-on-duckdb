@@ -11,6 +11,7 @@ import difflib
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 
@@ -19,6 +20,11 @@ import duckdb
 from data_agent.storage import legs, registry
 
 MEMORY_LIMIT = os.environ.get("DUCKDB_MEMORY_LIMIT", "2GB")
+# Per-statement evidence from the engine's own instrumentation, zero
+# network — JSON profiling (TOTAL_BYTES_READ) written here per statement, and
+# the HTTP log (one row per request httpfs makes) counted per statement.
+_PROFILE_PATH = os.path.join(tempfile.gettempdir(), f"duckdb-profile-{os.getpid()}.json")
+_stats = {"enabled": False}
 # Where the pre-installed core extensions live (baked into the image by
 # scripts/install_extensions.py). Empty = DuckDB's default under the
 # home directory. The engine only ever LOADs; it never INSTALLs at cold start.
@@ -98,6 +104,61 @@ def _configure(c: duckdb.DuckDBPyConnection) -> None:
     c.execute("SET enable_object_cache=true")
     for ext in CORE_EXTENSIONS:
         load_extension(c, ext)
+    enable_statement_stats(c)
+
+
+def enable_statement_stats(c: duckdb.DuckDBPyConnection) -> None:
+    """Turn on the two in-process evidence sources for the audit line:
+    JSON profiling with TOTAL_BYTES_READ (written to a temp file per statement;
+    coverage ALL so a CTAS profiles too) and the HTTP log (one `duckdb_logs`
+    row per request httpfs makes — the S3 request count). Fail-soft: a build
+    without either facility just leaves the audit fields empty."""
+    try:
+        c.execute("PRAGMA enable_profiling='json'")
+        c.execute(  # nosemgrep: sqlalchemy-execute-raw-query -- process-local temp path
+            f"PRAGMA profile_output='{_PROFILE_PATH}'"
+        )
+        c.execute("PRAGMA profiling_coverage='ALL'")
+        c.execute('PRAGMA custom_profiling_settings=\'{"TOTAL_BYTES_READ": "true"}\'')
+        c.execute("CALL enable_logging('HTTP')")
+        _stats["enabled"] = True
+    except Exception:  # noqa: BLE001 — evidence is optional, the engine is not
+        _stats["enabled"] = False
+
+
+def begin_statement_stats(conn: duckdb.DuckDBPyConnection) -> None:
+    """Reset the per-statement counters. Caller holds `conn_lock` and runs the
+    statement next, so everything counted afterwards belongs to it."""
+    if not _stats["enabled"]:
+        return
+    try:
+        conn.execute("CALL truncate_duckdb_logs()")
+        if os.path.exists(_PROFILE_PATH):
+            os.unlink(_PROFILE_PATH)
+    except Exception:  # noqa: BLE001 — evidence must never break the statement
+        pass
+
+
+def collect_statement_stats(conn: duckdb.DuckDBPyConnection) -> dict:
+    """Read the statement's evidence right AFTER it ran (caller still holds the
+    lock, before any framework statement overwrites the profile): bytes the
+    engine read and the number of HTTP requests httpfs made. A local-table
+    statement correctly reports 0 requests — the marginal-cost story."""
+    out: dict = {"bytes_scanned": None, "s3_requests": None}
+    if not _stats["enabled"]:
+        return out
+    try:  # the profile file first — our own count query below would overwrite it
+        with open(_PROFILE_PATH, encoding="utf-8") as f:
+            out["bytes_scanned"] = int(json.load(f).get("total_bytes_read") or 0)
+    except Exception:  # noqa: BLE001 — a statement outside profiling coverage
+        pass
+    try:
+        out["s3_requests"] = int(
+            conn.execute("SELECT count(*) FROM duckdb_logs WHERE type='HTTP'").fetchone()[0]
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def load_extension(c: duckdb.DuckDBPyConnection, name: str) -> None:

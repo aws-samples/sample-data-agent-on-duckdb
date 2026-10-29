@@ -76,6 +76,10 @@ PERSONAS_FILE = ROOT / "tests" / "eval" / "personas.yaml"
 # --mode cloud targets YOUR deployment: the runtime ARN comes from `agentcore launch`,
 # the Cognito values from the CDK stack outputs. No defaults.
 GOLDEN_CACHE = ROOT / "tests" / "eval" / "golden-cache.json"
+# The locked per-category baseline the bandwidth gate compares against.
+# Updated deliberately (--update-baseline, paired with --golden compute after a
+# data or view change), never silently — a drifting baseline hides decay.
+BASELINE_FILE = ROOT / "tests" / "eval" / "baseline.json"
 REGION = os.environ.get("AGENT_REGION", "us-west-2")
 RUNTIME_ARN = os.environ.get("AGENT_RUNTIME_ARN", "")  # required for --mode cloud
 GOLDEN_MAX_ROWS = 200  # a golden query is a scalar or a short list, never a dump
@@ -361,6 +365,7 @@ def _reload_env_knobs() -> None:
     cost_mod.SESSION_MAX_STATEMENTS = int(os.environ.get("SESSION_MAX_STATEMENTS", "0"))
     cost_mod.SESSION_MAX_EXPANDED_PATHS = int(os.environ.get("SESSION_MAX_EXPANDED_PATHS", "0"))
     cost_mod.SESSION_MAX_ENGINE_MS = float(os.environ.get("SESSION_MAX_ENGINE_MS", "0"))
+    cost_mod.UPGRADE_ADVICE_PATHS = int(os.environ.get("UPGRADE_ADVICE_PATHS", "120"))
 
 
 def period_is_closed(pinned: str, today: dt.date | None = None) -> bool:
@@ -496,6 +501,9 @@ def evaluate(
     # ---- session budget
     if expect.get("budget_refused") and not any(e.get("budget") for e in _phases(turns, "cost")):
         fail("expected a session-budget refusal, none happened")
+    # ---- upgrade advice: past the envelope → a route, not an execution
+    if expect.get("upgrade_advised") and not any(e.get("upgrade") for e in _phases(turns, "cost")):
+        fail("expected an upgrade suggestion, none happened")
     if tbl := expect.get("rls_table"):
         if not any(
             r.get("table") == tbl for e in _phases(turns, "rewrite") for r in (e.get("rls") or [])
@@ -675,6 +683,81 @@ def write_report(rows: list[dict], mode: str, out_md: Path, header_note: str = "
     )
 
 
+# ------------------------------------------------------- bandwidth gate
+def _band_pp(baseline_total: int) -> float:
+    """Allowed downward drift in percentage points, by category size: a large
+    category gets a tight band, a small one a wide band — but every band is
+    narrower than one case flipping, so a single regression in any current
+    category turns the gate red."""
+    if baseline_total >= 50:
+        return 2.0
+    if baseline_total >= 10:
+        return 5.0
+    return 10.0
+
+
+def load_baseline() -> dict | None:
+    try:
+        return json.loads(BASELINE_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+
+
+def save_baseline(rows: list[dict], mode: str) -> None:
+    by_cat: dict[str, list[dict]] = {}
+    for r in rows:
+        by_cat.setdefault(r["category"], []).append(r)
+    BASELINE_FILE.write_text(
+        json.dumps(
+            {
+                "as_of": dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%MZ"),
+                "mode": mode,
+                "categories": {
+                    cat: {"passed": sum(r["passed"] for r in rs), "total": len(rs)}
+                    for cat, rs in sorted(by_cat.items())
+                },
+            },
+            indent=1,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def gate_against_baseline(rows: list[dict], baseline: dict) -> tuple[list[str], list[str]]:
+    """Compare this run's per-category pass rates to the locked baseline.
+
+    Returns (breaches, notes). Only categories present in BOTH are compared, so
+    a --category shard gates just what it ran; only downward drift breaches
+    (an improvement is a reason to refresh the baseline, not a failure). A
+    category whose case count differs from the baseline is reported as a note,
+    not a breach — the baseline is stale, refresh it with --update-baseline."""
+    breaches, notes = [], []
+    by_cat: dict[str, list[dict]] = {}
+    for r in rows:
+        by_cat.setdefault(r["category"], []).append(r)
+    for cat, rs in sorted(by_cat.items()):
+        base = (baseline.get("categories") or {}).get(cat)
+        if not base:
+            notes.append(f"{cat}: not in the baseline — refresh with --update-baseline")
+            continue
+        if len(rs) != base["total"]:
+            notes.append(
+                f"{cat}: {len(rs)} cases vs {base['total']} in the baseline — "
+                "stale baseline, refresh with --update-baseline"
+            )
+            continue
+        rate = 100.0 * sum(r["passed"] for r in rs) / len(rs)
+        base_rate = 100.0 * base["passed"] / base["total"]
+        band = _band_pp(base["total"])
+        if rate < base_rate - band:
+            breaches.append(
+                f"{cat}: {rate:.0f}% vs baseline {base_rate:.0f}% "
+                f"(-{base_rate - rate:.0f} pp, band ±{band:.0f} pp)"
+            )
+    return breaches, notes
+
+
 # -------------------------------------------------------------------- main
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -704,6 +787,17 @@ def main() -> None:
         help="local mode: run the agent without the call_metric tool (semantic-layer A/B)",
     )
     ap.add_argument("--tag", default="", help="free label stored on every result row")
+    ap.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="write this run's per-category pass rates as the locked bandwidth baseline "
+        " — pair it with `--golden compute` after a data or view change",
+    )
+    ap.add_argument(
+        "--no-gate",
+        action="store_true",
+        help="skip the bandwidth gate (one-off experiments); ablation runs skip it anyway",
+    )
     args = ap.parse_args()
 
     personas = load_personas()
@@ -814,9 +908,33 @@ def main() -> None:
         f"Goldens: {goldens.computed} computed at eval time, {goldens.replayed} replayed from "
         f"cache (role `{goldens.role}`)." + (f" Tag: `{tag}`." if tag else "")
     )
+    # Bandwidth gate: this run's per-category pass rates vs the locked
+    # baseline. Ablation runs are experiments, not the system under watch.
+    breaches: list[str] = []
+    baseline = load_baseline()
+    if args.update_baseline:
+        save_baseline(rows, args.mode)
+        note += f"\n\nBandwidth gate: baseline UPDATED → `{BASELINE_FILE.name}`."
+    elif args.no_gate or drop:
+        note += "\n\nBandwidth gate: skipped (ablation / --no-gate)."
+    elif baseline is None:
+        note += "\n\nBandwidth gate: no baseline yet — run with --update-baseline."
+    else:
+        breaches, gate_notes = gate_against_baseline(rows, baseline)
+        status = "BREACH — " + "; ".join(breaches) if breaches else "PASS"
+        note += (
+            f"\n\nBandwidth gate: **{status}** vs baseline {baseline.get('as_of')} "
+            "(bands ±2 pp ≥50 cases, ±5 pp ≥10, ±10 pp below — every band is narrower "
+            "than one case flipping)."
+        )
+        if gate_notes:
+            note += " Notes: " + "; ".join(gate_notes) + "."
     write_report(rows, args.mode, Path(args.out), note)
     passed = sum(r["passed"] for r in rows)
     print(f"\n{passed}/{len(rows)} passed → {args.out}")
+    if breaches:
+        print("bandwidth gate BREACH:", "; ".join(breaches))
+        sys.exit(2)
     sys.exit(0 if passed == len(rows) else 1)
 
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import re
 
-from data_agent.semantic.model import Metric
+from data_agent.semantic import assets
 
 from .base import Scenario, TableCard
 
@@ -257,112 +257,12 @@ CARDS = {
 
 
 # -------------------------------------------------------------- metrics
-# Semantic layer v0: the FinOps / SecOps KPIs a reviewer signed
-# off on, compiled deterministically by `call_metric`. Column names are
-# reconciled against the cards above (tests/unit/test_semantic.py).
-_FINOPS_OWNER = "FinOps (cloudops scenario)"
-_SECOPS_OWNER = "SecOps (cloudops scenario)"
-_COST = "round(sum(line_item_unblended_cost), 2)"
-METRICS = {
-    "unblended_cost_by_service": Metric(
-        name="unblended_cost_by_service",
-        version="1.0",
-        owner=_FINOPS_OWNER,
-        description="Unblended cost (USD) per billing period, grouped by service and optionally "
-        "region / usage type",
-        table="cur_line_items",
-        measure_sql=_COST,
-        measure_alias="unblended_cost_usd",
-        time_column="billing_period",
-        grain="month",
-        dimensions={
-            "service": "line_item_product_code",
-            "region": "product_region_code",
-            "usage_type": "line_item_usage_type",
-            "line_item_type": "line_item_line_item_type",
-        },
-        default_dimensions=("service",),
-        filters=("line_item_product_code", "product_region_code", "line_item_line_item_type"),
-    ),
-    "unblended_cost_by_billing_period": Metric(
-        name="unblended_cost_by_billing_period",
-        version="1.0",
-        owner=_FINOPS_OWNER,
-        description="Total unblended cost (USD) per billing period",
-        table="cur_line_items",
-        measure_sql=_COST,
-        measure_alias="unblended_cost_usd",
-        time_column="billing_period",
-        grain="month",
-        dimensions={"billing_period": "billing_period"},
-        default_dimensions=("billing_period",),
-        filters=("line_item_product_code", "line_item_line_item_type"),
-    ),
-    "top_resources": Metric(
-        name="top_resources",
-        version="1.0",
-        owner=_FINOPS_OWNER,
-        description="Costliest resources (line_item_resource_id) per billing period — "
-        "resource-level detail, denied to the finops persona by column policy",
-        table="cur_line_items",
-        measure_sql=_COST,
-        measure_alias="unblended_cost_usd",
-        time_column="billing_period",
-        grain="month",
-        dimensions={"resource": "line_item_resource_id", "service": "line_item_product_code"},
-        default_dimensions=("resource",),
-        filters=("line_item_product_code",),
-        fixed_filters=("line_item_resource_id <> ''",),
-    ),
-    "mom_delta": Metric(
-        name="mom_delta",
-        version="1.0",
-        owner=_FINOPS_OWNER,
-        description="Month-over-month change of total unblended cost: per-period total, "
-        "delta and % change against the previous period in the window",
-        table="cur_line_items",
-        measure_sql=_COST,
-        measure_alias="unblended_cost_usd",
-        time_column="billing_period",
-        grain="month",
-        filters=("line_item_product_code", "line_item_line_item_type"),
-        kind="period_delta",
-    ),
-    "assume_role_events_by_principal": Metric(
-        name="assume_role_events_by_principal",
-        version="1.0",
-        owner=_SECOPS_OWNER,
-        description="AssumeRole events per day, grouped by the assuming principal "
-        "(session issuer, else user ARN, else invoking service)",
-        table="cloudtrail_events",
-        measure_sql="count(*)",
-        measure_alias="events",
-        time_column="date",
-        grain="day",
-        dimensions={
-            "principal": "coalesce(session_issuer_arn, user_arn, invoked_by)",
-            "region": "aws_region",
-            "error_code": "error_code",
-        },
-        default_dimensions=("principal",),
-        filters=("aws_region", "error_code", "user_type"),
-        fixed_filters=("event_name = 'AssumeRole'",),
-    ),
-    "runtime_log_events_by_stream": Metric(
-        name="runtime_log_events_by_stream",
-        version="1.0",
-        owner="platform operators (cloudops scenario)",
-        description="Log events of the agent runtime's own log group per day, by log stream "
-        "— operator-only (cw_logs is admin-only by omission)",
-        table="cw_logs",
-        measure_sql="count(*)",
-        measure_alias="events",
-        time_column="date",
-        grain="day",
-        dimensions={"log_stream": "log_stream"},
-        default_dimensions=("log_stream",),
-    ),
-}
+# Semantic layer, externalized as Git assets: the FinOps / SecOps KPIs
+# a reviewer signed off on live in `semantic/cloudops.yaml` — a Git asset in
+# an open format, changed through review and the asset regression gate — and
+# are loaded here at import, fail-closed. Column names are reconciled against
+# the cards above (tests/unit/test_semantic.py).
+METRICS = assets.load_scenario_metrics("cloudops")
 
 
 def build_policies(account: str) -> dict:
@@ -380,6 +280,10 @@ def build_policies(account: str) -> dict:
                     "deny_columns": ["line_item_resource_id"],
                 },
             },
+            # outbound: the warehouse close is FinOps business; the
+            # labels/sanctions API is not. Harmless while the redshift target
+            # is torn down (#18) — an absent target simply never lists.
+            "sources": ["redshift"],
         },
         "ops:secops": {
             "allow_raw_paths": False,

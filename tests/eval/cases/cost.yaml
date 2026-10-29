@@ -52,3 +52,32 @@
     governed_any: true
     partition_filter_all: true
     expanded_paths_min: 3
+
+# --- Past the declared single-node envelope → a route, not an execution.
+# Both cases inject a tiny envelope through the runtime env so the refusal
+# triggers on a small, cheap range (the mechanism is identical at 120 paths).
+- id: cost-upgrade-advice-day-range
+  category: cost
+  persona: admin
+  requires_env: {UPGRADE_ADVICE_PATHS: "5"}
+  prompt: >
+    Count rows in eth_transactions for date BETWEEN '2025-02-01' AND '2025-02-21'.
+    If the range exceeds the agent's envelope, do NOT retry with smaller ranges —
+    report the refusal and the suggested alternative engine to the user.
+  max_tool_calls: 3
+  expect:
+    upgrade_advised: true
+    answer_contains: ["Athena"]
+
+- id: cost-upgrade-advice-month-range
+  category: cost
+  persona: finops
+  requires_env: {UPGRADE_ADVICE_PATHS: "3"}
+  prompt: >
+    Total unblended cost from cur_line_items for billing_period BETWEEN '2026-01'
+    AND '2026-08'. If that exceeds the agent's envelope, do not shrink the window
+    on your own — tell me the refusal and where to run the equivalent SQL instead.
+  max_tool_calls: 3
+  expect:
+    upgrade_advised: true
+    answer_contains: ["Athena"]

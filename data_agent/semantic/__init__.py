@@ -23,18 +23,30 @@ from .compile import MAX_LIMIT, SemanticError, compile
 from .model import Metric, MetricError
 
 _REGISTRY_NAMES = frozenset({"catalog_doc", "get", "metrics", "visible_metrics", "reset"})
+# Verified queries live beside the metrics: same layer, same lazy
+# resolution (vq reads governance for visibility, like registry).
+_VQ_NAMES = frozenset(
+    {"VQError", "VerifiedQuery", "bind_vq", "get_vq", "reset_vqs", "visible_vqs", "vq_catalog_doc"}
+)
 
 __all__ = [
     "MAX_LIMIT",
     "Metric",
     "MetricError",
     "SemanticError",
+    "VQError",
+    "VerifiedQuery",
+    "bind_vq",
     "catalog_doc",
     "compile",
     "get",
+    "get_vq",
     "metrics",
     "reset",
+    "reset_vqs",
     "visible_metrics",
+    "visible_vqs",
+    "vq_catalog_doc",
 ]
 
 
@@ -43,4 +55,8 @@ def __getattr__(name: str):
         from . import registry
 
         return getattr(registry, name)
+    if name in _VQ_NAMES:
+        from . import vq
+
+        return getattr(vq, name)
     raise AttributeError(name)

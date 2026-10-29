@@ -34,6 +34,14 @@ from data_agent.storage.registry import PARTITIONED_SOURCES
 
 MAX_EXPANDED_PARTITIONS = int(os.environ.get("MAX_EXPANDED_PARTITIONS", "366"))
 
+# The DECLARED single-node envelope, below the hard cap. A statement that
+# expands past this many partition paths is refused WITH A ROUTE — a structured
+# suggestion to run the equivalent governed SQL on a warehouse-scale engine
+# over the same lake — instead of being executed toward an OOM. The threshold
+# is conservative on purpose (volume per partition is not estimated — that
+# would need network); an admin overrides it per deployment. 0 disables.
+UPGRADE_ADVICE_PATHS = int(os.environ.get("UPGRADE_ADVICE_PATHS", "120"))
+
 # Session budget. A single statement is bounded by the partition gate and
 # the memory envelope; a SESSION is not — an agent loop can spend a tenant's
 # quota in statements that are each individually cheap (measured elsewhere:
@@ -67,6 +75,19 @@ class CostRejected(ValueError):
 class BudgetExceeded(CostRejected):
     """The SESSION's budget is spent — no statement will run in this
     session again, so the message tells the model to stop and report."""
+
+
+class UpgradeAdvised(CostRejected):
+    """The statement exceeds the declared single-node envelope.
+
+    Not executed; `advice` carries the structured payload for the trace event
+    (paths, limit, routes, the equivalent governed SQL). Routing stays OUTSIDE
+    the agent — the message tells the model to report the route, never to
+    retry the same range."""
+
+    def __init__(self, message: str, advice: dict) -> None:
+        super().__init__(message)
+        self.advice = advice
 
 
 def check_budget(counters: dict) -> None:
@@ -140,11 +161,33 @@ def apply(sql: str) -> tuple[str, dict]:
                 f"cost policy: the `{column}` range on `{name}` spans more than "
                 f"{MAX_EXPANDED_PARTITIONS} {spec['granularity']} partitions — that is a "
                 "full-prefix scan and is refused before the engine runs. Narrow the range, "
-                "or use a catalog leg (s3t/glue/dl) which prunes by metadata."
+                "use a catalog leg (s3t/glue/dl) which prunes by metadata, or run the "
+                "question on a warehouse-scale engine (Amazon Athena / Amazon Redshift)."
             )
         tbl.replace(_expanded_table(tbl, spec, parts))
         info["expanded_paths"] += len(parts)
         changed = True
+    if UPGRADE_ADVICE_PATHS and info["expanded_paths"] > UPGRADE_ADVICE_PATHS:
+        # Within the hard cap but past the declared envelope — refuse
+        # with a route instead of executing toward the memory limit. The
+        # equivalent SQL is the GOVERNED statement (logical table names,
+        # row/column policy already compiled in), which runs as-is on a
+        # warehouse-scale engine over the same lake.
+        advice = {
+            "expanded_paths": info["expanded_paths"],
+            "limit": UPGRADE_ADVICE_PATHS,
+            "routes": ["Amazon Athena", "Amazon Redshift"],
+            "equivalent_sql": sql,
+        }
+        raise UpgradeAdvised(
+            f"cost policy: this statement expands to {info['expanded_paths']} partition paths "
+            f"({', '.join(info['sources'])}) — past this agent's declared single-node envelope "
+            f"(UPGRADE_ADVICE_PATHS={UPGRADE_ADVICE_PATHS}). It was NOT executed. Either narrow "
+            "the window below the envelope, or tell the user to run the equivalent governed SQL "
+            "on a warehouse-scale engine over the same lake (Amazon Athena / Amazon Redshift) — "
+            f"routing stays outside this agent:\n{sql}\nDo not retry the same range.",
+            advice,
+        )
     return (tree.sql(dialect="duckdb") if changed else sql), info
 
 

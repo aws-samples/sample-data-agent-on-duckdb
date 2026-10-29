@@ -28,6 +28,7 @@ module the functions read from; the names below are re-exports.
 """
 
 from .hardening import RAW_PATH_SCHEMES
+from .lakeformation import bind as bind_lf_policy
 from .policies import (
     DEFAULT_ROLE,
     DENY_ALL_ROLE,
@@ -38,6 +39,8 @@ from .policies import (
     is_denied_all,
     resolve_role,
     set_active_role,
+    source_allowed,
+    visible_sources,
     visible_tables,
 )
 from .rewrite import apply_governance, describe_applied, set_schema_prober, set_session_lister
@@ -50,6 +53,7 @@ __all__ = [
     "active_policy",
     "active_role",
     "apply_governance",
+    "bind_lf_policy",
     "denied_columns",
     "describe_applied",
     "is_denied_all",
@@ -57,5 +61,7 @@ __all__ = [
     "set_active_role",
     "set_schema_prober",
     "set_session_lister",
+    "source_allowed",
+    "visible_sources",
     "visible_tables",
 ]

@@ -110,6 +110,7 @@ def test_the_three_tools_are_registered_with_the_expected_parameters():
         "run_sql",
         "search_schema",
         "call_metric",
+        "call_verified",
         "list_sources",
         "fetch_source",
     }
@@ -121,6 +122,7 @@ def test_the_three_tools_are_registered_with_the_expected_parameters():
         "filters",
         "limit",
     }
+    assert set(by["call_verified"].inputSchema["properties"]) == {"name", "params"}
     assert "handles" not in by["run_sql"].description  # description names _r_<n>, not internals
     assert "_r_<n>" in by["run_sql"].description and "data:«" in by["run_sql"].description
     assert {str(r.uri) for r in asyncio.run(server.list_resources())} == {
@@ -199,8 +201,14 @@ def test_the_outbound_source_tools_are_on_the_mcp_surface_and_bind_the_caller(lo
     h = _headers(**{"custom:tenant": "ops", "custom:role": "finops", "sub": "u-10"})
     out = json.loads(asyncio.run(_call(server, "list_sources", {}, h)))
     assert out["sources"] == [] and "no outbound gateway" in out["unavailable"]  # unset in tests
+    # finops may not call the labels source at all — the persona allowlist
+    # refuses on the MCP surface too, before the (unset) gateway is even consulted
     out = asyncio.run(_call(server, "fetch_source", {"tool": "labels-api___label_lookup"}, h))
-    assert out.startswith("ERROR: no outbound gateway") or out.startswith("ERROR:")
+    assert out.startswith("OUT_OF_SCOPE") and "not available to your role" in out
+    # a source the persona IS allowed still fails on the unset gateway, not the allowlist
+    h2 = _headers(**{"custom:tenant": "exchange-a", "custom:role": "junior", "sub": "u-11"})
+    out = asyncio.run(_call(server, "fetch_source", {"tool": "labels-api___label_lookup"}, h2))
+    assert out.startswith("ERROR:") and "no outbound gateway" in out
 
 
 def test_the_context_resource_binds_the_caller_before_answering(local_conn):
@@ -218,6 +226,8 @@ def test_the_context_resource_shows_the_role_its_tables_and_its_metrics(local_co
     assert "Registered metrics" in block and "unblended_cost_by_service" in block
     assert "assume_role_events_by_principal" not in block  # not this role's table
     assert "ALWAYS filter on `date`" in block or "date" in block
+    # the L0 block already carries the semantic catalogs: list each one ONCE
+    assert block.count("Registered metrics") == 1
 
 
 def test_the_session_resource_reports_handles_without_the_raw_owner(local_conn):

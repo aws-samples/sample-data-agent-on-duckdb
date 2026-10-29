@@ -529,6 +529,28 @@ class DataAgentStack(Stack):
             ),
         )
         dashboard.add_widgets(
+            # Evidence chain: what the statements cost at the storage layer
+            cloudwatch.GraphWidget(
+                title="Bytes scanned and S3 requests",
+                left=[metric("BytesScanned", label="bytes scanned")],
+                right=[metric("S3Requests", label="S3 requests")],
+                width=12,
+            ),
+            cloudwatch.LogQueryWidget(
+                title="Scan cost per session (bytes · S3 requests)",
+                log_group_names=[log_group_name],
+                query_lines=[
+                    "fields audit.user_sub as user",
+                    "filter ispresent(audit.bytes_scanned)",
+                    "stats sum(audit.bytes_scanned) as bytes_scanned,"
+                    " sum(audit.s3_requests) as s3_requests by user",
+                    "sort bytes_scanned desc",
+                ],
+                width=12,
+                height=6,
+            ),
+        )
+        dashboard.add_widgets(
             cloudwatch.LogQueryWidget(
                 title="Who, on whose behalf, read what (last 50)",
                 log_group_names=[log_group_name],

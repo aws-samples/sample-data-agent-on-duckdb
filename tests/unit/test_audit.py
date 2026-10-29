@@ -45,6 +45,8 @@ def test_record_emits_one_emf_line_with_metrics_and_audit_fields(capsys):
         "Rows",
         "Materialized",
         "ExpandedPaths",
+        "BytesScanned",
+        "S3Requests",
     }
     assert rec["Outcome"] == "executed" and rec["Statements"] == 1
     assert rec["EngineMs"] == 41.5 and rec["Rows"] == 5213
@@ -74,7 +76,7 @@ def test_session_counters_accumulate_and_reset(capsys):
         "materialized": 1,
         "engine_ms": 3.0,
         "rows": 11,
-        "expanded_paths": 3,  # The session budget's second dimension
+        "expanded_paths": 3,  # the session budget's second dimension
         "input_tokens": 9000,  # measured, highest projection of the turn
         "compressed": 4,
     }
