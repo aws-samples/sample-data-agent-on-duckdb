@@ -1,0 +1,134 @@
+# Table cards — cloudops scenario (the company's own AWS estate).
+#
+# A card is the reviewed statement of what a table IS: its grain, when to use it,
+# when not to, caveats, its owner, and the column names the prompt doc and the
+# governance policies are reconciled against (tests/unit/test_reconcile.py,
+# scripts/reconcile.py against the live engine). Open format, customer-owned,
+# changed through review: a change here triggers the asset regression gate.
+# Loaded fail-closed at cold start (data_agent/storage/card_assets.py).
+#
+# columns:    with complete: true (default) the whole schema — an engine column
+#             not on the card is a drift; complete: false = a documented subset.
+# admin_only: named by no restricted persona on purpose (admin-only by omission).
+cards:
+  cur_line_items:
+    grain: one row = one hourly CUR 2.0 line item (usage or charge)
+    use_when: >-
+      cost by service / region / usage type / resource; month-over-month; unit costs
+    avoid_when: who did what — that is cloudtrail_events
+    caveats: >-
+      costs are USD; filter line_item_line_item_type = 'Usage' to isolate usage; sum() across
+      hourly rows; `billing_period` is 'YYYY-MM'
+    owner: cloudops scenario (this account's exports; scripts/load_ops_data.py)
+    columns:
+    - billing_period
+    - line_item_usage_account_id
+    - line_item_product_code
+    - product_servicecode
+    - product_region_code
+    - line_item_usage_type
+    - line_item_operation
+    - line_item_resource_id
+    - line_item_usage_amount
+    - line_item_unblended_cost
+    - line_item_blended_cost
+    - line_item_net_unblended_cost
+    - line_item_line_item_type
+    - line_item_usage_start_date
+    - line_item_usage_end_date
+    - bill_billing_period_start_date
+    - bill_billing_period_end_date
+    - bill_payer_account_id
+    - line_item_currency_code
+    - pricing_public_on_demand_cost
+    complete: false
+  cloudtrail_events:
+    grain: one row = one CloudTrail management event
+    use_when: >-
+      who called which API when, from where, with what error — IAM principal investigations
+    avoid_when: cost questions — join cur_line_items on line_item_resource_id instead
+    caveats: >-
+      `date` is 'YYYY-MM-DD'; assumed roles show session_issuer_arn; request_parameters/resources
+      are JSON text
+    owner: cloudops scenario (this account's exports; scripts/load_ops_data.py)
+    columns:
+    - event_id
+    - event_time
+    - event_source
+    - event_name
+    - aws_region
+    - source_ip_address
+    - user_agent
+    - event_type
+    - event_category
+    - read_only
+    - management_event
+    - error_code
+    - error_message
+    - recipient_account_id
+    - request_id
+    - shared_event_id
+    - vpc_endpoint_id
+    - user_type
+    - principal_id
+    - user_arn
+    - user_account_id
+    - access_key_id
+    - user_name
+    - invoked_by
+    - session_issuer_arn
+    - session_issuer_name
+    - session_issuer_type
+    - mfa_authenticated
+    - request_parameters
+    - response_elements
+    - resources
+    - additional_event_data
+    - tls_details
+    - date
+    - region
+  cw_logs:
+    grain: one row = one log event of the agent runtime's own log group
+    use_when: operator forensics on the runtime itself (audit lines, errors)
+    avoid_when: any tenant-facing question — this table is operator-only
+    caveats: >-
+      contains the audit log of every principal's statements; deliberately unlisted by every
+      restricted persona
+    owner: cloudops scenario (this account's exports; scripts/load_ops_data.py)
+    columns:
+    - ts
+    - message
+    - log_stream
+    - date
+    admin_only: true
+  cur_raw:
+    grain: one row = one hourly CUR 2.0 line item, native gzip CSV, all VARCHAR
+    use_when: >-
+      zero-ETL check of the curated table, or a column the curated table dropped
+    avoid_when: routine cost analysis — cur_line_items is typed and 20-50× faster
+    caveats: >-
+      every column is VARCHAR: CAST costs before sum(); the current month is re-delivered
+      daily
+    owner: cloudops scenario (this account's exports; scripts/load_ops_data.py)
+    columns:
+    - billing_period
+    - line_item_usage_account_id
+    - line_item_product_code
+    - product_servicecode
+    - product_region_code
+    - line_item_usage_type
+    - line_item_operation
+    - line_item_resource_id
+    - line_item_usage_amount
+    - line_item_unblended_cost
+    - line_item_blended_cost
+    - line_item_net_unblended_cost
+    - line_item_line_item_type
+    - line_item_usage_start_date
+    - line_item_usage_end_date
+    - bill_billing_period_start_date
+    - bill_billing_period_end_date
+    - bill_payer_account_id
+    - line_item_currency_code
+    - pricing_public_on_demand_cost
+    complete: false

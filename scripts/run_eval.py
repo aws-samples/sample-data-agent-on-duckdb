@@ -381,7 +381,11 @@ def _phases(turns: list[Turn], phase: str, from_turn: int = 0) -> list[dict]:
 
 
 def _sqls(turns: list[Turn], from_turn: int = 0) -> list[str]:
-    return [e.get("sql", "") for e in _phases(turns, "gate", from_turn)]
+    gates = _phases(turns, "gate", from_turn)
+    if any(e.get("sql_truncated") for e in gates):
+        # a regex over a cut statement can miss a probe: say so, loudly
+        print("  ! a statement exceeded the trace SQL cap; regex assertions saw a prefix")
+    return [e.get("sql", "") for e in gates]
 
 
 def _executed_sqls(turns: list[Turn]) -> list[str]:
@@ -482,6 +486,13 @@ def evaluate(
             e.get("metric") == m and not e.get("rejected") for e in _phases(turns, "semantic")
         ):
             fail(f"metric {m!r} was not compiled through call_metric")
+    # which answer source actually produced the numbers
+    if want := expect.get("provenance_any"):
+        got = sorted(
+            {e["provenance"] for e in _phases(turns, "execute") if e.get("provenance")}
+        )
+        if want not in got:
+            fail(f"no executed statement with provenance {want!r} (saw {got})")
     if expect.get("semantic_rejected") and not any(
         e.get("rejected") for e in _phases(turns, "semantic")
     ):
@@ -592,8 +603,18 @@ def evaluate(
 
 
 # ------------------------------------------------------------------ report
+def provenance_tier(turns: list[Turn]) -> str:
+    """The case's answer source, by the same rule the online feedback uses
+    (data_agent/feedback.bucket): the most deterministic tier any executed
+    statement reached — so offline and online accuracy share one bucketing."""
+    from data_agent.feedback import bucket
+
+    return bucket([e.get("provenance") for e in _phases(turns, "execute") if e.get("provenance")])
+
+
 def summarize(case: dict, turns: list[Turn], ok: bool, notes: list[str], tag: str = "") -> dict:
     return {
+        "provenance": provenance_tier(turns),
         "id": case["id"],
         "category": case["category"],
         "persona": case.get("persona", "admin"),
@@ -664,6 +685,23 @@ def write_report(rows: list[dict], mode: str, out_md: Path, header_note: str = "
             f"{_mean([r['tool_calls'] for r in rs])} | "
             f"{_mean([r['input_tokens'] for r in rs]):,.0f} |"
         )
+    # Accuracy by answer source, the same buckets the online dashboard
+    # shows — so a decay seen online can be checked against the offline set
+    by_tier: dict[str, list[dict]] = {}
+    for r in rows:
+        by_tier.setdefault(r.get("provenance") or "none", []).append(r)
+    lines += [
+        "",
+        "Accuracy by answer source (provenance tier of the case's executed statements):",
+        "",
+        "| Answer source | Cases | Passed | Pass rate |",
+        "|---|---|---|---|",
+    ]
+    for tier in ("verified", "metric", "free_sql", "none"):
+        rs = by_tier.get(tier, [])
+        if rs:
+            p = sum(r["passed"] for r in rs)
+            lines.append(f"| {tier} | {len(rs)} | {p} | {p / len(rs):.0%} |")
     lines += [
         "",
         "| Case | Persona | Result | SQL calls | Engine ms | Input tokens | Model calls "

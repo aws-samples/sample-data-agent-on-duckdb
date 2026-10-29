@@ -1,0 +1,165 @@
+# Table cards — onchain scenario (AWS Public Blockchain, eth v1.0).
+#
+# A card is the reviewed statement of what a table IS: its grain, when to use it,
+# when not to, caveats, its owner, and the column names the prompt doc and the
+# governance policies are reconciled against (tests/unit/test_reconcile.py,
+# scripts/reconcile.py against the live engine). Open format, customer-owned,
+# changed through review: a change here triggers the asset regression gate.
+# Loaded fail-closed at cold start (data_agent/storage/card_assets.py).
+#
+# columns:    with complete: true (default) the whole schema — an engine column
+#             not on the card is a drift; complete: false = a documented subset.
+# admin_only: named by no restricted persona on purpose (admin-only by omission).
+cards:
+  eth_blocks:
+    grain: one row = one Ethereum block
+    use_when: 'block metadata: timestamps, miner, gas limits, tx counts per block'
+    avoid_when: tracing value transfers — blocks carry no transfer rows
+    caveats: '`timestamp` is the block time; join transactions on block_number'
+    owner: onchain scenario (AWS Public Blockchain, eth v1.0)
+    columns:
+    - difficulty
+    - hash
+    - miner
+    - nonce
+    - number
+    - size
+    - timestamp
+    - total_difficulty
+    - base_fee_per_gas
+    - gas_limit
+    - gas_used
+    - extra_data
+    - logs_bloom
+    - parent_hash
+    - state_root
+    - receipts_root
+    - transactions_root
+    - sha3_uncles
+    - transaction_count
+    - date
+    - last_modified
+  eth_transactions:
+    grain: one row = one top-level (externally signed) transaction
+    use_when: 'who signed what: sender, gas paid, receipt status, contract creation'
+    avoid_when: >-
+      following a contract-mediated drain — internal value moves are only in eth_traces
+    caveats: >-
+      `value` is wei (divide by 1e18); `hash` is the tx hash (eth_traces calls it transaction_hash)
+    owner: onchain scenario (AWS Public Blockchain, eth v1.0)
+    columns:
+    - gas
+    - hash
+    - input
+    - nonce
+    - value
+    - block_number
+    - block_hash
+    - transaction_index
+    - from_address
+    - to_address
+    - gas_price
+    - receipt_cumulative_gas_used
+    - receipt_gas_used
+    - receipt_contract_address
+    - receipt_status
+    - receipt_effective_gas_price
+    - transaction_type
+    - max_fee_per_gas
+    - max_priority_fee_per_gas
+    - block_timestamp
+    - date
+    - last_modified
+  eth_token_transfers:
+    grain: one row = one ERC-20/721 Transfer event
+    use_when: 'token (not ETH) movements: which token, from, to, amount'
+    avoid_when: native ETH flows — those are eth_traces / eth_transactions
+    caveats: >-
+      `value` is in the token's own decimals, not wei; token_address identifies the contract
+    owner: onchain scenario (AWS Public Blockchain, eth v1.0)
+    columns:
+    - token_address
+    - from_address
+    - to_address
+    - value
+    - transaction_hash
+    - log_index
+    - block_number
+    - block_hash
+    - block_timestamp
+    - date
+    - last_modified
+  eth_traces:
+    grain: one row = one internal call (EVM trace) inside a transaction
+    use_when: >-
+      following the money: every ETH value move incl. contract-mediated ones, fan-out, hops
+    avoid_when: counting user-signed transactions — use eth_transactions
+    caveats: >-
+      filter value > 0 AND status = 1 for successful transfers; a day is a few GB, always
+      add an address filter
+    owner: onchain scenario (AWS Public Blockchain, eth v1.0)
+    columns:
+    - block_number
+    - transaction_hash
+    - transaction_index
+    - error
+    - status
+    - trace_id
+    - subtraces
+    - trace_address
+    - block_hash
+    - trace_type
+    - gas
+    - gas_used
+    - from_address
+    - value
+    - reward_type
+    - input
+    - output
+    - call_type
+    - to_address
+    - block_timestamp
+    - date
+    - last_modified
+  eth_logs:
+    grain: one row = one emitted event log
+    use_when: 'decoding contract events beyond Transfer: topics[] and data of any log'
+    avoid_when: token transfers — eth_token_transfers is already decoded
+    caveats: '`topics` is a list (topics[1] is the event signature); `data` is hex'
+    owner: onchain scenario (AWS Public Blockchain, eth v1.0)
+    columns:
+    - address
+    - topics
+    - data
+    - transaction_index
+    - log_index
+    - transaction_hash
+    - block_number
+    - block_hash
+    - block_timestamp
+    - date
+    - last_modified
+  ofac_addresses:
+    grain: one row = one OFAC SDN-listed crypto address
+    use_when: 'sanctions screening: join on lower(address)'
+    avoid_when: attributing exchanges or customers — that is cex_deposit_labels
+    caveats: real public list, ~120 rows; `program` is the sanctions program
+    owner: onchain scenario (public OFAC SDN crypto list)
+    columns:
+    - address
+    - program
+    - source
+  cex_deposit_labels:
+    grain: one row = one exchange deposit address with its label
+    use_when: 'cash-out points: which recipients are exchange deposit addresses'
+    avoid_when: anything needing real attribution — this table is SYNTHETIC
+    caveats: >-
+      subject_identity is customer PII linkage (column-denied for junior roles); rows are
+      tenant-scoped by exchange
+    owner: onchain scenario (synthetic sample)
+    columns:
+    - address
+    - exchange
+    - label
+    - subject_identity
+    - risk_tier

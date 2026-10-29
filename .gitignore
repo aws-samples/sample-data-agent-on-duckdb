@@ -35,3 +35,4 @@ docs/deck/
 
 # Claude Code local state (sessions, worktrees) — never part of the sample
 .claude/
+corrections-review/

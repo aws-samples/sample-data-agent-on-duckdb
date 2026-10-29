@@ -1,7 +1,7 @@
 # Eval results — mode `cloud` · 2026-09-10 07:05Z
 
-> **Newer run available (2026-10-19): 55/55** —
-> [eval-results-2026-10-19.md](eval-results-2026-10-19.md). The per-case
+> **Newer run available (2026-10-29): 57/57** —
+> [eval-results-2026-10-29.md](eval-results-2026-10-29.md). The per-case
 > traces in `eval-results.json` belong to the run below.
 
 50/52 cases passed. Assertions run on the streamed gate → rewrite → cost → execute trace events, not on output text; numeric truths are computed at eval time by running each case's golden SQL through the same pipeline.

@@ -58,6 +58,24 @@ def test_an_unknown_role_inside_a_known_tenant_gets_the_most_restricted_policy(l
     assert role == "exchange-a:junior" and denied is False
 
 
+def test_the_same_user_under_another_role_resets_the_mcp_session(local_conn, capsys):
+    mcp.bind_identity(
+        _headers(**{"custom:tenant": "exchange-a", "custom:role": "investigator", "sub": "p"})
+    )
+    results.STORE.register("_r_1", local_conn, 5)
+    assert results.STORE.meta("_r_1")["owner"] == "sub:p"
+    role, _ = mcp.bind_identity(
+        _headers(**{"custom:tenant": "exchange-a", "custom:role": "junior", "sub": "p"})
+    )
+    assert role == "exchange-a:junior"
+    assert results.STORE.meta("_r_1") is None  # computed under the wider role: gone
+    assert results.STORE.owner == "sub:p"  # still the same person
+    rec = json.loads([ln for ln in capsys.readouterr().out.splitlines() if '"audit"' in ln][-1])[
+        "audit"
+    ]
+    assert rec["stage"] == "session" and "role" in rec["reason"]
+
+
 def test_a_different_principal_on_the_same_connection_resets_the_session(local_conn, capsys):
     mcp.bind_identity(_headers(**{"custom:tenant": "ops", "custom:role": "admin", "sub": "a"}))
     results.STORE.register("_r_1", local_conn, 5)

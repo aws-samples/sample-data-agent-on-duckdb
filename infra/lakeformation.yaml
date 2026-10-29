@@ -1,0 +1,45 @@
+# Lake Formation as the policy authority — the declarative half.
+#
+# This file is what a reader edits to reproduce the reference deployment's
+# Lake Formation setup, or to point it at their own tables and personas.
+# `scripts/setup_lakeformation.py` converges the account to it (dry-run by
+# default, `--apply` to change anything) and prints the LF_GOVERNANCE value
+# the runtime needs. `{account}` is replaced with the caller's account id.
+#
+# The filters below ARE the row/column policy for these personas: once a
+# table is listed here, Lake Formation is its policy authority, the agent
+# fetches the filtered view per caller (GetUnfilteredTableMetadata) and the
+# env policy becomes the merged lower bound. Editing a row filter here and
+# re-running the script is how policy changes.
+
+# The session-tag value Lake Formation is told to trust for external engines.
+session_tag: data-agent
+
+# Every governed table: the logical name the rewrite matches, and where the
+# table lives. S3 Tables are reached through the federated `s3tablescatalog`.
+tables:
+  eth_traces:
+    catalog_id: "{account}:s3tablescatalog/data-agent-demo"
+    database: blockchain
+    name: eth_traces
+    # the table bucket the persona roles may read through the federation
+    # layer (it authorizes against S3 Tables AS THE CALLER)
+    table_bucket: data-agent-demo
+
+# One entry per persona that Lake Formation governs: the IAM data access role
+# the agent assumes for it, and that persona's data cells filter per table.
+personas:
+  exchange-a:investigator:
+    role_name: lf-persona-investigator
+    filters:
+      eth_traces:
+        name: investigator-window
+        row_filter: "\"date\" >= '2025-02-21'"   # PartiQL: quote reserved names
+        exclude_columns: []
+  exchange-a:junior:
+    role_name: lf-persona-junior
+    filters:
+      eth_traces:
+        name: junior-window
+        row_filter: "\"date\" >= '2025-02-22'"
+        exclude_columns: [block_timestamp]

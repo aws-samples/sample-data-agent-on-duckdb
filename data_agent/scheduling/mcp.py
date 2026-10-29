@@ -110,10 +110,13 @@ def bind_identity(headers) -> tuple[str, bool]:
             tool="mcp",
         )
     owner = _owner_key(claims, role)
+    # reset on a change of person OR role: state produced under one role's
+    # policy must not survive into another's (see runtime._binding_key)
+    key = f"{owner}|role:{role}"
     prev = _session["owner"]
-    _session["owner"] = owner
+    _session["owner"] = key
     results.STORE.bind(owner)
-    if prev is not None and prev != owner:
+    if prev is not None and prev != key:
         engine.reset()
         results.STORE.reset()
         results.STORE.bind(owner)
@@ -127,7 +130,7 @@ def bind_identity(headers) -> tuple[str, bool]:
             sql="(mcp session rebind: principal changed on a reused connection)",
             outcome="rejected",
             stage="session",
-            reason="session state reset — a different identity used this MCP session",
+            reason="session state reset — a different identity or role used this MCP session",
             tool="mcp",
         )
     return role, governance.is_denied_all()

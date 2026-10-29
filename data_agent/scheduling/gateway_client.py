@@ -19,8 +19,13 @@ already decoded for claims, no new secret. The agent process holds **no source
 credentials**: the Gateway (or the Identity token vault) does. A source whose
 outbound credential is a service identity (2LO, API key, or the gateway's IAM
 role, as the labels API is today) cannot be per-user at the source, so the
-result is marked `degraded=2lo` in the audit line and the row filter that
-applies to the caller is applied on `_r_<n>` afterwards.
+result is marked `degraded=2lo` in the audit line. Nothing re-filters those
+rows afterwards: `_r_<n>` is a session object the rewrite does not govern.
+What still holds is that the handle belongs to its owner alone and that any
+lake table JOINed to it is rewritten as usual — so a 2LO source must only
+serve data every role allowed to call it may see (the persona `sources`
+allowlist and the Gateway's Cedar policy decide who may call it), or it
+should not be connected.
 
 Trust: tool results are UNTRUSTED CONTENT, exactly like table rows — they are
 marked `data:«…»` when the model reads them and never treated as

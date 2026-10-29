@@ -19,8 +19,9 @@ in-region host:
     ./.venv/bin/python scripts/lf_idempotence.py --persona junior
     ./.venv/bin/python scripts/lf_idempotence.py --out /tmp/idem.md
 
-Requires `LF_GOVERNANCE` (same value the runtime carries), `ATHENA_OUTPUT`
-(an S3 prefix for Athena results) and Athena permissions on the persona data
+Requires `LF_GOVERNANCE` (same value the runtime carries), optionally
+`ATHENA_OUTPUT` (an S3 prefix for Athena results; default: the stack's
+DuckLake bucket) and Athena permissions on the persona data
 access roles (run queries in the workgroup, write to that prefix); the caller
 must be trusted to assume those roles with the session tag.
 Exit code 1 on any mismatch, so it can gate a deployment.
@@ -39,7 +40,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "primary")
-# s3://<your results bucket>/<prefix>/ — required, no default
+# results land under the solution bucket unless told otherwise; the account id
+# comes from the caller's identity, never from code (public-tree hygiene)
 ATHENA_OUTPUT = os.environ.get("ATHENA_OUTPUT", "")
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 
@@ -256,8 +258,12 @@ def main() -> int:
 
     if not os.environ.get("LF_GOVERNANCE"):
         sys.exit("LF_GOVERNANCE is required (the same value the runtime carries)")
+    global ATHENA_OUTPUT
     if not ATHENA_OUTPUT:
-        sys.exit("ATHENA_OUTPUT is required (s3://<your results bucket>/<prefix>/)")
+        import boto3
+
+        acct = boto3.client("sts", region_name=REGION).get_caller_identity()["Account"]
+        ATHENA_OUTPUT = f"s3://duckdb-agent-ducklake-{acct}/tmp/athena-idempotence/"  # nosec B108 - an S3 key prefix, not a local path
     personas = args.persona or sorted(PERSONAS)
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     cases = [c for c in CASES if not only or c["id"] in only]

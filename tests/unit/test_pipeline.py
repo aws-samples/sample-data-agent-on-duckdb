@@ -155,3 +155,15 @@ def test_a_nonempty_or_ungoverned_result_carries_no_such_note(local_conn, monkey
     governance.set_active_role("ops:admin")
     # admin: zero rows, but no row filter applied → no note (nothing was hidden)
     assert "YOU may see" not in list(pipeline.run("SELECT id FROM t WHERE id < 0"))[-1]
+
+
+def test_the_gate_event_carries_the_statement_up_to_the_audit_cap(local_conn):
+    """The eval's regex assertions (probes, `_r_<n>` read-backs) read this
+    text; a 400-char cut hid a read-back at char 708 (2026-10-29)."""
+    pad = " ".join(f"id AS c{i}" for i in range(80))  # ~ 800 chars of projection
+    sql = f"SELECT {pad} FROM t WHERE id = 1"
+    gate = next(e for e in pipeline.run(sql) if isinstance(e, dict) and e["phase"] == "gate")
+    assert gate["sql"] == sql and "sql_truncated" not in gate
+    long = "SELECT 1 AS x" + " " * audit.SQL_MAX + "-- tail"
+    gate = next(e for e in pipeline.run(long) if isinstance(e, dict) and e["phase"] == "gate")
+    assert gate["sql_truncated"] is True and len(gate["sql"]) == audit.SQL_MAX

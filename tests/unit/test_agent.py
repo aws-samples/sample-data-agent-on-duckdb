@@ -535,6 +535,19 @@ def test_session_rebind_detects_a_changed_owner():
     assert runtime._bind_session(runtime._owner_key(None, "exchange-a:junior")) is True
 
 
+def test_the_same_user_under_another_role_resets_the_session():
+    """A demoted (or re-provisioned) user must not keep results computed under
+    the wider role. The person stays the handle owner and the audit chain; the
+    BINDING is person + role, so a role change on the same sub is a reset."""
+    runtime._session["owner"] = None
+    owner = runtime._owner_key({"sub": "u-7"}, "exchange-a:investigator")
+    assert runtime._bind_session(owner, "exchange-a:investigator") is False
+    assert runtime._bind_session(owner, "exchange-a:investigator") is False  # same role
+    owner2 = runtime._owner_key({"sub": "u-7"}, "exchange-a:junior")
+    assert owner2 == owner  # same person → same handle owner / user_sub chain
+    assert runtime._bind_session(owner2, "exchange-a:junior") is True  # role changed → reset
+
+
 def test_session_reset_clears_engine_results_history_and_counters(local_conn, monkeypatch, capsys):
     from data_agent import audit
     from data_agent.context import results

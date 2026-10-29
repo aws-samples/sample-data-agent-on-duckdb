@@ -39,6 +39,8 @@ import time
 
 from data_agent.storage.registry import CARDS, PARTITIONED_SOURCES
 
+from . import wiki
+
 INDEX_TABLE = "_catalog"
 FTS_SCHEMA = f"fts_main_{INDEX_TABLE}"
 DESCRIBE_BUDGET_S = float(os.environ.get("DATAMAP_DESCRIBE_BUDGET_S", "20"))
@@ -164,9 +166,13 @@ def l0_doc(
     lines += [
         "",
         "Not sure which table? Call `search_schema(query)` (keyword search over table and "
-        "column names plus each table's card: when to use it, when not to, caveats; no "
-        "network). Then `DESCRIBE <table>` via run_sql for the exact schema.",
+        "column names plus each table's card and wiki notes: when to use it, when not to, "
+        "caveats, known pitfalls; no network). Then `DESCRIBE <table>` via run_sql for the "
+        "exact schema.",
     ]
+    gloss = wiki.glossary_doc(visible, denied)  # terms this role's tables cover
+    if gloss:
+        lines += ["", gloss]
     return "\n".join(lines)
 
 
@@ -214,6 +220,9 @@ def _tokens(e: dict) -> str:
     (grain, use-when, avoid-when, caveats), underscores split."""
     card = e.get("card")
     about = f"{card.grain} {card.use_when} {card.avoid_when} {card.caveats}" if card else ""
+    # The table's wiki page is searchable with its card (masking and
+    # visibility are applied when a hit is RETURNED, not here)
+    about += " " + (wiki.WIKI.get(_bare(e["name"])) or "")
     raw = f"{e['name']} {e.get('columns', '')} {e['kind']} {e.get('partition') or ''} {about}"
     return " ".join(_TOKEN_RE.findall(raw.lower().replace("_", " ").replace(".", " ")))
 
@@ -285,12 +294,16 @@ def _card_fields(name: str, denied: dict[str, frozenset[str]] | None) -> dict:
     card = CARDS.get(_bare(name))
     if card is None:
         return {}
-    return {
+    out = {
         "grain": card.grain,
         "use_when": _scrub_denied(name, card.use_when, denied),
         "avoid_when": _scrub_denied(name, card.avoid_when, denied),
         "caveats": _scrub_denied(name, card.caveats, denied),
     }
+    page = wiki.notes(_bare(name), denied)  # the table's wiki page, masked
+    if page:
+        out["notes"] = page
+    return out
 
 
 def format_hits(hits: list[dict], query: str) -> str:

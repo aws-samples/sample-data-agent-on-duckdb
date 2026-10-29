@@ -77,7 +77,36 @@ def _tracked_stdout() -> _LineTracker:
     return sys.stdout
 
 
+# The turns this session answered, newest last: the question, and the
+# provenance tier of every statement that EXECUTED for it. Online feedback
+# names a turn; its bucket is read from here. Bounded (a session can be long).
+_TURNS_KEPT = 20
+_turns: dict[str, dict] = {}
+
+
+def begin_turn(question: str) -> str:
+    """Open a new turn; statements recorded from now on belong to it."""
+    import uuid
+
+    tid = uuid.uuid4().hex[:12]
+    _turns[tid] = {"question": (question or "")[:SQL_MAX], "provenance": []}
+    while len(_turns) > _TURNS_KEPT:
+        _turns.pop(next(iter(_turns)))
+    return tid
+
+
+def turn(turn_id: str | None = None) -> tuple[str | None, dict | None]:
+    """A turn by id, or the latest one; (None, None) when there is none."""
+    if turn_id:
+        return (turn_id, _turns[turn_id]) if turn_id in _turns else (None, None)
+    if not _turns:
+        return None, None
+    tid = next(reversed(_turns))
+    return tid, _turns[tid]
+
+
 def reset_session() -> None:
+    _turns.clear()
     _session.update(
         statements=0,
         rejected=0,
@@ -186,6 +215,8 @@ def record(
             "provenance": provenance,
         },
     }
+    if provenance and outcome == "executed" and _turns:
+        _turns[next(reversed(_turns))]["provenance"].append(provenance)
     _session["statements"] += 1
     if outcome != "executed":
         _session["rejected"] += 1
@@ -194,6 +225,12 @@ def record(
     _session["engine_ms"] += float(engine_ms or 0.0)
     _session["rows"] += int(rows or 0)
     _session["expanded_paths"] += int((cost or {}).get("expanded_paths") or 0)
+    emit(rec)
+    return rec
+
+
+def emit(rec: dict) -> None:
+    """Write one EMF line. Never raises."""
     if ENABLED:
         try:
             out = _tracked_stdout()
@@ -203,4 +240,3 @@ def record(
             out.flush()
         except Exception:  # noqa: BLE001, S110 — auditing must never break the tool  # nosec B110
             pass
-    return rec

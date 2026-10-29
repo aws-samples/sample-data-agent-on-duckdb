@@ -160,8 +160,8 @@ def _fetch_table_rule(glue, locus: dict) -> dict:
         )
     row_filter = next(iter(exprs), None)
     if row_filter is not None:
-        probe = sqlglot.parse_one(  # nosec B608 - validation-only parse
-            f"SELECT * FROM t WHERE {row_filter}",  # nosec B608 - parsed, never executed
+        probe = sqlglot.parse_one(
+            f"SELECT * FROM t WHERE {row_filter}",  # nosec B608 - parsed to validate, never executed
             read="duckdb",
         )
         if not isinstance(probe, exp.Select) or probe.args.get("where") is None:

@@ -13,7 +13,10 @@ That matters here: `agentcore launch` REPLACES the env on every launch (hence
 the "pass all of them" warning in the operating manual), and the MCP runtime
 was created by a control-plane call in the first place.
 
-  python scripts/update_runtimes.py <image-tag> [--runtime <id> ...]
+  python scripts/update_runtimes.py <image-tag> [--runtime <id> ...] [--set-env K=V ...]
+
+`--set-env` MERGES a variable into each runtime's live environment (the only
+way to add one without retyping the whole set); every other variable stays.
 """
 
 from __future__ import annotations
@@ -47,7 +50,14 @@ def main() -> None:
     ap.add_argument(
         "--runtime", action="append", default=None, help="repeatable; default: $AGENT_RUNTIME_IDS"
     )
+    ap.add_argument("--set-env", action="append", default=[], metavar="KEY=VALUE")
     args = ap.parse_args()
+    overrides = {}
+    for kv in args.set_env:
+        key, sep, value = kv.partition("=")
+        if not sep or not key or not key.replace("_", "").isalnum():
+            ap.error(f"--set-env expects KEY=VALUE, got {kv!r}")
+        overrides[key] = value
 
     session = boto3.Session(region_name=args.region)
     account = args.account or session.client("sts").get_caller_identity()["Account"]
@@ -66,6 +76,9 @@ def main() -> None:
             "networkConfiguration": cur["networkConfiguration"],
             **{k: cur[k] for k in CARRIED if cur.get(k)},
         }
+        if overrides:
+            live_env = cur.get("environmentVariables") or {}
+            kwargs["environmentVariables"] = {**live_env, **overrides}
         out = control.update_agent_runtime(**kwargs)
         print(
             json.dumps(
@@ -78,6 +91,7 @@ def main() -> None:
                     "version": out.get("agentRuntimeVersion"),
                     "status": out.get("status"),
                     "env_vars_kept": len(kwargs.get("environmentVariables") or {}),
+                    "env_set": sorted(overrides),
                     "protocol": (kwargs.get("protocolConfiguration") or {}).get("serverProtocol"),
                 }
             )

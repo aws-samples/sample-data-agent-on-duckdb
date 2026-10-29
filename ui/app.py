@@ -133,8 +133,9 @@ def login(username: str, password: str) -> dict:
 
 
 # --------------------------------------------------------------- SSE invoke
-def stream_invoke(id_token: str, prompt: str, session_id: str):
-    """Yield parsed SSE envelopes from the runtime as they arrive."""
+def stream_invoke(id_token: str, prompt: str, session_id: str, body: dict | None = None):
+    """Yield parsed SSE envelopes from the runtime as they arrive. `body`
+    replaces the default `{"prompt": ...}` payload (feedback uses it)."""
     escaped = urllib.parse.quote(RUNTIME_ARN, safe="")
     url = (
         f"https://bedrock-agentcore.{REGION}.amazonaws.com/runtimes/"
@@ -146,7 +147,7 @@ def stream_invoke(id_token: str, prompt: str, session_id: str):
         "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": session_id,
     }
     with requests.post(
-        url, headers=headers, json={"prompt": prompt}, stream=True, timeout=180
+        url, headers=headers, json=body or {"prompt": prompt}, stream=True, timeout=180
     ) as r:
         r.raise_for_status()
         for line in r.iter_lines():
@@ -173,6 +174,7 @@ def render_stream(id_token: str, prompt: str, session_id: str) -> dict:
     session = None
     cur_text: dict | None = None
     cur_tool: dict | None = None
+    turn_id = None  # names this answer when the user rates it
 
     def _open_text() -> dict:
         with container:
@@ -238,11 +240,59 @@ def render_stream(id_token: str, prompt: str, session_id: str) -> dict:
         elif kind == "result":
             final_trace = env.get("trace", final_trace)
             session = env.get("session", session)
+            turn_id = env.get("turn_id", turn_id)
 
     # strip live-only slot handles before persisting
     clean = [{k: v for k, v in s.items() if not k.startswith("_")} for s in segments]
     answer = "".join(s["text"] for s in clean if s["type"] == "text")
-    return {"answer": answer, "segments": clean, "trace": final_trace, "session": session}
+    return {
+        "answer": answer,
+        "segments": clean,
+        "trace": final_trace,
+        "session": session,
+        "turn_id": turn_id,
+    }
+
+
+def send_feedback(id_token: str, session_id: str, turn_id: str, verdict: str, correction: str):
+    """Rate one answer of this session: one feedback audit line,
+    bucketed server-side by the provenance tier that answer used. Never runs
+    the model. Returns the server's one-line acknowledgement."""
+    body = {"feedback": {"verdict": verdict, "turn_id": turn_id, "correction": correction or None}}
+    text = ""
+    for env in stream_invoke(id_token, "", session_id, body=body):
+        if env.get("kind") == "text":
+            text += env.get("text", "")
+    return text
+
+
+def _feedback_controls(idx: int, msg: dict) -> None:
+    """👍 / 👎 under an answer; a down-vote may carry a correction for review."""
+    if not msg.get("turn_id"):
+        return
+    if msg.get("feedback"):
+        st.caption(f"feedback: {msg['feedback']}")
+        return
+    auth = st.session_state.auth
+    up, down, _ = st.columns([1, 1, 10])
+    if up.button("👍", key=f"up{idx}"):
+        msg["feedback"] = send_feedback(
+            auth["id_token"], st.session_state.session_id, msg["turn_id"], "up", ""
+        )
+        st.rerun()
+    if down.button("👎", key=f"down{idx}"):
+        st.session_state[f"fbopen{idx}"] = True
+    if st.session_state.get(f"fbopen{idx}"):
+        correction = st.text_area(
+            "What is wrong, or what is the right answer / definition? (reviewed by a person)",
+            key=f"corr{idx}",
+        )
+        if st.button("Send", key=f"send{idx}"):
+            msg["feedback"] = send_feedback(
+                auth["id_token"], st.session_state.session_id, msg["turn_id"], "down", correction
+            )
+            st.session_state.pop(f"fbopen{idx}", None)
+            st.rerun()
 
 
 def replay_transcript(segments: list[dict]) -> None:
@@ -421,12 +471,13 @@ def main() -> None:
     chat_tab, trace_tab = st.tabs(["💬 Investigation", "🔬 Trace"])
 
     with chat_tab:
-        for msg in st.session_state.messages:
+        for idx, msg in enumerate(st.session_state.messages):
             with st.chat_message(msg["role"]):
                 if msg["role"] == "assistant" and msg.get("segments") is not None:
                     replay_transcript(msg["segments"])  # full interleaved thought process
                     if msg.get("wall_ms"):
                         st.caption(f"end-to-end {msg['wall_ms']} ms")
+                    _feedback_controls(idx, msg)
                 else:
                     st.markdown(msg["content"])
 
@@ -448,11 +499,13 @@ def main() -> None:
                     "content": out["answer"],
                     "segments": out["segments"],
                     "wall_ms": wall,
+                    "turn_id": out.get("turn_id"),
                 }
             )
             st.session_state.traces.append(
                 {"prompt": prompt, "trace": out["trace"], "session": out.get("session")}
             )
+            st.rerun()  # re-render through the history loop so the 👍/👎 controls appear
 
     with trace_tab:
         _render_trace_tab(st.session_state.traces)

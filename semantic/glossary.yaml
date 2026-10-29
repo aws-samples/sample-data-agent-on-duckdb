@@ -1,0 +1,25 @@
+# Business glossary — the terms users say, mapped to what they mean in the data.
+# Customer-owned Git asset (asset gate). A term is shown to a persona only if
+# EVERY table it names is readable by that persona; denied column names are
+# masked in the definition, as in the table cards.
+terms:
+  - term: drain
+    definition: >-
+      value moved out of a victim contract through internal calls; trace it in
+      eth_traces (value > 0, status = 1), not in eth_transactions
+    tables: [eth_traces]
+  - term: cash-out
+    definition: >-
+      the hop where funds land on an exchange deposit address — a join of the
+      ledger to cex_deposit_labels on lower(address)
+    tables: [eth_traces, cex_deposit_labels]
+  - term: cost
+    definition: >-
+      unblended cost (line_item_unblended_cost) per billing_period, unless the
+      user asks for amortized or net cost
+    tables: [cur_line_items]
+  - term: AssumeRole count
+    definition: >-
+      an ungrouped count of cloudtrail_events where event_name = 'AssumeRole'
+      for the bounded date range — never the sum of a grouped top-N
+    tables: [cloudtrail_events]

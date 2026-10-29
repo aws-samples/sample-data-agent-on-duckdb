@@ -23,7 +23,8 @@ import re
 
 from data_agent.semantic import assets
 
-from .base import Scenario, TableCard
+from .. import card_assets
+from .base import Scenario
 
 OPS_PREFIX = os.environ.get("OPS_PREFIX", "")  # s3://<solution-bucket>/ops
 OPS_CUR_SRC = os.environ.get("OPS_CUR_SRC", "")  # s3://<cur-bucket>/<prefix>/<export>/data
@@ -140,120 +141,10 @@ line_item_resource_id.
 
 
 # ---------------------------------------------------------------- cards
-# Table cards. CUR 2.0 has 116 columns: the cards for cur_line_items /
-# cur_raw name the documented subset (complete=False). cloudtrail_events and
-# cw_logs list their full curated schema (scripts/load_ops_data.py) plus the
-# hive partition columns. cw_logs is admin-only by omission.
-_OPS_OWNER = "cloudops scenario (this account's exports; scripts/load_ops_data.py)"
-_CUR_COLUMNS = (
-    "billing_period",
-    "line_item_usage_account_id",
-    "line_item_product_code",
-    "product_servicecode",
-    "product_region_code",
-    "line_item_usage_type",
-    "line_item_operation",
-    "line_item_resource_id",
-    "line_item_usage_amount",
-    "line_item_unblended_cost",
-    "line_item_blended_cost",
-    "line_item_net_unblended_cost",
-    "line_item_line_item_type",
-    "line_item_usage_start_date",
-    "line_item_usage_end_date",
-    "bill_billing_period_start_date",
-    "bill_billing_period_end_date",
-    "bill_payer_account_id",
-    "line_item_currency_code",
-    "pricing_public_on_demand_cost",
-)
-CARDS = {
-    "cur_line_items": TableCard(
-        grain="one row = one hourly CUR 2.0 line item (usage or charge)",
-        use_when="cost by service / region / usage type / resource; month-over-month; unit costs",
-        avoid_when="who did what — that is cloudtrail_events",
-        caveats=(
-            "costs are USD; filter line_item_line_item_type = 'Usage' to "
-            "isolate usage; sum() across hourly rows; `billing_period` is 'YYYY-MM'"
-        ),
-        owner=_OPS_OWNER,
-        columns=_CUR_COLUMNS,
-        complete=False,
-    ),
-    "cloudtrail_events": TableCard(
-        grain="one row = one CloudTrail management event",
-        use_when=(
-            "who called which API when, from where, with what error — IAM principal investigations"
-        ),
-        avoid_when="cost questions — join cur_line_items on line_item_resource_id instead",
-        caveats=(
-            "`date` is 'YYYY-MM-DD'; assumed roles show "
-            "session_issuer_arn; request_parameters/resources are JSON text"
-        ),
-        owner=_OPS_OWNER,
-        columns=(
-            "event_id",
-            "event_time",
-            "event_source",
-            "event_name",
-            "aws_region",
-            "source_ip_address",
-            "user_agent",
-            "event_type",
-            "event_category",
-            "read_only",
-            "management_event",
-            "error_code",
-            "error_message",
-            "recipient_account_id",
-            "request_id",
-            "shared_event_id",
-            "vpc_endpoint_id",
-            "user_type",
-            "principal_id",
-            "user_arn",
-            "user_account_id",
-            "access_key_id",
-            "user_name",
-            "invoked_by",
-            "session_issuer_arn",
-            "session_issuer_name",
-            "session_issuer_type",
-            "mfa_authenticated",
-            "request_parameters",
-            "response_elements",
-            "resources",
-            "additional_event_data",
-            "tls_details",
-            "date",
-            "region",
-        ),
-    ),
-    "cw_logs": TableCard(
-        grain="one row = one log event of the agent runtime's own log group",
-        use_when="operator forensics on the runtime itself (audit lines, errors)",
-        avoid_when="any tenant-facing question — this table is operator-only",
-        caveats=(
-            "contains the audit log of every principal's "
-            "statements; deliberately unlisted by every restricted persona"
-        ),
-        owner=_OPS_OWNER,
-        columns=("ts", "message", "log_stream", "date"),
-        admin_only=True,
-    ),
-    "cur_raw": TableCard(
-        grain="one row = one hourly CUR 2.0 line item, native gzip CSV, all VARCHAR",
-        use_when="zero-ETL check of the curated table, or a column the curated table dropped",
-        avoid_when="routine cost analysis — cur_line_items is typed and 20-50× faster",
-        caveats=(
-            "every column is VARCHAR: CAST costs before "
-            "sum(); the current month is re-delivered daily"
-        ),
-        owner=_OPS_OWNER,
-        columns=_CUR_COLUMNS,
-        complete=False,
-    ),
-}
+# Table cards are a customer-owned Git asset: semantic/cards/cloudops.yaml
+# (CUR 2.0 has 116 columns — the CUR cards name the documented subset with
+# complete: false; cw_logs is admin-only by omission).
+CARDS = card_assets.load_cards("cloudops")  # semantic/cards/cloudops.yaml, fail-closed
 
 
 # -------------------------------------------------------------- metrics

@@ -68,10 +68,10 @@ def test_save_and_load_roundtrip(tmp_path, monkeypatch):
 def test_the_shipped_baseline_matches_the_published_run():
     """The locked baseline is re-anchored only by `--update-baseline` paired
     with `--golden compute`; it must keep reconciling to a published report.
-    Current anchor: docs/eval-results-2026-10-19.md (55/55, in-region
-    goldens), replacing the 2026-09-10 seed (50/52)."""
+    Current anchor: docs/eval-results-2026-10-29.md (57/57, in-region
+    goldens — two verified-query cases added), replacing 2026-10-19 (55/55)."""
     base = run_eval.load_baseline()
-    assert base is not None and base["as_of"].startswith("2026-10-19")
+    assert base is not None and base["as_of"].startswith("2026-10-29")
     cats = base["categories"]
-    assert sum(c["total"] for c in cats.values()) == 55
-    assert sum(c["passed"] for c in cats.values()) == 55
+    assert sum(c["total"] for c in cats.values()) == 57
+    assert sum(c["passed"] for c in cats.values()) == 57

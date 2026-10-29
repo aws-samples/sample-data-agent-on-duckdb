@@ -1,0 +1,93 @@
+# Release gate: lint, the unit +
+# adversarial governance tests, then bandit (Python SAST) + semgrep (patterns)
+# + detect-secrets (credentials). Every job is blocking. The tests are NOT
+# optional: an authorization review found two complete RLS/CLS bypasses
+# that only adversarial regression tests catch (docs/design.md),
+# and the governance coverage matrix (tests/unit/test_gov_matrix.py — every
+# persona × access path × statement shape, expectations derived from the
+# policy) runs inside the unit job on every push.
+#
+# What does NOT run here: the agent eval (it needs Bedrock and a deployed
+# runtime with real personas) — run scripts/run_eval.py against your
+# deployment after each deploy.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install --quiet ruff==0.16.5
+      - run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install --quiet -r requirements.txt pytest PyYAML
+      # The tests are no-network: DuckDB runs in-process on local tables. The
+      # one download is the extension pre-install the engine relies on (the
+      # runtime never INSTALLs at cold start; the image bakes the extensions
+      # with this same script) — without it the fts/httpfs tests fail.
+      - run: python scripts/install_extensions.py
+      - run: python -m pytest tests/unit -q
+
+  bandit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install --quiet bandit==1.8.6
+      - run: bandit -r . -x ./.venv,./tests,./infra/cdk.out --severity-level medium
+
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+      # setuptools < 81: semgrep 1.131.0 pulls an opentelemetry that imports
+      # pkg_resources (removed from setuptools 81)
+      - run: pip install --quiet "setuptools<81" semgrep==1.131.0
+      # The two SQL-string rules fire on every statement this project builds:
+      # it is a SQL-generating agent, so composing statements is the design.
+      # The injection surface is analysed per site (# nosec B608 notes) and in
+      # the threat model (T001, T009).
+      - run: >
+          semgrep scan --config p/default --config p/security-audit
+          --exclude '.venv' --exclude 'cdk.out'
+          --exclude-rule python.lang.security.audit.formatted-sql-query.formatted-sql-query
+          --exclude-rule python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+          --error
+
+  detect-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install --quiet detect-secrets==1.5.0
+      - run: detect-secrets scan --baseline .secrets.baseline

@@ -185,6 +185,11 @@ Implementation notes that save the next person a day:
   that state and writes one audit line before running anything. The MCP
   surface binds the identity on every tool call and performs the same reset
   when the owner changes on a reused connection.
+- **The binding is person + role, not person alone.** Keyed on `sub` only,
+  the same user returning under a narrower role kept every `_r_<n>` computed
+  under the wider policy. Both surfaces now also reset when the role changes
+  (audited `stage=session`); the person stays the handle owner and the
+  audit `user_sub` chain.
 
 ## Why the governance layer is a SQL rewrite
 
@@ -345,6 +350,14 @@ caller JWT ──▶ claims → persona data access role
   shipped filters must actually discriminate; and a **negative control** —
   the overlay disabled on the agent side only — must go red (it does, by 1.2
   million rows on the restricted persona).
+- **Reproducible as one file and one command.** `infra/lakeformation.yaml`
+  declares the governed tables (where each lives, through the federated
+  `s3tablescatalog`), the session tag, and per persona its data access role
+  and its data cells filter per table; `scripts/setup_lakeformation.py`
+  converges the account to it — dry-run by default, `--apply` to change
+  anything, additive unless `--prune` — and prints the `LF_GOVERNANCE` value
+  the runtime needs. Editing a row filter there and re-running the script is
+  how policy changes.
 - **Deployment tiers**: no Lake Formation → the env policy is the sole
   authority; Lake Formation present → Lake Formation authority + in-process
   enforcement; a regulator requires a trusted engine → that table never
@@ -489,7 +502,19 @@ at seven hundred.
   doc ↔ card ↔ engine offline in the unit suite and live against the real
   engine (`scripts/reconcile.py`); the first live run found that the cloud-ops
   sources needed their own probe partition, which is why a source may name
-  one (`probe`) instead of relying on the global knob.
+  one (`probe`) instead of relying on the global knob. The cards themselves
+  are a Git asset (`semantic/cards/<scenario>.yaml`, loaded fail-closed by
+  `storage/card_assets.py` into the same `TableCard` dataclass), like the
+  metric definitions.
+- **Table wiki and business glossary.** Knowledge that does not fit a card's
+  fields — how a table is usually joined, what a term means in this business
+  — lives in `semantic/wiki/<table>.md` and `semantic/glossary.yaml`
+  (`context/wiki.py`). A wiki page rides along with its table's card in
+  `search_schema` hits and the L0 block, and a glossary term is shown only
+  when the role may read a table it refers to; visibility follows the card
+  (a table outside the role's policy contributes nothing) and CLS-denied
+  column names are masked in the text. The cost is measured: +8–16 % on the
+  full L0 block.
 - Freshness is session-scoped by design: a dropped table errors on use and
   the next search rebuilds the index. No external cache — production data
   agents that added one measured thousands of lookups per search and
@@ -618,7 +643,7 @@ and are mirrored in `.env.example`.
 | `UPGRADE_ADVICE_PATHS` | 120 | declared single-node envelope in expanded partition paths; past it the statement is refused with a route (0 = off) |
 | `LF_GOVERNANCE`, `LF_POLICY_TTL_S` | unset / 900 | Lake Formation as the policy authority (persona → data access role, governed tables); unset = env policy only |
 | `CLAIM_TENANT_PATH`, `CLAIM_ROLE_PATH`, `CLAIM_SUB_PATH` | Cognito shape | where an IdP's token carries tenant / role / subject |
-| `SEMANTIC_ASSETS_DIR`, `VERIFIED_QUERIES_DIR` | `semantic/`, `verified_queries/` | where the Git assets of the semantic layer are loaded from |
+| `SEMANTIC_ASSETS_DIR`, `VERIFIED_QUERIES_DIR` | `semantic/`, `verified_queries/` | where the Git assets of the semantic layer (metrics, cards, wiki, glossary; verified queries) are loaded from |
 | `SESSION_MAX_STATEMENTS`, `SESSION_MAX_EXPANDED_PATHS`, `SESSION_MAX_ENGINE_MS` | 0 (off) | session budget, enforced in the Cost stage as a distinct `budget` refusal |
 | `RESULT_MARK_STRINGS` | 1 | wrap text cells the model reads as `data:«…»` |
 | `DATAMAP_PROBE_REMOTE` | 1 | 0 skips the bounded remote DESCRIBE of raw sources (offline runs) |
@@ -734,8 +759,15 @@ in-process.
 | persona | may this role use this source tool | a dual allowlist: Cedar policy on the Gateway (the platform-owned enforcement point, per-caller quota) AND a `sources` field per persona in `GOVERNANCE_POLICIES` — either layer missing means refusal |
 | user | which rows may this person see at the source | decided by the target's credential type: on-behalf-of / 3LO / IAM Identity Center trusted identity propagation for sources that know users; a service identity (2LO) is an explicit, audited degradation (`degraded=2lo`), never the default |
 
-The agent half of the persona level ships here; the Cedar policy is platform
-configuration, and the agent side stays fail-closed without it.
+Both halves of the persona level ship. Without a policy engine on the
+Gateway, a valid token that bypassed the agent could call any target
+directly (measured: a persona with no sources screened an address through
+the Gateway); `governance/cedar.py` therefore renders one `permit` per tool
+from the SAME persona `sources` the agent enforces — one definition, two
+enforcement points — and `scripts/setup_gateway_policy.py` converges the
+policy engine, its role permission, the policies (validated with
+`FAIL_ON_ANY_FINDINGS`) and the attachment, in `LOG_ONLY` or `ENFORCE` mode.
+The agent side stays fail-closed even where the Cedar policy is absent.
 `sources: ["<gateway-target>", …]` names Gateway targets (`labels-api` covers
 every operation that target exposes) with the table policy's semantics:
 deny-by-default for a restricted persona without the field, exactly the list
@@ -949,6 +981,12 @@ or source IPs.
 
 ## Evaluation: a black box with a glass pipeline
 
+The release gate is `.github/workflows/ci.yml`: lint, the unit suite (the
+governance coverage matrix runs inside it), bandit, semgrep and
+detect-secrets, all blocking; `asset-gate.yml` re-runs the asset shards when
+`semantic/**` or `verified_queries/**` changes. The agent eval below needs
+Bedrock and a deployed runtime, so it runs against a deployment, not in CI.
+
 `tests/eval/cases/*.yaml` + `scripts/run_eval.py` run against real Bedrock
 (manually or nightly, not as a CI gate). A case names a `category`, a
 `persona`, one `prompt` or several `prompts` (multi-turn, optionally with a
@@ -1022,6 +1060,22 @@ written by hand, and the matrix runs in the unit suite
 (`tests/unit/test_gov_matrix.py`); `scripts/run_matrix.py` renders
 [governance-matrix.md](governance-matrix.md).
 
+### Online half: feedback bucketed by answer source
+
+Offline accuracy is bucketed by provenance tier (`verified` / `metric` /
+`free_sql`, plus refusals and text-only answers) in the eval report; the
+online half uses the same buckets. A 👍/👎 on an answer (the UI, or
+`{"feedback": …}` on the HTTP entrypoint) names the turn it judges, and
+`data_agent/feedback.py` writes one EMF line carrying that turn's tier, so the
+dashboard shows the down-vote rate by answer source. Corrections return as
+reviewed changes, never as edits: `scripts/harvest_corrections.py` turns the
+period's down-votes into a review bundle with draft regression cases
+(`corrections-review/`, git-ignored) and never touches an asset.
+
+The gate's trace event carries the statement up to the audit cap (2000
+characters, truncation flagged): at the earlier 400-character cut, the eval's
+"probe must not execute" regexes read a truncated statement.
+
 ## Measured behavior (reproducible with the included scripts)
 
 - **In-process vs. query service**: [ab-results.md](ab-results.md) — the same
@@ -1045,11 +1099,11 @@ written by hand, and the matrix runs in the unit suite
   directory, a full-day sort completes in seconds rather than failing.
 - **Concurrency isolation**: `scripts/concurrent_invoke.sh N` runs N parallel
   sessions with independent latencies — no queue, no cross-talk.
-- **Evaluation**: 55/55 cases across nine categories on the reference
-  deployment ([eval-results-2026-10-19.md](eval-results-2026-10-19.md); the
+- **Evaluation**: 57/57 cases across nine categories on the reference
+  deployment ([eval-results-2026-10-29.md](eval-results-2026-10-29.md); the
   earlier 50/52 run with per-case traces is [eval-results.md](eval-results.md)).
   Lake Formation idempotence 20/20 with a negative control. Governance
-  coverage matrix 196/196; 718 unit tests, no network.
+  coverage matrix 196/196; 772 unit tests, no network.
 
 ## DuckLake catalog forms
 

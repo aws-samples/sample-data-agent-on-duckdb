@@ -85,6 +85,15 @@ class Stage(Protocol):
     def run(self, st: Statement) -> Iterator[dict]: ...
 
 
+def _gate_sql(sql: str) -> dict:
+    """The statement as the gate event carries it: the same cap as the audit
+    line, with truncation made explicit. The eval asserts on this text — a
+    probe or a `_r_<n>` read-back past a shorter cut was invisible (measured
+    2026-10-29: a JOIN on `_r_2` at char 708 was judged absent at a 400 cut)."""
+    cap = audit.SQL_MAX
+    return {"sql": sql[:cap], **({"sql_truncated": True} if len(sql) > cap else {})}
+
+
 class Gate:
     """Read-only gate (compute) + the framework's reserved result names (context)."""
 
@@ -96,16 +105,16 @@ class Gate:
             misuse = results.reserved_name_misuse(gate.normalize(st.sql))
             err = f"ERROR: {misuse}" if misuse else None
         if err:
-            yield {"phase": "gate", "allowed": False, "sql": st.sql[:400]}
+            yield {"phase": "gate", "allowed": False, **_gate_sql(st.sql)}
             raise Rejected(err, audit_stage="gate", text=err)
         # A `_r_<n>` named here must be a handle THIS session holds
         # (minted under this owner, not dropped) — refused before the engine
         bad = results.STORE.check_refs(st.sql)
         if bad:
-            yield {"phase": "gate", "allowed": False, "sql": st.sql[:400], "handle": bad}
+            yield {"phase": "gate", "allowed": False, **_gate_sql(st.sql), "handle": bad}
             raise Rejected(bad, audit_stage="handle", text=f"ERROR: {bad}")
         st.query_shaped = gate.query_shaped(st.sql)
-        yield {"phase": "gate", "allowed": True, "sql": st.sql[:400]}
+        yield {"phase": "gate", "allowed": True, **_gate_sql(st.sql)}
 
 
 class Semantic:

@@ -595,6 +595,60 @@ class DataAgentStack(Stack):
             ),
         )
 
+        # The +1 layer's online half: accuracy watched per ANSWER SOURCE.
+        # Feedback lines (data_agent/feedback.py) carry the tier of the turn they
+        # rate; the down-rate per tier is metric math on two EMF counters, so a
+        # decaying bucket shows as a rising line, not an anecdote.
+        tiers = ("verified", "metric", "free_sql", "none")
+        rate_metrics = {}
+        for i, tier in enumerate(tiers):
+            rate_metrics[f"n{i}"] = metric("FeedbackNegative", dimensions_map={"Provenance": tier})
+            rate_metrics[f"t{i}"] = metric("Feedback", dimensions_map={"Provenance": tier})
+        down_rates = [
+            cloudwatch.MathExpression(
+                expression=f"IF(t{i} > 0, 100 * n{i} / t{i}, 0)",
+                using_metrics={f"n{i}": rate_metrics[f"n{i}"], f"t{i}": rate_metrics[f"t{i}"]},
+                label=f"{tier} down-rate %",
+                period=Duration.hours(1),
+            )
+            for i, tier in enumerate(tiers)
+        ]
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="Online accuracy: down-vote rate by answer source (%)",
+                left=down_rates,
+                width=12,
+            ),
+            cloudwatch.LogQueryWidget(
+                title="Statements and feedback by provenance tier",
+                log_group_names=[log_group_name],
+                query_lines=[
+                    "fields coalesce(audit.provenance, 'n/a') as tier, audit.stage as stage,"
+                    " audit.verdict as verdict",
+                    "filter ispresent(audit.provenance)",
+                    "stats sum(stage != 'feedback' and isblank(verdict)) as statements,"
+                    " sum(verdict = 'up') as up, sum(verdict = 'down') as down by tier",
+                ],
+                width=12,
+                height=6,
+            ),
+        )
+        dashboard.add_widgets(
+            cloudwatch.LogQueryWidget(
+                title="Latest corrections awaiting review (scripts/harvest_corrections.py)",
+                log_group_names=[log_group_name],
+                query_lines=[
+                    "fields @timestamp, audit.provenance as tier, audit.principal as role,"
+                    " audit.question as question, audit.correction as correction",
+                    "filter audit.stage = 'feedback' and audit.verdict = 'down'",
+                    "sort @timestamp desc",
+                    "limit 20",
+                ],
+                width=24,
+                height=6,
+            ),
+        )
+
         # --- Outputs consumed by agentcore configure / env -----------------
         CfnOutput(
             self,

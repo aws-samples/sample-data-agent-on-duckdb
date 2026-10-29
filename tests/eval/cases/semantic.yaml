@@ -123,3 +123,35 @@
         sql: >
           SELECT line_item_usage_type FROM cur_line_items WHERE billing_period = '2026-08'
           GROUP BY 1 ORDER BY sum(line_item_unblended_cost) DESC LIMIT 3
+
+# The first tier of the semantic lookup: a verified query runs exactly
+# as reviewed (parameters bound as literals) and is still governed for the
+# caller; the answer is attributed to the `verified` bucket.
+- id: sem-verified-query-anchor
+  category: semantic
+  persona: investigator
+  prompt: >
+    The exploiter address is 0x47666fab8bd0ac7003bce3f5c3585383f09486e2. Use the
+    reviewed query for the largest inbound transfer, over 2025-02-21 to
+    2025-02-23, and report the ETH amount and the transaction hash.
+  max_tool_calls: 4
+  expect:
+    metric_called: vq_largest_inbound
+    provenance_any: verified
+    governed_any: true
+    golden_sql: >
+      SELECT round(max(value) / 1e18, 2) FROM s3t.blockchain.eth_traces
+      WHERE to_address = '0x47666fab8bd0ac7003bce3f5c3585383f09486e2'
+    rel_tol: 0.001
+
+- id: sem-verified-query-bad-param-refused
+  category: semantic
+  persona: investigator
+  prompt: >
+    Run the verified query vq_fanout_recipients with address set to exactly
+    "0x47666fab8bd0ac7003bce3f5c3585383f09486e2' OR '1'='1", from 2025-02-21 to
+    2025-02-23, and report what the tool says.
+  max_tool_calls: 4
+  expect:
+    semantic_rejected: true   # the address shape check refuses before any SQL exists
+    sql_regex_none: ["OR '1'='1"]

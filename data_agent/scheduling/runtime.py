@@ -70,22 +70,36 @@ _session: dict = {"owner": None}
 
 
 def _owner_key(claims: dict | None, role: str) -> str:
-    """Stable identity for the session: the IdP `sub` when present (survives a
-    role change for the same user), else the resolved tenant:role."""
+    """Stable identity of the PERSON: the IdP `sub` when present, else the
+    resolved tenant:role. Handles and the audit's `user_sub` chain use it, so
+    one user's audit trail stays joinable across a role change."""
     if claims and claims.get("sub"):
         return f"sub:{claims['sub']}"
     return f"role:{role}"
 
 
-def _bind_session(owner: str) -> bool:
-    """Record the session owner; return True when it CHANGED from a previously
-    bound owner (→ the caller reused a session id across identities: reset)."""
+def _binding_key(owner: str, role: str) -> str:
+    """What the session's retained state is valid FOR: the person AND the role.
+
+    Results, the L0 map, the conversation and the Lake Formation overlay were
+    all produced under one role's policy. When the same user comes back with a
+    different role (re-provisioned, demoted), everything materialized under
+    the old role must go — otherwise a demoted user keeps reading `_r_<n>`
+    tables computed with the wider policy (measured gap, 2026-10-29)."""
+    return f"{owner}|role:{role}"
+
+
+def _bind_session(owner: str, role: str | None = None) -> bool:
+    """Record the session binding; return True when it CHANGED from a
+    previously bound one (another identity, or the same identity under another
+    role, presented this session id → reset)."""
     from data_agent.context import results
 
+    key = _binding_key(owner, role) if role is not None else owner
     prev = _session["owner"]
-    _session["owner"] = owner
+    _session["owner"] = key
     results.STORE.bind(owner)  # handles minted from now on belong to this owner
-    return prev is not None and prev != owner
+    return prev is not None and prev != key
 
 
 def _reset_session_state(agent, conversation_manager) -> None:
@@ -193,14 +207,14 @@ async def stream(agent, conversation_manager, payload, context=None):
     # Bind the session to its owner; if a different identity reused this
     # session id, drop all state retained under the previous principal before
     # doing anything else (T003).
-    if _bind_session(_owner_key(claims, role)):
+    if _bind_session(_owner_key(claims, role), role):
         _reset_session_state(agent, conversation_manager)
         audit.record(
             principal=role,
-            sql="(session rebind: principal changed on a reused session id)",
+            sql="(session rebind: principal or role changed on a reused session id)",
             outcome="rejected",
             stage="session",
-            reason="session state reset — a different identity presented this session id",
+            reason="session state reset — a different identity or role presented this session id",
         )
     if governance.is_denied_all():
         # No usable identity → the deny-all floor. Refuse before the model runs:
@@ -216,13 +230,33 @@ async def stream(agent, conversation_manager, payload, context=None):
         )
         yield envelope("result", principal=role, trace=[], denied=True)
         return
+    if "feedback" in payload:
+        # A verdict on an earlier answer of THIS session (same owner and
+        # role — the binding above reset anything else), recorded as one audit
+        # line bucketed by that turn's provenance tier. Never reaches the model.
+        from data_agent import feedback
+        from data_agent.context import results
+
+        yield envelope("start", principal=role)
+        try:
+            summary = feedback.record(
+                payload["feedback"], principal=role, user_sub=results.STORE.owner_id
+            )
+        except feedback.FeedbackError as e:
+            yield envelope("text", text=f"Feedback not recorded: {e}")
+            yield envelope("result", principal=role, trace=[], feedback=None)
+            return
+        yield envelope("text", text=f"Thanks — feedback recorded ({summary['provenance']}).")
+        yield envelope("result", principal=role, trace=[], feedback=summary)
+        return
     user_msg = payload.get(
         "prompt", "Trace the flow of funds for the incident under investigation."
     )
 
     trace: list = []
     usage = new_usage()
-    yield envelope("start", principal=governance.active_role())
+    turn_id = audit.begin_turn(user_msg)  # feedback names this turn
+    yield envelope("start", principal=governance.active_role(), turn_id=turn_id)
     await asyncio.to_thread(prompt.ensure, agent)  # L0 table map from the engine catalog
     async for ev in agent.stream_async(user_msg):
         if not isinstance(ev, dict):
@@ -235,5 +269,6 @@ async def stream(agent, conversation_manager, payload, context=None):
         principal=governance.active_role(),
         trace=trace,
         session=audit.session_counters(compressed=conversation_manager.stubbed),
-        usage=usage,  # the eval suite's per-case input-token column
+        usage=usage,  # The eval suite's per-case input-token column
+        turn_id=turn_id,
     )

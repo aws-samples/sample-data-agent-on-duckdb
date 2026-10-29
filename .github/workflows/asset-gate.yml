@@ -1,0 +1,39 @@
+# Asset regression gate: metric definitions, verified queries, table cards
+# and the table wiki are customer-owned Git assets (semantic/**,
+# verified_queries/**). A change to them must pass the targeted shards —
+# loading is fail-closed, definitions reconcile against the table cards and
+# the engine's columns, the compiler and the governance matrix still hold —
+# before it can merge. The full `ci` workflow also covers these; this one
+# makes the gate visible per asset change. The semantic EVAL shard needs
+# Bedrock + a deployed runtime, so it runs against your deployment (scripts/run_eval.py).
+name: asset-gate
+
+on:
+  pull_request:
+    paths:
+      - "semantic/**"
+      - "verified_queries/**"
+  push:
+    branches: [main]
+    paths:
+      - "semantic/**"
+      - "verified_queries/**"
+
+permissions:
+  contents: read
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install --quiet -r requirements.txt pytest PyYAML
+      - run: python scripts/install_extensions.py
+      - run: >
+          python -m pytest -q
+          tests/unit/test_assets.py tests/unit/test_semantic.py tests/unit/test_vq.py tests/unit/test_card_assets.py tests/unit/test_wiki.py
+          tests/unit/test_reconcile.py tests/unit/test_gov_matrix.py
