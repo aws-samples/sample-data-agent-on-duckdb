@@ -757,7 +757,7 @@ in-process.
 |---|---|---|
 | agent | which sources can this deployment reach at all | the Gateway's target list + one least-privilege credential per target; fixed at deploy time |
 | persona | may this role use this source tool | a dual allowlist: Cedar policy on the Gateway (the platform-owned enforcement point, per-caller quota) AND a `sources` field per persona in `GOVERNANCE_POLICIES` — either layer missing means refusal |
-| user | which rows may this person see at the source | decided by the target's credential type: on-behalf-of / 3LO / IAM Identity Center trusted identity propagation for sources that know users; a service identity (2LO) is an explicit, audited degradation (`degraded=2lo`), never the default |
+| user | which rows may this person see at the source | decided by the target's credential type: OAuth 3LO or on-behalf-of token exchange (the Gateway's two native per-user credential types) for sources that know users — IAM Identity Center trusted identity propagation is not a Gateway credential type and applies only where the source supports it and the target implements it (not deployed here); a service identity (2LO) is an explicit, audited degradation (`degraded=2lo`), never the default |
 
 Both halves of the persona level ship. Without a policy engine on the
 Gateway, a valid token that bypassed the agent could call any target

@@ -14,10 +14,12 @@ tool set (the Data API binds every parameter), each query aggregate-only:
   cost_total(billing_period)               → one row: rows + total
   cost_by_usage_type(billing_period, service, limit)
 
-Per-user filtering at the source needs IAM Identity Center trusted identity
-propagation (not deployed here), so the audit line marks results from this tool
-`degraded=2lo`: the warehouse saw a service identity, and the agent applies the
-caller's filter on the landed table afterwards.
+Per-user filtering at the source would need IAM Identity Center trusted
+identity propagation, supported by the warehouse and implemented in this target
+(not deployed here), so the audit line marks results from this tool
+`degraded=2lo`: the warehouse saw a service identity. Nothing re-filters the
+landed rows, so this tool may only serve data every role allowed to call it may
+see.
 """
 
 from __future__ import annotations
