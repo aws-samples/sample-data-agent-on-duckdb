@@ -159,12 +159,19 @@ def test_nothing_left_to_stub_falls_back_to_window_trim():
 
 
 def test_hook_records_the_measurement_and_triggers_at_threshold():
+    # the fake event carries every field the real BeforeModelCallEvent does: newer
+    # Strands reads `invocation_context` inside a best-effort try/except, so a
+    # missing attribute silently skips compression instead of failing loudly
     msgs = _conversation(n_results=4)
     cm = ResultStubConversationManager()
     agent = _agent(msgs)
-    cm._on_before_model_call_threshold(SimpleNamespace(projected_input_tokens=100_000, agent=agent))
+    cm._on_before_model_call_threshold(
+        SimpleNamespace(projected_input_tokens=100_000, agent=agent, invocation_context=None)
+    )
     assert cm._projected == 100_000 and cm.stubbed == 0  # 50 % < 60 %: untouched
-    cm._on_before_model_call_threshold(SimpleNamespace(projected_input_tokens=125_000, agent=agent))
+    cm._on_before_model_call_threshold(
+        SimpleNamespace(projected_input_tokens=125_000, agent=agent, invocation_context=None)
+    )
     assert cm.stubbed >= 1  # 62.5 % ≥ 60 %: compressed
 
 
